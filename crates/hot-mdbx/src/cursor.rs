@@ -5,7 +5,7 @@ use signet_hot::{
     MAX_FIXED_VAL_SIZE, MAX_KEY_SIZE,
     model::{DualKeyTraverse, KvTraverse, KvTraverseMut, RawDualKeyValue, RawKeyValue, RawValue},
 };
-use signet_libmdbx::{RO, RW, TransactionKind};
+use signet_libmdbx::{RO, RW, TransactionKind, tx::PtrSyncInner};
 use std::{
     borrow::Cow,
     ops::{Deref, DerefMut},
@@ -20,7 +20,7 @@ pub type CursorRW<'a> = Cursor<'a, RW>;
 /// Cursor wrapper to access KV items.
 pub struct Cursor<'a, K: TransactionKind> {
     /// Inner `libmdbx` cursor.
-    pub(crate) inner: signet_libmdbx::Cursor<'a, K>,
+    pub(crate) inner: signet_libmdbx::Cursor<'a, K, PtrSyncInner<K>>,
 
     /// Fixed size info for this table.
     fsi: FixedSizeInfo,
@@ -41,7 +41,7 @@ impl<K: TransactionKind + std::fmt::Debug> std::fmt::Debug for Cursor<'_, K> {
 }
 
 impl<'a, K: TransactionKind> Deref for Cursor<'a, K> {
-    type Target = signet_libmdbx::Cursor<'a, K>;
+    type Target = signet_libmdbx::Cursor<'a, K, PtrSyncInner<K>>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -56,7 +56,10 @@ impl<'a> DerefMut for Cursor<'a, RW> {
 
 impl<'a, K: TransactionKind> Cursor<'a, K> {
     /// Creates a new `Cursor` wrapping the given `libmdbx` cursor.
-    pub const fn new(inner: signet_libmdbx::Cursor<'a, K>, fsi: FixedSizeInfo) -> Self {
+    pub const fn new(
+        inner: signet_libmdbx::Cursor<'a, K, PtrSyncInner<K>>,
+        fsi: FixedSizeInfo,
+    ) -> Self {
         Self { inner, fsi, buf: [0u8; MAX_KEY_SIZE + MAX_FIXED_VAL_SIZE] }
     }
 

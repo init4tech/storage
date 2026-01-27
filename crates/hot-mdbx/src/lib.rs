@@ -34,8 +34,9 @@
 
 use parking_lot::RwLock;
 use signet_libmdbx::{
-    Environment, EnvironmentFlags, Geometry, HandleSlowReadersReturnCode,
-    MaxReadTransactionDuration, Mode, PageSize, RO, RW, SyncMode, ffi,
+    Environment, EnvironmentFlags, Geometry, MaxReadTransactionDuration, Mode, RO, RW, SyncMode,
+    ffi,
+    sys::{HandleSlowReadersReturnCode, PageSize},
 };
 use std::{
     collections::HashMap,

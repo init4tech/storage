@@ -6,7 +6,7 @@ use signet_hot::{
     model::{DualTableTraverse, HotKvRead, HotKvWrite},
     tables::{DualKey, SingleKey, Table},
 };
-use signet_libmdbx::{Database, DatabaseFlags, RW, Transaction, TransactionKind, WriteFlags};
+use signet_libmdbx::{Database, DatabaseFlags, RW, TransactionKind, TxSync, WriteFlags};
 use std::borrow::Cow;
 
 const TX_BUFFER_SIZE: usize = MAX_KEY_SIZE + MAX_FIXED_VAL_SIZE;
@@ -15,7 +15,7 @@ const TX_BUFFER_SIZE: usize = MAX_KEY_SIZE + MAX_FIXED_VAL_SIZE;
 #[derive(Debug)]
 pub struct Tx<K: TransactionKind> {
     /// Libmdbx-sys transaction.
-    pub inner: Transaction<K>,
+    pub inner: TxSync<K>,
 
     /// Cached FixedSizeInfo for tables.
     fsi_cache: FsiCache,
@@ -24,7 +24,7 @@ pub struct Tx<K: TransactionKind> {
 impl<K: TransactionKind> Tx<K> {
     /// Creates new `Tx` object with a `RO` or `RW` transaction and optionally enables metrics.
     #[inline]
-    pub(crate) const fn new(inner: Transaction<K>, fsi_cache: FsiCache) -> Self {
+    pub(crate) fn new(inner: TxSync<K>, fsi_cache: FsiCache) -> Self {
         Self { inner, fsi_cache }
     }
 
@@ -111,7 +111,7 @@ impl Tx<RW> {
         let mut value_buf = [0u8; 8];
         fsi.encode_value_to(&mut value_buf.as_mut_slice());
 
-        self.inner.put(db.dbi(), key_buf, value_buf, WriteFlags::UPSERT)?;
+        self.inner.put(db, key_buf, value_buf, WriteFlags::UPSERT)?;
         self.fsi_cache.write().insert(table, fsi);
 
         Ok(())
@@ -176,9 +176,9 @@ impl HotKvWrite for Tx<RW> {
         key: &[u8],
         value: &[u8],
     ) -> Result<(), Self::Error> {
-        let dbi = self.get_dbi_raw(table)?;
+        let db = self.get_db(Some(table))?;
 
-        self.inner.put(dbi, key, value, WriteFlags::UPSERT).map(|_| ()).map_err(MdbxError::Mdbx)
+        self.inner.put(db, key, value, WriteFlags::UPSERT).map_err(MdbxError::Mdbx)
     }
 
     fn queue_raw_put_dual(
@@ -190,7 +190,6 @@ impl HotKvWrite for Tx<RW> {
     ) -> Result<(), Self::Error> {
         let db = self.get_db(Some(table))?;
         let fsi = self.get_fsi(table)?;
-        let dbi = db.dbi();
 
         // For DUPSORT tables, we must delete any existing entry with the same
         // (key1, key2) before inserting, because MDBX stores key2 as part of
@@ -233,8 +232,7 @@ impl HotKvWrite for Tx<RW> {
             combined.extend_from_slice(value);
             return self
                 .inner
-                .put(dbi, key1, &combined, WriteFlags::UPSERT)
-                .map(|_| ())
+                .put(db, key1, &combined, WriteFlags::UPSERT)
                 .map_err(MdbxError::Mdbx);
         } else {
             // Use the scratch buffer
@@ -242,15 +240,15 @@ impl HotKvWrite for Tx<RW> {
             let buf = &mut buffer[..key2.len() + value.len()];
             buf[..key2.len()].copy_from_slice(key2);
             buf[key2.len()..].copy_from_slice(value);
-            self.inner.put(dbi, key1, buf, WriteFlags::UPSERT)?;
+            self.inner.put(db, key1, buf, WriteFlags::UPSERT)?;
         }
 
         Ok(())
     }
 
     fn queue_raw_delete(&self, table: &'static str, key: &[u8]) -> Result<(), Self::Error> {
-        let dbi = self.get_dbi_raw(table)?;
-        self.inner.del(dbi, key, None).map(|_| ()).map_err(MdbxError::Mdbx)
+        let db = self.get_db(Some(table))?;
+        self.inner.del(db, key, None).map(|_| ()).map_err(MdbxError::Mdbx)
     }
 
     fn queue_raw_delete_dual(
@@ -259,7 +257,7 @@ impl HotKvWrite for Tx<RW> {
         key1: &[u8],
         key2: &[u8],
     ) -> Result<(), Self::Error> {
-        let dbi = self.get_dbi_raw(table)?;
+        let db = self.get_db(Some(table))?;
         let fsi = self.get_fsi(table)?;
 
         // For DUPSORT tables, the "value" is key2 concatenated with the actual
@@ -272,15 +270,15 @@ impl HotKvWrite for Tx<RW> {
             buffer[key2.len()..total_size].fill(0);
             let k2 = &buffer[..total_size];
 
-            self.inner.del(dbi, key1, Some(k2)).map(|_| ()).map_err(MdbxError::Mdbx)
+            self.inner.del(db, key1, Some(k2)).map(|_| ()).map_err(MdbxError::Mdbx)
         } else {
-            self.inner.del(dbi, key1, Some(key2)).map(|_| ()).map_err(MdbxError::Mdbx)
+            self.inner.del(db, key1, Some(key2)).map(|_| ()).map_err(MdbxError::Mdbx)
         }
     }
 
     fn queue_raw_clear(&self, table: &'static str) -> Result<(), Self::Error> {
-        let dbi = self.get_dbi_raw(table)?;
-        self.inner.clear_db(dbi).map(|_| ()).map_err(MdbxError::Mdbx)
+        let db = self.get_db(Some(table))?;
+        self.inner.clear_db(db).map_err(MdbxError::Mdbx)
     }
 
     fn queue_raw_create(
@@ -319,13 +317,13 @@ impl HotKvWrite for Tx<RW> {
     }
 
     fn queue_put<T: SingleKey>(&self, key: &T::Key, value: &T::Value) -> Result<(), Self::Error> {
-        let dbi = self.get_dbi::<T>()?;
+        let db = self.get_db(Some(T::NAME))?;
         let mut key_buf = [0u8; MAX_KEY_SIZE];
         let key_bytes = key.encode_key(&mut key_buf);
 
         self.inner
             .with_reservation(
-                dbi,
+                db,
                 key_bytes,
                 value.encoded_size(),
                 WriteFlags::UPSERT,
