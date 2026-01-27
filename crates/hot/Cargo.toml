@@ -1,0 +1,32 @@
+[package]
+name = "signet-hot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+signet-storage-types.workspace = true
+
+trevm.workspace = true
+
+alloy.workspace = true
+
+
+auto_impl.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+
+[features]
+default = []
+in-memory = []
+test-utils = ["in-memory"]
+
+[dependencies.tempfile]
+workspace = true
+optional = true

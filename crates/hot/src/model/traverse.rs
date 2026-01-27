@@ -1,0 +1,731 @@
+//! Cursor traversal traits and typed wrappers for database navigation.
+
+use crate::{
+    model::{DualKeyValue, HotKvReadError, KeyValue, RawDualKeyValue, RawKeyValue, RawValue},
+    ser::{KeySer, MAX_KEY_SIZE},
+    tables::{DualKey, SingleKey},
+};
+use std::ops::Range;
+
+/// Trait for traversing key-value pairs in the database.
+pub trait KvTraverse<E: HotKvReadError> {
+    /// Set position to the first key-value pair in the database, and return
+    /// the KV pair.
+    fn first<'a>(&'a mut self) -> Result<Option<RawKeyValue<'a>>, E>;
+
+    /// Set position to the last key-value pair in the database, and return the
+    /// KV pair.
+    fn last<'a>(&'a mut self) -> Result<Option<RawKeyValue<'a>>, E>;
+
+    /// Set the cursor to specific key in the database, and return the EXACT KV
+    /// pair if it exists.
+    fn exact<'a>(&'a mut self, key: &[u8]) -> Result<Option<RawValue<'a>>, E>;
+
+    /// Seek to the next key-value pair AT OR ABOVE the specified key in the
+    /// database, and return that KV pair.
+    fn lower_bound<'a>(&'a mut self, key: &[u8]) -> Result<Option<RawKeyValue<'a>>, E>;
+
+    /// Get the next key-value pair in the database, and advance the cursor.
+    ///
+    /// Returning `Ok(None)` indicates the cursor is past the end of the
+    /// database.
+    fn read_next<'a>(&'a mut self) -> Result<Option<RawKeyValue<'a>>, E>;
+
+    /// Get the previous key-value pair in the database, and move the cursor.
+    ///
+    /// Returning `Ok(None)` indicates the cursor is before the start of the
+    /// database.
+    fn read_prev<'a>(&'a mut self) -> Result<Option<RawKeyValue<'a>>, E>;
+}
+
+/// Trait for traversing key-value pairs in the database with mutation
+/// capabilities.
+pub trait KvTraverseMut<E: HotKvReadError>: KvTraverse<E> {
+    /// Delete the current key-value pair in the database.
+    fn delete_current(&mut self) -> Result<(), E>;
+
+    /// Delete a range of key-value pairs in the database, from `start_key`
+    fn delete_range(&mut self, range: Range<&[u8]>) -> Result<(), E> {
+        let Some((key, _)) = self.lower_bound(range.start)? else {
+            return Ok(());
+        };
+        if key.as_ref() >= range.end {
+            return Ok(());
+        }
+        self.delete_current()?;
+
+        while let Some((key, _)) = self.read_next()? {
+            if key.as_ref() >= range.end {
+                break;
+            }
+            self.delete_current()?;
+        }
+        Ok(())
+    }
+}
+
+/// Trait for traversing dual-keyed key-value pairs in the database.
+pub trait DualKeyTraverse<E: HotKvReadError> {
+    /// Set position to the first key-value pair in the database, and return
+    /// the KV pair with both keys.
+    fn first<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, E>;
+
+    /// Set position to the last key-value pair in the database, and return the
+    /// KV pair with both keys.
+    fn last<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, E>;
+
+    /// Get the next key-value pair in the database, and advance the cursor.
+    ///
+    /// Returning `Ok(None)` indicates the cursor is past the end of the
+    /// database.
+    fn read_next<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, E>;
+
+    /// Get the previous key-value pair in the database, and move the cursor.
+    ///
+    /// Returning `Ok(None)` indicates the cursor is before the start of the
+    /// database.
+    fn read_prev<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, E>;
+
+    /// Set the cursor to specific dual key in the database, and return the
+    /// EXACT KV pair if it exists.
+    ///
+    /// Returning `Ok(None)` indicates the exact dual key does not exist.
+    fn exact_dual<'a>(&'a mut self, key1: &[u8], key2: &[u8]) -> Result<Option<RawValue<'a>>, E>;
+
+    /// Seek to the next key-value pair AT or ABOVE the specified dual key in
+    /// the database, and return that KV pair.
+    ///
+    /// Returning `Ok(None)` indicates there are no more key-value pairs above
+    /// the specified dual key.
+    fn next_dual_above<'a>(
+        &'a mut self,
+        key1: &[u8],
+        key2: &[u8],
+    ) -> Result<Option<RawDualKeyValue<'a>>, E>;
+
+    /// Move the cursor to the next distinct key1, and return the first
+    /// key-value pair with that key1.
+    ///
+    /// Returning `Ok(None)` indicates there are no more distinct key1 values.
+    fn next_k1<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, E>;
+
+    /// Move the cursor to the next distinct key2 for the current key1, and
+    /// return the first key-value pair with that key2.
+    fn next_k2<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, E>;
+
+    /// Seek to the LAST key2 entry for the specified key1.
+    ///
+    /// This positions the cursor at the last duplicate value for the given key1.
+    /// Returning `Ok(None)` indicates the key1 does not exist.
+    fn last_of_k1<'a>(&'a mut self, key1: &[u8]) -> Result<Option<RawDualKeyValue<'a>>, E>;
+
+    /// Move the cursor to the LAST key2 entry of the PREVIOUS key1.
+    ///
+    /// This is the reverse of `next_k1` - it moves backward to the previous distinct
+    /// key1 and positions at its last key2 entry.
+    /// Returning `Ok(None)` indicates there is no previous key1.
+    fn previous_k1<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, E>;
+
+    /// Move the cursor to the PREVIOUS key2 entry for the CURRENT key1.
+    ///
+    /// This is the reverse of `next_k2` - it moves backward within the current key1's
+    /// duplicate values.
+    /// Returning `Ok(None)` indicates there is no previous key2 for this key1.
+    fn previous_k2<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, E>;
+}
+
+// ============================================================================
+// Typed Extension Traits
+// ============================================================================
+
+/// Extension trait for typed table traversal.
+///
+/// This trait provides type-safe access to table entries by encoding keys
+/// and decoding values according to the table's schema.
+pub trait TableTraverse<T: SingleKey, E: HotKvReadError>: KvTraverse<E> {
+    /// Get the first key-value pair in the table.
+    fn first(&mut self) -> Result<Option<KeyValue<T>>, E> {
+        KvTraverse::first(self)?.map(T::decode_kv_tuple).transpose().map_err(Into::into)
+    }
+
+    /// Get the last key-value pair in the table.
+    fn last(&mut self) -> Result<Option<KeyValue<T>>, E> {
+        KvTraverse::last(self)?.map(T::decode_kv_tuple).transpose().map_err(Into::into)
+    }
+
+    /// Set the cursor to a specific key and return the EXACT value if it exists.
+    fn exact(&mut self, key: &T::Key) -> Result<Option<T::Value>, E> {
+        let mut key_buf = [0u8; MAX_KEY_SIZE];
+        let key_bytes = key.encode_key(&mut key_buf);
+
+        KvTraverse::exact(self, key_bytes)?.map(T::decode_value).transpose().map_err(Into::into)
+    }
+
+    /// Seek to the next key-value pair AT OR ABOVE the specified key.
+    fn lower_bound(&mut self, key: &T::Key) -> Result<Option<KeyValue<T>>, E> {
+        let mut key_buf = [0u8; MAX_KEY_SIZE];
+        let key_bytes = key.encode_key(&mut key_buf);
+
+        KvTraverse::lower_bound(self, key_bytes)?
+            .map(T::decode_kv_tuple)
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    /// Get the next key-value pair and advance the cursor.
+    fn read_next(&mut self) -> Result<Option<KeyValue<T>>, E> {
+        KvTraverse::read_next(self)?.map(T::decode_kv_tuple).transpose().map_err(Into::into)
+    }
+
+    /// Get the previous key-value pair and move the cursor backward.
+    fn read_prev(&mut self) -> Result<Option<KeyValue<T>>, E> {
+        KvTraverse::read_prev(self)?.map(T::decode_kv_tuple).transpose().map_err(Into::into)
+    }
+
+    /// Iterate entries starting from a key while a predicate holds.
+    ///
+    /// Positions the cursor at `start_key` and calls `f` for each entry
+    /// while `predicate` returns true.
+    ///
+    /// Returns `Ok(())` on successful completion, or the first error encountered.
+    fn for_each_while<P, F>(&mut self, start_key: &T::Key, predicate: P, mut f: F) -> Result<(), E>
+    where
+        P: Fn(&T::Key, &T::Value) -> bool,
+        F: FnMut(T::Key, T::Value) -> Result<(), E>,
+    {
+        let Some((k, v)) = TableTraverse::lower_bound(self, start_key)? else {
+            return Ok(());
+        };
+
+        if !predicate(&k, &v) {
+            return Ok(());
+        }
+
+        f(k, v)?;
+
+        while let Some((k, v)) = TableTraverse::read_next(self)? {
+            if !predicate(&k, &v) {
+                break;
+            }
+            f(k, v)?;
+        }
+
+        Ok(())
+    }
+
+    /// Collect entries from start_key while predicate holds.
+    ///
+    /// This is useful when you need to process entries after iteration completes
+    /// or when the closure would need to borrow mutably from multiple sources.
+    fn collect_while<P>(&mut self, start_key: &T::Key, predicate: P) -> Result<Vec<KeyValue<T>>, E>
+    where
+        P: Fn(&T::Key, &T::Value) -> bool,
+    {
+        let mut result = Vec::new();
+        self.for_each_while(start_key, predicate, |k, v| {
+            result.push((k, v));
+            Ok(())
+        })?;
+        Ok(result)
+    }
+}
+
+/// Blanket implementation of `TableTraverse` for any cursor that implements `KvTraverse`.
+impl<C, T, E> TableTraverse<T, E> for C
+where
+    C: KvTraverse<E>,
+    T: SingleKey,
+    E: HotKvReadError,
+{
+}
+
+/// Extension trait for typed table traversal with mutation capabilities.
+pub trait TableTraverseMut<T: SingleKey, E: HotKvReadError>: KvTraverseMut<E> {
+    /// Delete the current key-value pair.
+    fn delete_current(&mut self) -> Result<(), E> {
+        KvTraverseMut::delete_current(self)
+    }
+
+    /// Delete a range of key-value pairs.
+    fn delete_range(&mut self, range: Range<T::Key>) -> Result<(), E> {
+        let mut start_key_buf = [0u8; MAX_KEY_SIZE];
+        let mut end_key_buf = [0u8; MAX_KEY_SIZE];
+        let start_key_bytes = range.start.encode_key(&mut start_key_buf);
+        let end_key_bytes = range.end.encode_key(&mut end_key_buf);
+
+        KvTraverseMut::delete_range(self, start_key_bytes..end_key_bytes)
+    }
+}
+
+/// Blanket implementation of [`TableTraverseMut`] for any cursor that implements [`KvTraverseMut`].
+impl<C, T, E> TableTraverseMut<T, E> for C
+where
+    C: KvTraverseMut<E>,
+    T: SingleKey,
+    E: HotKvReadError,
+{
+}
+
+/// A typed cursor wrapper for traversing dual-keyed tables.
+///
+/// This is an extension trait rather than a wrapper struct because MDBX
+/// requires specialized implementations for DUPSORT tables that need access
+/// to the table type `T` to handle fixed-size values correctly.
+pub trait DualTableTraverse<T: DualKey, E: HotKvReadError>: DualKeyTraverse<E> {
+    /// Get the first key-value pair in the table.
+    fn first(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualKeyTraverse::first(self)?.map(T::decode_kkv_tuple).transpose().map_err(Into::into)
+    }
+
+    /// Get the last key-value pair in the table.
+    fn last(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualKeyTraverse::last(self)?.map(T::decode_kkv_tuple).transpose().map_err(Into::into)
+    }
+
+    /// Get the next key-value pair and advance the cursor.
+    fn read_next(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualKeyTraverse::read_next(self)?.map(T::decode_kkv_tuple).transpose().map_err(Into::into)
+    }
+
+    /// Get the previous key-value pair and move the cursor backward.
+    fn read_prev(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualKeyTraverse::read_prev(self)?.map(T::decode_kkv_tuple).transpose().map_err(Into::into)
+    }
+
+    /// Return the EXACT value for the specified dual key if it exists.
+    fn exact_dual(&mut self, key1: &T::Key, key2: &T::Key2) -> Result<Option<T::Value>, E> {
+        let Some((k1, k2, v)) = DualTableTraverse::next_dual_above(self, key1, key2)? else {
+            return Ok(None);
+        };
+
+        if k1 == *key1 && k2 == *key2 { Ok(Some(v)) } else { Ok(None) }
+    }
+
+    /// Seek to the next key-value pair AT or ABOVE the specified dual key.
+    fn next_dual_above(
+        &mut self,
+        key1: &T::Key,
+        key2: &T::Key2,
+    ) -> Result<Option<DualKeyValue<T>>, E>;
+
+    /// Seek to the next distinct key1, and return the first key-value pair with that key1.
+    fn next_k1(&mut self) -> Result<Option<DualKeyValue<T>>, E>;
+
+    /// Seek to the next distinct key2 for the current key1.
+    fn next_k2(&mut self) -> Result<Option<DualKeyValue<T>>, E>;
+
+    /// Seek to the LAST key2 entry for the specified key1.
+    fn last_of_k1(&mut self, key1: &T::Key) -> Result<Option<DualKeyValue<T>>, E>;
+
+    /// Move to the LAST key2 entry of the PREVIOUS key1.
+    fn previous_k1(&mut self) -> Result<Option<DualKeyValue<T>>, E>;
+
+    /// Move to the PREVIOUS key2 entry for the CURRENT key1.
+    fn previous_k2(&mut self) -> Result<Option<DualKeyValue<T>>, E>;
+
+    /// Iterate entries (crossing k1 boundaries) while a predicate holds.
+    ///
+    /// Positions the cursor at `(key1, start_k2)` and calls `f` for each entry
+    /// while `predicate` returns true. Uses `read_next()` to cross k1 boundaries.
+    ///
+    /// Returns `Ok(())` on successful completion, or the first error encountered.
+    fn for_each_while<P, F>(
+        &mut self,
+        key1: &T::Key,
+        start_k2: &T::Key2,
+        predicate: P,
+        mut f: F,
+    ) -> Result<(), E>
+    where
+        P: Fn(&T::Key, &T::Key2, &T::Value) -> bool,
+        F: FnMut(T::Key, T::Key2, T::Value) -> Result<(), E>,
+    {
+        let Some((k1, k2, v)) = DualTableTraverse::next_dual_above(self, key1, start_k2)? else {
+            return Ok(());
+        };
+
+        if !predicate(&k1, &k2, &v) {
+            return Ok(());
+        }
+
+        f(k1, k2, v)?;
+
+        while let Some((k1, k2, v)) = DualTableTraverse::read_next(self)? {
+            if !predicate(&k1, &k2, &v) {
+                break;
+            }
+            f(k1, k2, v)?;
+        }
+
+        Ok(())
+    }
+
+    /// Iterate entries within the same k1 while a predicate holds.
+    ///
+    /// Positions the cursor at `(key1, start_k2)` and calls `f` for each entry
+    /// while `predicate` returns true. Uses `next_k2()` which stays within
+    /// the same k1 value.
+    ///
+    /// Returns `Ok(())` on successful completion, or the first error encountered.
+    fn for_each_while_k2<P, F>(
+        &mut self,
+        key1: &T::Key,
+        start_k2: &T::Key2,
+        predicate: P,
+        f: F,
+    ) -> Result<(), E>
+    where
+        P: Fn(&T::Key, &T::Key2, &T::Value) -> bool,
+        F: FnMut(T::Key, T::Key2, T::Value) -> Result<(), E>,
+    {
+        self.for_each_while(key1, start_k2, |k, k2, v| key1 == k && predicate(k, k2, v), f)
+    }
+
+    /// Iterate all k2 entries for a given k1, starting from `start_k2`.
+    ///
+    /// Calls `f` for each (k1, k2, v) tuple where k1 matches the provided key1
+    /// and k2 >= start_k2. Stops when k1 changes or the table is exhausted.
+    ///
+    /// Returns `Ok(())` on successful completion, or the first error encountered.
+    fn for_each_k2<F>(&mut self, key1: &T::Key, start_k2: &T::Key2, f: F) -> Result<(), E>
+    where
+        T::Key: PartialEq,
+        F: FnMut(T::Key, T::Key2, T::Value) -> Result<(), E>,
+    {
+        self.for_each_while_k2(key1, start_k2, |_, _, _| true, f)
+    }
+}
+
+impl<C, T, E> DualTableTraverse<T, E> for C
+where
+    C: DualKeyTraverse<E>,
+    T: DualKey,
+    E: HotKvReadError,
+{
+    fn next_dual_above(
+        &mut self,
+        key1: &T::Key,
+        key2: &T::Key2,
+    ) -> Result<Option<DualKeyValue<T>>, E> {
+        let mut key1_buf = [0u8; MAX_KEY_SIZE];
+        let mut key2_buf = [0u8; MAX_KEY_SIZE];
+        let key1_bytes = key1.encode_key(&mut key1_buf);
+        let key2_bytes = key2.encode_key(&mut key2_buf);
+
+        DualKeyTraverse::next_dual_above(self, key1_bytes, key2_bytes)?
+            .map(T::decode_kkv_tuple)
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    fn next_k1(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualKeyTraverse::next_k1(self)?.map(T::decode_kkv_tuple).transpose().map_err(Into::into)
+    }
+
+    fn next_k2(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualKeyTraverse::next_k2(self)?.map(T::decode_kkv_tuple).transpose().map_err(Into::into)
+    }
+
+    fn last_of_k1(&mut self, key1: &T::Key) -> Result<Option<DualKeyValue<T>>, E> {
+        let mut key1_buf = [0u8; MAX_KEY_SIZE];
+        let key1_bytes = key1.encode_key(&mut key1_buf);
+
+        DualKeyTraverse::last_of_k1(self, key1_bytes)?
+            .map(T::decode_kkv_tuple)
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    fn previous_k1(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualKeyTraverse::previous_k1(self)?.map(T::decode_kkv_tuple).transpose().map_err(Into::into)
+    }
+
+    fn previous_k2(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualKeyTraverse::previous_k2(self)?.map(T::decode_kkv_tuple).transpose().map_err(Into::into)
+    }
+}
+
+// ============================================================================
+// Wrapper Structs
+// ============================================================================
+
+use core::marker::PhantomData;
+
+/// A wrapper struct for typed table traversal.
+///
+/// This struct wraps a raw cursor and provides type-safe access to table
+/// entries. It implements `TableTraverse<T, E>` by delegating to the inner
+/// cursor.
+#[derive(Debug)]
+pub struct TableCursor<C, T, E> {
+    inner: C,
+    _marker: PhantomData<fn() -> (T, E)>,
+}
+
+impl<C, T, E> TableCursor<C, T, E> {
+    /// Create a new typed table cursor wrapper.
+    pub const fn new(cursor: C) -> Self {
+        Self { inner: cursor, _marker: PhantomData }
+    }
+
+    /// Get a reference to the inner cursor.
+    pub const fn inner(&self) -> &C {
+        &self.inner
+    }
+
+    /// Get a mutable reference to the inner cursor.
+    pub const fn inner_mut(&mut self) -> &mut C {
+        &mut self.inner
+    }
+
+    /// Consume the wrapper and return the inner cursor.
+    pub fn into_inner(self) -> C {
+        self.inner
+    }
+}
+
+impl<C, T, E> TableCursor<C, T, E>
+where
+    C: KvTraverse<E>,
+    T: SingleKey,
+    E: HotKvReadError,
+{
+    /// Get the first key-value pair in the table.
+    pub fn first(&mut self) -> Result<Option<KeyValue<T>>, E> {
+        TableTraverse::<T, E>::first(&mut self.inner)
+    }
+
+    /// Get the last key-value pair in the table.
+    pub fn last(&mut self) -> Result<Option<KeyValue<T>>, E> {
+        TableTraverse::<T, E>::last(&mut self.inner)
+    }
+
+    /// Set the cursor to a specific key and return the EXACT value if it exists.
+    pub fn exact(&mut self, key: &T::Key) -> Result<Option<T::Value>, E> {
+        TableTraverse::<T, E>::exact(&mut self.inner, key)
+    }
+
+    /// Seek to the next key-value pair AT OR ABOVE the specified key.
+    pub fn lower_bound(&mut self, key: &T::Key) -> Result<Option<KeyValue<T>>, E> {
+        TableTraverse::<T, E>::lower_bound(&mut self.inner, key)
+    }
+
+    /// Get the next key-value pair and advance the cursor.
+    pub fn read_next(&mut self) -> Result<Option<KeyValue<T>>, E> {
+        TableTraverse::<T, E>::read_next(&mut self.inner)
+    }
+
+    /// Get the previous key-value pair and move the cursor backward.
+    pub fn read_prev(&mut self) -> Result<Option<KeyValue<T>>, E> {
+        TableTraverse::<T, E>::read_prev(&mut self.inner)
+    }
+
+    /// Iterate entries starting from a key while a predicate holds.
+    ///
+    /// Positions the cursor at `start_key` and calls `f` for each entry
+    /// while `predicate` returns true.
+    pub fn for_each_while<P, F>(&mut self, start_key: &T::Key, predicate: P, f: F) -> Result<(), E>
+    where
+        P: Fn(&T::Key, &T::Value) -> bool,
+        F: FnMut(T::Key, T::Value) -> Result<(), E>,
+    {
+        TableTraverse::<T, E>::for_each_while(&mut self.inner, start_key, predicate, f)
+    }
+
+    /// Collect entries from start_key while predicate holds.
+    pub fn collect_while<P>(
+        &mut self,
+        start_key: &T::Key,
+        predicate: P,
+    ) -> Result<Vec<KeyValue<T>>, E>
+    where
+        P: Fn(&T::Key, &T::Value) -> bool,
+    {
+        TableTraverse::<T, E>::collect_while(&mut self.inner, start_key, predicate)
+    }
+}
+
+impl<C, T, E> TableCursor<C, T, E>
+where
+    C: KvTraverseMut<E>,
+    T: SingleKey,
+    E: HotKvReadError,
+{
+    /// Delete the current key-value pair.
+    pub fn delete_current(&mut self) -> Result<(), E> {
+        TableTraverseMut::<T, E>::delete_current(&mut self.inner)
+    }
+
+    /// Delete a range of key-value pairs.
+    pub fn delete_range(&mut self, range: Range<T::Key>) -> Result<(), E> {
+        TableTraverseMut::<T, E>::delete_range(&mut self.inner, range)
+    }
+}
+
+/// A wrapper struct for typed dual-keyed table traversal.
+///
+/// This struct wraps a raw cursor and provides type-safe access to dual-keyed
+/// table entries. It delegates to the `DualTableTraverse<T, E>` trait
+/// implementation on the inner cursor.
+#[derive(Debug)]
+pub struct DualTableCursor<C, T, E> {
+    inner: C,
+    _marker: PhantomData<fn() -> (T, E)>,
+}
+
+impl<C, T, E> DualTableCursor<C, T, E> {
+    /// Create a new typed dual-keyed table cursor wrapper.
+    pub const fn new(cursor: C) -> Self {
+        Self { inner: cursor, _marker: PhantomData }
+    }
+
+    /// Get a reference to the inner cursor.
+    pub const fn inner(&self) -> &C {
+        &self.inner
+    }
+
+    /// Get a mutable reference to the inner cursor.
+    pub const fn inner_mut(&mut self) -> &mut C {
+        &mut self.inner
+    }
+
+    /// Consume the wrapper and return the inner cursor.
+    pub fn into_inner(self) -> C {
+        self.inner
+    }
+}
+
+impl<C, T, E> DualTableCursor<C, T, E>
+where
+    C: DualTableTraverse<T, E>,
+    T: DualKey,
+    E: HotKvReadError,
+{
+    /// Return the EXACT value for the specified dual key if it exists.
+    pub fn exact_dual(&mut self, key1: &T::Key, key2: &T::Key2) -> Result<Option<T::Value>, E> {
+        DualTableTraverse::<T, E>::exact_dual(&mut self.inner, key1, key2)
+    }
+
+    /// Seek to the next key-value pair AT or ABOVE the specified dual key.
+    pub fn next_dual_above(
+        &mut self,
+        key1: &T::Key,
+        key2: &T::Key2,
+    ) -> Result<Option<DualKeyValue<T>>, E> {
+        DualTableTraverse::<T, E>::next_dual_above(&mut self.inner, key1, key2)
+    }
+
+    /// Seek to the next distinct key1, and return the first key-value pair with that key1.
+    pub fn next_k1(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualTableTraverse::<T, E>::next_k1(&mut self.inner)
+    }
+
+    /// Seek to the next distinct key2 for the current key1.
+    pub fn next_k2(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualTableTraverse::<T, E>::next_k2(&mut self.inner)
+    }
+
+    /// Seek to the LAST key2 entry for the specified key1.
+    pub fn last_of_k1(&mut self, key1: &T::Key) -> Result<Option<DualKeyValue<T>>, E> {
+        DualTableTraverse::<T, E>::last_of_k1(&mut self.inner, key1)
+    }
+
+    /// Move to the LAST key2 entry of the PREVIOUS key1.
+    pub fn previous_k1(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualTableTraverse::<T, E>::previous_k1(&mut self.inner)
+    }
+
+    /// Move to the PREVIOUS key2 entry for the CURRENT key1.
+    pub fn previous_k2(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualTableTraverse::<T, E>::previous_k2(&mut self.inner)
+    }
+}
+
+// Also provide access to first/last/read_next/read_prev methods for dual-keyed cursors
+impl<C, T, E> DualTableCursor<C, T, E>
+where
+    C: DualTableTraverse<T, E>,
+    T: DualKey,
+    E: HotKvReadError,
+{
+    /// Get the first key-value pair in the table.
+    pub fn first(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualTableTraverse::<T, E>::first(&mut self.inner)
+    }
+
+    /// Get the last key-value pair in the table.
+    pub fn last(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualTableTraverse::<T, E>::last(&mut self.inner)
+    }
+
+    /// Get the next key-value pair and advance the cursor.
+    pub fn read_next(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualTableTraverse::<T, E>::read_next(&mut self.inner)
+    }
+
+    /// Get the previous key-value pair and move the cursor backward.
+    pub fn read_prev(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
+        DualTableTraverse::<T, E>::read_prev(&mut self.inner)
+    }
+
+    /// Iterate all k2 entries for a given k1, starting from `start_k2`.
+    ///
+    /// Calls `f` for each (k1, k2, v) tuple where k1 matches the provided key1
+    /// and k2 >= start_k2. Stops when k1 changes or the table is exhausted.
+    pub fn for_each_k2<F>(&mut self, key1: &T::Key, start_k2: &T::Key2, f: F) -> Result<(), E>
+    where
+        T::Key: PartialEq,
+        F: FnMut(T::Key, T::Key2, T::Value) -> Result<(), E>,
+    {
+        DualTableTraverse::<T, E>::for_each_k2(&mut self.inner, key1, start_k2, f)
+    }
+
+    /// Iterate entries within the same k1 while a predicate holds.
+    ///
+    /// Positions the cursor at `(key1, start_k2)` and calls `f` for each entry
+    /// while `predicate` returns true. Uses `next_k2()` which stays within
+    /// the same k1 value.
+    pub fn for_each_while_k2<P, F>(
+        &mut self,
+        key1: &T::Key,
+        start_k2: &T::Key2,
+        predicate: P,
+        f: F,
+    ) -> Result<(), E>
+    where
+        P: Fn(&T::Key, &T::Key2, &T::Value) -> bool,
+        F: FnMut(T::Key, T::Key2, T::Value) -> Result<(), E>,
+    {
+        DualTableTraverse::<T, E>::for_each_while_k2(&mut self.inner, key1, start_k2, predicate, f)
+    }
+
+    /// Iterate entries (crossing k1 boundaries) while a predicate holds.
+    ///
+    /// Positions the cursor at `(key1, start_k2)` and calls `f` for each entry
+    /// while `predicate` returns true. Uses `read_next()` to cross k1 boundaries.
+    pub fn for_each_while<P, F>(
+        &mut self,
+        key1: &T::Key,
+        start_k2: &T::Key2,
+        predicate: P,
+        f: F,
+    ) -> Result<(), E>
+    where
+        P: Fn(&T::Key, &T::Key2, &T::Value) -> bool,
+        F: FnMut(T::Key, T::Key2, T::Value) -> Result<(), E>,
+    {
+        DualTableTraverse::<T, E>::for_each_while(&mut self.inner, key1, start_k2, predicate, f)
+    }
+}
+
+impl<C, T, E> DualTableCursor<C, T, E>
+where
+    C: KvTraverseMut<E>,
+    T: DualKey,
+    E: HotKvReadError,
+{
+    /// Delete the current key-value pair.
+    pub fn delete_current(&mut self) -> Result<(), E> {
+        KvTraverseMut::delete_current(&mut self.inner)
+    }
+}

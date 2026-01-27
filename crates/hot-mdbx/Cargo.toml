@@ -1,0 +1,33 @@
+[package]
+name = "signet-hot-mdbx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+alloy.workspace = true
+bytes.workspace = true
+page_size.workspace = true
+parking_lot.workspace = true
+signet-hot.workspace = true
+signet-libmdbx = { workspace = true, features = ["read-tx-timeouts"] }
+sysinfo = "0.37.2"
+tempfile = { workspace = true, optional = true }
+thiserror.workspace = true
+tracing.workspace = true
+trevm.workspace = true
+
+[dev-dependencies]
+serial_test = "3.3.1"
+signet-hot = { workspace = true, features = ["test-utils"] }
+signet-storage-types.workspace = true
+tempfile.workspace = true
+
+[features]
+default = []
+test-utils = ["signet-hot/test-utils", "dep:tempfile"]
+disable-lock = []

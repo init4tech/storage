@@ -1,0 +1,1931 @@
+//! Serialization implementations for reth types. These types have since been
+//! ported to the [`signet_storage_types`] crate.
+
+use crate::ser::{DeserError, KeySer, MAX_KEY_SIZE, ValSer};
+use alloy::{
+    consensus::{
+        EthereumTxEnvelope, Header, Signed, TxEip1559, TxEip2930, TxEip4844, TxEip7702, TxLegacy,
+        TxType,
+    },
+    eips::{
+        eip2930::{AccessList, AccessListItem},
+        eip7702::{Authorization, SignedAuthorization},
+    },
+    primitives::{Address, B256, FixedBytes, KECCAK256_EMPTY, Signature, TxKind, U256},
+    primitives::{Log, LogData},
+};
+use signet_storage_types::{Account, BlockNumberList, ShardedKey, TransactionSigned};
+use trevm::revm::bytecode::{
+    Bytecode, JumpTable, LegacyAnalyzedBytecode, eip7702::Eip7702Bytecode,
+};
+
+// Specialized impls for the sharded key types. This was implemented
+// generically, but there are only 2 types, and we can skip pushing a scratch
+// buffer, because we know the 2 types involved are already fixed-size byte
+// arrays.
+macro_rules! sharded_key {
+    ($ty:ty) => {
+        impl KeySer for ShardedKey<$ty> {
+            const SIZE: usize = <$ty as KeySer>::SIZE + u64::SIZE;
+
+            fn encode_key<'a: 'c, 'b: 'c, 'c>(
+                &'a self,
+                buf: &'b mut [u8; MAX_KEY_SIZE],
+            ) -> &'c [u8] {
+                const SIZE: usize = <$ty as KeySer>::SIZE;
+
+                buf[0..SIZE].copy_from_slice(&self.key[..SIZE]);
+                buf[SIZE..Self::SIZE].copy_from_slice(&self.highest_block_number.to_be_bytes());
+
+                &buf[0..Self::SIZE]
+            }
+
+            fn decode_key(data: &[u8]) -> Result<Self, DeserError> {
+                const SIZE: usize = <$ty as KeySer>::SIZE;
+                if data.len() < Self::SIZE {
+                    return Err(DeserError::InsufficientData {
+                        needed: Self::SIZE,
+                        available: data.len(),
+                    });
+                }
+
+                let key = <$ty as KeySer>::decode_key(&data[0..SIZE])?;
+                let highest_block_number = u64::decode_key(&data[SIZE..Self::SIZE])?;
+                Ok(Self { key, highest_block_number })
+            }
+        }
+    };
+}
+
+sharded_key!(B256);
+sharded_key!(Address);
+
+impl KeySer for ShardedKey<U256> {
+    const SIZE: usize = U256::SIZE + u64::SIZE;
+
+    fn encode_key<'a: 'c, 'b: 'c, 'c>(&'a self, buf: &'b mut [u8; MAX_KEY_SIZE]) -> &'c [u8] {
+        self.key.encode_key(buf);
+        buf[U256::SIZE..Self::SIZE].copy_from_slice(&self.highest_block_number.to_be_bytes());
+        &buf[0..Self::SIZE]
+    }
+
+    fn decode_key(data: &[u8]) -> Result<Self, DeserError> {
+        if data.len() < Self::SIZE {
+            return Err(DeserError::InsufficientData { needed: Self::SIZE, available: data.len() });
+        }
+
+        let key = U256::decode_key(&data[0..U256::SIZE])?;
+        let highest_block_number = u64::decode_key(&data[U256::SIZE..Self::SIZE])?;
+        Ok(Self { key, highest_block_number })
+    }
+}
+
+macro_rules! by_props {
+    (@size $($prop:ident),* $(,)?) => {
+       {
+            0 $(
+                + $prop.encoded_size()
+            )+
+        }
+    };
+    (@encode $buf:ident; $($prop:ident),* $(,)?) => {
+        {
+            $(
+                $prop.encode_value_to($buf);
+            )+
+        }
+    };
+    (@decode $data:ident; $($prop:ident),* $(,)?) => {
+        {
+            $(
+                *$prop = ValSer::decode_value($data)?;
+                $data = &$data[$prop.encoded_size()..];
+            )*
+        }
+    };
+}
+
+impl ValSer for BlockNumberList {
+    fn encoded_size(&self) -> usize {
+        2 + self.serialized_size()
+    }
+
+    fn encode_value_to<B>(&self, mut buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        use std::io::Write;
+        let mut writer: bytes::buf::Writer<&mut B> = bytes::BufMut::writer(&mut buf);
+
+        debug_assert!(
+            self.serialized_size() <= u16::MAX as usize,
+            "BlockNumberList too large to encode"
+        );
+
+        writer.write_all(&(self.serialized_size() as u16).to_be_bytes()).unwrap();
+        self.serialize_into(writer).unwrap();
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let size = u16::decode_value(&data[..2])? as usize;
+        BlockNumberList::from_bytes(&data[2..2 + size])
+            .map_err(|err| DeserError::String(format!("Failed to decode BlockNumberList {err}")))
+    }
+}
+
+impl ValSer for Header {
+    fn encoded_size(&self) -> usize {
+        // NB: Destructure to ensure changes are compile errors and mistakes
+        // are unused var warnings.
+        let Header {
+            parent_hash,
+            ommers_hash,
+            beneficiary,
+            state_root,
+            transactions_root,
+            receipts_root,
+            logs_bloom,
+            difficulty,
+            number,
+            gas_limit,
+            gas_used,
+            timestamp,
+            extra_data,
+            mix_hash,
+            nonce,
+            base_fee_per_gas,
+            withdrawals_root,
+            blob_gas_used,
+            excess_blob_gas,
+            parent_beacon_block_root,
+            requests_hash,
+        } = self;
+
+        by_props!(
+            @size
+            parent_hash,
+            ommers_hash,
+            beneficiary,
+            state_root,
+            transactions_root,
+            receipts_root,
+            logs_bloom,
+            difficulty,
+            number,
+            gas_limit,
+            gas_used,
+            timestamp,
+            extra_data,
+            mix_hash,
+            nonce,
+            base_fee_per_gas,
+            withdrawals_root,
+            blob_gas_used,
+            excess_blob_gas,
+            parent_beacon_block_root,
+            requests_hash,
+        )
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        // NB: Destructure to ensure changes are compile errors and mistakes
+        // are unused var warnings.
+        let Header {
+            parent_hash,
+            ommers_hash,
+            beneficiary,
+            state_root,
+            transactions_root,
+            receipts_root,
+            logs_bloom,
+            difficulty,
+            number,
+            gas_limit,
+            gas_used,
+            timestamp,
+            extra_data,
+            mix_hash,
+            nonce,
+            base_fee_per_gas,
+            withdrawals_root,
+            blob_gas_used,
+            excess_blob_gas,
+            parent_beacon_block_root,
+            requests_hash,
+        } = self;
+
+        by_props!(
+            @encode buf;
+            parent_hash,
+            ommers_hash,
+            beneficiary,
+            state_root,
+            transactions_root,
+            receipts_root,
+            logs_bloom,
+            difficulty,
+            number,
+            gas_limit,
+            gas_used,
+            timestamp,
+            extra_data,
+            mix_hash,
+            nonce,
+            base_fee_per_gas,
+            withdrawals_root,
+            blob_gas_used,
+            excess_blob_gas,
+            parent_beacon_block_root,
+            requests_hash,
+        )
+    }
+
+    fn decode_value(mut data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        // NB: Destructure to ensure changes are compile errors and mistakes
+        // are unused var warnings.
+        let mut h = Header::default();
+        let Header {
+            parent_hash,
+            ommers_hash,
+            beneficiary,
+            state_root,
+            transactions_root,
+            receipts_root,
+            logs_bloom,
+            difficulty,
+            number,
+            gas_limit,
+            gas_used,
+            timestamp,
+            extra_data,
+            mix_hash,
+            nonce,
+            base_fee_per_gas,
+            withdrawals_root,
+            blob_gas_used,
+            excess_blob_gas,
+            parent_beacon_block_root,
+            requests_hash,
+        } = &mut h;
+
+        by_props!(
+            @decode data;
+            parent_hash,
+            ommers_hash,
+            beneficiary,
+            state_root,
+            transactions_root,
+            receipts_root,
+            logs_bloom,
+            difficulty,
+            number,
+            gas_limit,
+            gas_used,
+            timestamp,
+            extra_data,
+            mix_hash,
+            nonce,
+            base_fee_per_gas,
+            withdrawals_root,
+            blob_gas_used,
+            excess_blob_gas,
+            parent_beacon_block_root,
+            requests_hash,
+        );
+        Ok(h)
+    }
+}
+
+impl ValSer for Account {
+    const FIXED_SIZE: Option<usize> = Some(8 + 32 + 32);
+
+    fn encoded_size(&self) -> usize {
+        Self::FIXED_SIZE.unwrap()
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        // NB: Destructure to ensure changes are compile errors and mistakes
+        // are unused var warnings.
+        let Account { nonce, balance, bytecode_hash } = self;
+        {
+            nonce.encode_value_to(buf);
+            balance.encode_value_to(buf);
+            bytecode_hash.unwrap_or(KECCAK256_EMPTY).encode_value_to(buf);
+        }
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        // NB: Destructure to ensure changes are compile errors and mistakes
+        // are unused var warnings.
+        let mut account = Account::default();
+        let Account { nonce, balance, bytecode_hash } = &mut account;
+
+        let mut data = data;
+        {
+            *nonce = ValSer::decode_value(data)?;
+            data = &data[nonce.encoded_size()..];
+            *balance = ValSer::decode_value(data)?;
+            data = &data[balance.encoded_size()..];
+
+            let bch: B256 = ValSer::decode_value(data)?;
+            if bch == KECCAK256_EMPTY {
+                *bytecode_hash = None;
+            } else {
+                *bytecode_hash = Some(bch);
+            }
+        };
+        Ok(account)
+    }
+}
+
+impl ValSer for LogData {
+    fn encoded_size(&self) -> usize {
+        let LogData { data, .. } = self;
+        let topics = self.topics();
+        2 + topics.iter().map(|t| t.encoded_size()).sum::<usize>() + data.encoded_size()
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let LogData { data, .. } = self;
+        let topics = self.topics();
+        buf.put_u16(topics.len() as u16);
+        for topic in topics {
+            topic.encode_value_to(buf);
+        }
+        data.encode_value_to(buf);
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let mut data = data;
+        let topics_len = u16::decode_value(&data[..2])? as usize;
+        data = &data[2..];
+
+        if topics_len > 4 {
+            return Err(DeserError::String("LogData topics length exceeds maximum of 4".into()));
+        }
+
+        let mut topics = Vec::with_capacity(topics_len);
+        for _ in 0..topics_len {
+            let topic = B256::decode_value(data)?;
+            data = &data[topic.encoded_size()..];
+            topics.push(topic);
+        }
+
+        let log_data = alloy::primitives::Bytes::decode_value(data)?;
+
+        Ok(LogData::new_unchecked(topics, log_data))
+    }
+}
+
+impl ValSer for Log {
+    fn encoded_size(&self) -> usize {
+        let Log { address, data } = self;
+        by_props!(
+            @size
+            address,
+            data,
+        )
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let Log { address, data } = self;
+        by_props!(
+            @encode buf;
+            address,
+            data,
+        )
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let mut log = Log::<LogData>::default();
+        let Log { address, data: log_data } = &mut log;
+
+        let mut data = data;
+        by_props!(
+            @decode data;
+            address,
+            log_data,
+        );
+        Ok(log)
+    }
+}
+
+impl ValSer for TxType {
+    const FIXED_SIZE: Option<usize> = Some(1);
+
+    fn encoded_size(&self) -> usize {
+        Self::FIXED_SIZE.unwrap()
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        buf.put_u8(*self as u8);
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let byte = u8::decode_value(data)?;
+        TxType::try_from(byte)
+            .map_err(|_| DeserError::String(format!("Invalid TxType value: {}", byte)))
+    }
+}
+
+impl ValSer for Eip7702Bytecode {
+    fn encoded_size(&self) -> usize {
+        let Eip7702Bytecode { delegated_address, version, raw } = self;
+        by_props!(
+            @size
+            delegated_address,
+            version,
+            raw,
+        )
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let Eip7702Bytecode { delegated_address, version, raw } = self;
+        by_props!(
+            @encode buf;
+            delegated_address,
+            version,
+            raw,
+        )
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let mut eip7702 = Eip7702Bytecode {
+            delegated_address: Address::ZERO,
+            version: 0,
+            raw: alloy::primitives::Bytes::new(),
+        };
+        let Eip7702Bytecode { delegated_address, version, raw } = &mut eip7702;
+
+        let mut data = data;
+        by_props!(
+            @decode data;
+            delegated_address,
+            version,
+            raw,
+        );
+        Ok(eip7702)
+    }
+}
+
+impl ValSer for JumpTable {
+    fn encoded_size(&self) -> usize {
+        2 + 2 + self.as_slice().len()
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        debug_assert!(self.len() <= u16::MAX as usize, "JumpTable bitlen too large to encode");
+        debug_assert!(self.as_slice().len() <= u16::MAX as usize, "JumpTable too large to encode");
+        buf.put_u16(self.len() as u16);
+        buf.put_u16(self.as_slice().len() as u16);
+        buf.put_slice(self.as_slice());
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let bit_len = u16::decode_value(&data[..2])? as usize;
+        let slice_len = u16::decode_value(&data[2..4])? as usize;
+        Ok(JumpTable::from_slice(&data[4..4 + slice_len], bit_len))
+    }
+}
+
+impl ValSer for LegacyAnalyzedBytecode {
+    fn encoded_size(&self) -> usize {
+        let bytecode = self.bytecode();
+        let original_len = self.original_len();
+        let jump_table = self.jump_table();
+        by_props!(
+            @size
+            bytecode,
+            original_len,
+            jump_table,
+        )
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let bytecode = self.bytecode();
+        let original_len = self.original_len();
+        let jump_table = self.jump_table();
+        by_props!(
+            @encode buf;
+            bytecode,
+            original_len,
+            jump_table,
+        )
+    }
+
+    fn decode_value(mut data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let mut bytecode = alloy::primitives::Bytes::new();
+        let mut original_len = 0usize;
+        let mut jump_table = JumpTable::default();
+
+        let bc = &mut bytecode;
+        let ol = &mut original_len;
+        let jt = &mut jump_table;
+        by_props!(
+            @decode data;
+            bc,
+            ol,
+            jt,
+        );
+        Ok(LegacyAnalyzedBytecode::new(bytecode, original_len, jump_table))
+    }
+}
+
+impl ValSer for Bytecode {
+    fn encoded_size(&self) -> usize {
+        1 + match &self {
+            Bytecode::Eip7702(code) => code.encoded_size(),
+            Bytecode::LegacyAnalyzed(code) => code.encoded_size(),
+        }
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        match &self {
+            Bytecode::Eip7702(code) => {
+                buf.put_u8(1);
+                code.encode_value_to(buf);
+            }
+            Bytecode::LegacyAnalyzed(code) => {
+                buf.put_u8(0);
+                code.encode_value_to(buf);
+            }
+        }
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let ty = u8::decode_value(&data[..1])?;
+        let data = &data[1..];
+        match ty {
+            0 => {
+                let analyzed = LegacyAnalyzedBytecode::decode_value(data)?;
+                Ok(Bytecode::LegacyAnalyzed(analyzed))
+            }
+            1 => {
+                let eip7702 = Eip7702Bytecode::decode_value(data)?;
+                Ok(Bytecode::Eip7702(eip7702))
+            }
+            _ => Err(DeserError::String(format!("Invalid Bytecode type value: {}. Max is 1.", ty))),
+        }
+    }
+}
+
+impl ValSer for Signature {
+    const FIXED_SIZE: Option<usize> = Some(65);
+
+    fn encoded_size(&self) -> usize {
+        Self::FIXED_SIZE.unwrap()
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        FixedBytes(self.as_bytes()).encode_value_to(buf);
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let bytes = FixedBytes::<65>::decode_value(data)?;
+        Self::from_raw_array(bytes.as_ref())
+            .map_err(|e| DeserError::String(format!("Invalid signature bytes: {}", e)))
+    }
+}
+
+impl ValSer for TxKind {
+    fn encoded_size(&self) -> usize {
+        1 + match self {
+            TxKind::Create => 0,
+            TxKind::Call(_) => 20,
+        }
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        match self {
+            TxKind::Create => {
+                buf.put_u8(0);
+            }
+            TxKind::Call(address) => {
+                buf.put_u8(1);
+                address.encode_value_to(buf);
+            }
+        }
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let ty = u8::decode_value(&data[..1])?;
+        let data = &data[1..];
+        match ty {
+            0 => Ok(TxKind::Create),
+            1 => {
+                let address = Address::decode_value(data)?;
+                Ok(TxKind::Call(address))
+            }
+            _ => Err(DeserError::String(format!("Invalid TxKind type value: {}. Max is 1.", ty))),
+        }
+    }
+}
+
+impl ValSer for AccessListItem {
+    fn encoded_size(&self) -> usize {
+        let AccessListItem { address, storage_keys } = self;
+        by_props!(
+            @size
+            address,
+            storage_keys,
+        )
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let AccessListItem { address, storage_keys } = self;
+        by_props!(
+            @encode buf;
+            address,
+            storage_keys,
+        )
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let mut item = AccessListItem::default();
+        let AccessListItem { address, storage_keys } = &mut item;
+
+        let mut data = data;
+        by_props!(
+            @decode data;
+            address,
+            storage_keys,
+        );
+        Ok(item)
+    }
+}
+
+impl ValSer for AccessList {
+    fn encoded_size(&self) -> usize {
+        self.0.encoded_size()
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        self.0.encode_value_to(buf);
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        Vec::<AccessListItem>::decode_value(data).map(AccessList)
+    }
+}
+
+impl ValSer for Authorization {
+    const FIXED_SIZE: Option<usize> = Some(32 + 20 + 8);
+
+    fn encoded_size(&self) -> usize {
+        Self::FIXED_SIZE.unwrap()
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let Authorization { chain_id, address, nonce } = self;
+        by_props!(
+            @encode buf;
+            chain_id,
+            address,
+            nonce,
+        )
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let mut auth = Authorization { chain_id: U256::ZERO, address: Address::ZERO, nonce: 0 };
+        let Authorization { chain_id, address, nonce } = &mut auth;
+
+        let mut data = data;
+        by_props!(
+            @decode data;
+            chain_id,
+            address,
+            nonce,
+        );
+        Ok(auth)
+    }
+}
+
+impl ValSer for SignedAuthorization {
+    const FIXED_SIZE: Option<usize> = {
+        Some(
+            <Authorization as ValSer>::FIXED_SIZE.unwrap()
+            + 1 // y_parity
+            + 32 // r
+            + 32, // s
+        )
+    };
+
+    fn encoded_size(&self) -> usize {
+        let auth = self.inner();
+        let y_parity = self.y_parity();
+        let r = self.r();
+        let s = self.s();
+        by_props!(
+            @size
+            auth,
+            y_parity,
+            r,
+            s,
+        )
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let auth = self.inner();
+        let y_parity = &self.y_parity();
+        let r = &self.r();
+        let s = &self.s();
+        by_props!(
+            @encode buf;
+            auth,
+            y_parity,
+            r,
+            s,
+        )
+    }
+
+    fn decode_value(mut data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let mut auth = Authorization { chain_id: U256::ZERO, address: Address::ZERO, nonce: 0 };
+        let mut y_parity = 0u8;
+        let mut r = U256::ZERO;
+        let mut s = U256::ZERO;
+
+        let ap = &mut auth;
+        let yp = &mut y_parity;
+        let rr = &mut r;
+        let ss = &mut s;
+
+        by_props!(
+            @decode data;
+            ap,
+            yp,
+            rr,
+            ss,
+        );
+        Ok(SignedAuthorization::new_unchecked(auth, y_parity, r, s))
+    }
+}
+
+impl ValSer for TxLegacy {
+    fn encoded_size(&self) -> usize {
+        let TxLegacy { chain_id, nonce, gas_price, gas_limit, to, value, input } = self;
+        by_props!(
+            @size
+            chain_id,
+            nonce,
+            gas_price,
+            gas_limit,
+            to,
+            value,
+            input,
+        )
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let TxLegacy { chain_id, nonce, gas_price, gas_limit, to, value, input } = self;
+        by_props!(
+            @encode buf;
+            chain_id,
+            nonce,
+            gas_price,
+            gas_limit,
+            to,
+            value,
+            input,
+        )
+    }
+
+    fn decode_value(mut data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let mut tx = TxLegacy::default();
+        let TxLegacy { chain_id, nonce, gas_price, gas_limit, to, value, input } = &mut tx;
+
+        by_props!(
+            @decode data;
+            chain_id,
+            nonce,
+            gas_price,
+            gas_limit,
+            to,
+            value,
+            input,
+        );
+        Ok(tx)
+    }
+}
+
+impl ValSer for TxEip2930 {
+    fn encoded_size(&self) -> usize {
+        let TxEip2930 { chain_id, nonce, gas_price, gas_limit, to, value, input, access_list } =
+            self;
+        by_props!(
+            @size
+            chain_id,
+            nonce,
+            gas_price,
+            gas_limit,
+            to,
+            value,
+            input,
+            access_list,
+        )
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let TxEip2930 { chain_id, nonce, gas_price, gas_limit, to, value, input, access_list } =
+            self;
+        by_props!(
+            @encode buf;
+            chain_id,
+            nonce,
+            gas_price,
+            gas_limit,
+            to,
+            value,
+            input,
+            access_list,
+        )
+    }
+
+    fn decode_value(mut data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let mut tx = TxEip2930::default();
+        let TxEip2930 { chain_id, nonce, gas_price, gas_limit, to, value, input, access_list } =
+            &mut tx;
+
+        by_props!(
+            @decode data;
+            chain_id,
+            nonce,
+            gas_price,
+            gas_limit,
+            to,
+            value,
+            input,
+            access_list,
+        );
+        Ok(tx)
+    }
+}
+
+impl ValSer for TxEip1559 {
+    fn encoded_size(&self) -> usize {
+        let TxEip1559 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            input,
+        } = self;
+        by_props!(
+            @size
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            input
+        )
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let TxEip1559 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            input,
+        } = self;
+        by_props!(
+            @encode buf;
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            input
+        )
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let mut tx = TxEip1559::default();
+        let TxEip1559 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            input,
+        } = &mut tx;
+
+        let mut data = data;
+        by_props!(
+            @decode data;
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            input
+        );
+        Ok(tx)
+    }
+}
+
+impl ValSer for TxEip4844 {
+    fn encoded_size(&self) -> usize {
+        let TxEip4844 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            blob_versioned_hashes,
+            max_fee_per_blob_gas,
+            input,
+        } = self;
+        by_props!(
+            @size
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            blob_versioned_hashes,
+            max_fee_per_blob_gas,
+            input,
+        )
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let TxEip4844 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            blob_versioned_hashes,
+            max_fee_per_blob_gas,
+            input,
+        } = self;
+        by_props!(
+            @encode buf;
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            blob_versioned_hashes,
+            max_fee_per_blob_gas,
+            input,
+        )
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let mut tx = TxEip4844::default();
+        let TxEip4844 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            blob_versioned_hashes,
+            max_fee_per_blob_gas,
+            input,
+        } = &mut tx;
+
+        let mut data = data;
+        by_props!(
+            @decode data;
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            blob_versioned_hashes,
+            max_fee_per_blob_gas,
+            input,
+        );
+        Ok(tx)
+    }
+}
+
+impl ValSer for TxEip7702 {
+    fn encoded_size(&self) -> usize {
+        let TxEip7702 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            authorization_list,
+            input,
+        } = self;
+        by_props!(
+            @size
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            authorization_list,
+            input,
+        )
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let TxEip7702 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            authorization_list,
+            input,
+        } = self;
+        by_props!(
+            @encode buf;
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            authorization_list,
+            input,
+        )
+    }
+
+    fn decode_value(mut data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let mut tx = TxEip7702::default();
+        let TxEip7702 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            authorization_list,
+            input,
+        } = &mut tx;
+        by_props!(
+            @decode data;
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            to,
+            value,
+            access_list,
+            authorization_list,
+            input,
+        );
+        Ok(tx)
+    }
+}
+
+impl<T, Sig> ValSer for Signed<T, Sig>
+where
+    T: ValSer,
+    Sig: ValSer,
+{
+    fn encoded_size(&self) -> usize {
+        self.signature().encoded_size() + self.tx().encoded_size()
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        self.signature().encode_value_to(buf);
+        self.tx().encode_value_to(buf);
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let mut data = data;
+
+        let signature = Sig::decode_value(data)?;
+        data = &data[signature.encoded_size()..];
+
+        let tx = T::decode_value(data)?;
+
+        Ok(Signed::new_unhashed(tx, signature))
+    }
+}
+
+impl ValSer for TransactionSigned {
+    fn encoded_size(&self) -> usize {
+        self.tx_type().encoded_size()
+            + match self {
+                EthereumTxEnvelope::Legacy(signed) => signed.encoded_size(),
+                EthereumTxEnvelope::Eip2930(signed) => signed.encoded_size(),
+                EthereumTxEnvelope::Eip1559(signed) => signed.encoded_size(),
+                EthereumTxEnvelope::Eip4844(signed) => signed.encoded_size(),
+                EthereumTxEnvelope::Eip7702(signed) => signed.encoded_size(),
+            }
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        self.tx_type().encode_value_to(buf);
+        match self {
+            EthereumTxEnvelope::Legacy(signed) => {
+                signed.encode_value_to(buf);
+            }
+            EthereumTxEnvelope::Eip2930(signed) => {
+                signed.encode_value_to(buf);
+            }
+            EthereumTxEnvelope::Eip1559(signed) => {
+                signed.encode_value_to(buf);
+            }
+            EthereumTxEnvelope::Eip4844(signed) => {
+                signed.encode_value_to(buf);
+            }
+            EthereumTxEnvelope::Eip7702(signed) => {
+                signed.encode_value_to(buf);
+            }
+        }
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let ty = TxType::decode_value(data)?;
+        let data = &data[ty.encoded_size()..];
+        match ty {
+            TxType::Legacy => ValSer::decode_value(data).map(EthereumTxEnvelope::Legacy),
+            TxType::Eip2930 => ValSer::decode_value(data).map(EthereumTxEnvelope::Eip2930),
+            TxType::Eip1559 => ValSer::decode_value(data).map(EthereumTxEnvelope::Eip1559),
+            TxType::Eip4844 => ValSer::decode_value(data).map(EthereumTxEnvelope::Eip4844),
+            TxType::Eip7702 => ValSer::decode_value(data).map(EthereumTxEnvelope::Eip7702),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::{
+        Address, B256, Bloom, Bytes as AlloBytes, Signature, TxKind, U256, keccak256,
+    };
+    use alloy::{
+        consensus::{Header, TxEip1559, TxEip2930, TxEip4844, TxEip7702, TxLegacy, TxType},
+        eips::{
+            eip2930::{AccessList, AccessListItem},
+            eip7702::{Authorization, SignedAuthorization},
+        },
+        primitives::{Log, LogData},
+    };
+    use signet_storage_types::{Account, BlockNumberList};
+    use trevm::revm::bytecode::JumpTable;
+
+    /// Generic roundtrip test for any ValSer type
+    #[track_caller]
+    fn test_roundtrip<T>(original: &T)
+    where
+        T: ValSer + PartialEq + std::fmt::Debug,
+    {
+        // Encode
+        let mut buf = bytes::BytesMut::new();
+        original.encode_value_to(&mut buf);
+        let encoded = buf.freeze();
+
+        // Assert that the encoded size matches
+        assert_eq!(
+            original.encoded_size(),
+            encoded.len(),
+            "Encoded size mismatch: expected {}, got {}",
+            original.encoded_size(),
+            encoded.len()
+        );
+
+        // Decode
+        let decoded = T::decode_value(&encoded).expect("Failed to decode value");
+
+        // Assert equality
+        assert_eq!(*original, decoded, "Roundtrip failed");
+    }
+
+    #[test]
+    fn test_blocknumberlist_roundtrips() {
+        // Empty list
+        test_roundtrip(&BlockNumberList::empty());
+
+        // Single item
+        let mut single = BlockNumberList::empty();
+        single.push(42u64).unwrap();
+        test_roundtrip(&single);
+
+        // Multiple items
+        let mut multiple = BlockNumberList::empty();
+        for i in [0, 1, 255, 256, 65535, 65536, u64::MAX] {
+            multiple.push(i).unwrap();
+        }
+        test_roundtrip(&multiple);
+    }
+
+    #[test]
+    fn test_account_roundtrips() {
+        // Default account
+        test_roundtrip(&Account::default());
+
+        // Account with values
+        let account = Account {
+            nonce: 42,
+            balance: U256::from(123456789u64),
+            bytecode_hash: Some(keccak256(b"hello world")),
+        };
+        test_roundtrip(&account);
+
+        // Account with max values
+        let max_account = Account {
+            nonce: u64::MAX,
+            balance: U256::MAX,
+            bytecode_hash: Some(B256::from([0xFF; 32])),
+        };
+        test_roundtrip(&max_account);
+    }
+
+    #[test]
+    fn test_header_roundtrips() {
+        // Default header
+        test_roundtrip(&Header::default());
+
+        // Header with some values
+        let header = Header {
+            number: 12345,
+            gas_limit: 8000000,
+            timestamp: 1234567890,
+            difficulty: U256::from(1000000u64),
+            ..Default::default()
+        };
+        test_roundtrip(&header);
+    }
+
+    #[test]
+    fn test_logdata_roundtrips() {
+        // Empty log data
+        test_roundtrip(&LogData::new_unchecked(vec![], AlloBytes::new()));
+
+        // Log data with one topic
+        test_roundtrip(&LogData::new_unchecked(
+            vec![B256::from([1; 32])],
+            AlloBytes::from_static(b"hello"),
+        ));
+
+        // Log data with multiple topics
+        test_roundtrip(&LogData::new_unchecked(
+            vec![
+                B256::from([1; 32]),
+                B256::from([2; 32]),
+                B256::from([3; 32]),
+                B256::from([4; 32]),
+            ],
+            AlloBytes::from_static(b"world"),
+        ));
+    }
+
+    #[test]
+    fn test_log_roundtrips() {
+        let log_data = LogData::new_unchecked(
+            vec![B256::from([1; 32]), B256::from([2; 32])],
+            AlloBytes::from_static(b"test log data"),
+        );
+        let log = Log { address: Address::from([0x42; 20]), data: log_data };
+        test_roundtrip(&log);
+    }
+
+    #[test]
+    fn test_txtype_roundtrips() {
+        test_roundtrip(&TxType::Legacy);
+        test_roundtrip(&TxType::Eip2930);
+        test_roundtrip(&TxType::Eip1559);
+        test_roundtrip(&TxType::Eip4844);
+        test_roundtrip(&TxType::Eip7702);
+    }
+
+    #[test]
+    fn test_signature_roundtrips() {
+        test_roundtrip(&Signature::test_signature());
+
+        // Zero signature
+        let zero_sig = Signature::new(U256::ZERO, U256::ZERO, false);
+        test_roundtrip(&zero_sig);
+
+        // Max signature
+        let max_sig = Signature::new(U256::MAX, U256::MAX, true);
+        test_roundtrip(&max_sig);
+    }
+
+    #[test]
+    fn test_txkind_roundtrips() {
+        test_roundtrip(&TxKind::Create);
+        test_roundtrip(&TxKind::Call(Address::ZERO));
+        test_roundtrip(&TxKind::Call(Address::from([0xFF; 20])));
+    }
+
+    #[test]
+    fn test_accesslist_roundtrips() {
+        // Empty access list
+        test_roundtrip(&AccessList::default());
+
+        // Access list with one item
+        let item = AccessListItem {
+            address: Address::from([0x12; 20]),
+            storage_keys: vec![B256::from([0x34; 32])],
+        };
+        test_roundtrip(&AccessList(vec![item]));
+
+        // Access list with multiple items and keys
+        let items = vec![
+            AccessListItem {
+                address: Address::repeat_byte(11),
+                storage_keys: vec![B256::from([0x22; 32]), B256::from([0x33; 32])],
+            },
+            AccessListItem { address: Address::from([0x44; 20]), storage_keys: vec![] },
+            AccessListItem {
+                address: Address::from([0x55; 20]),
+                storage_keys: vec![B256::from([0x66; 32])],
+            },
+        ];
+        test_roundtrip(&AccessList(items));
+    }
+
+    #[test]
+    fn test_authorization_roundtrips() {
+        test_roundtrip(&Authorization {
+            chain_id: U256::from(1u64),
+            address: Address::repeat_byte(11),
+            nonce: 0,
+        });
+
+        test_roundtrip(&Authorization {
+            chain_id: U256::MAX,
+            address: Address::from([0xFF; 20]),
+            nonce: u64::MAX,
+        });
+    }
+
+    #[test]
+    fn test_signed_authorization_roundtrips() {
+        let auth = Authorization {
+            chain_id: U256::from(1u64),
+            address: Address::repeat_byte(11),
+            nonce: 42,
+        };
+        let signed_auth =
+            SignedAuthorization::new_unchecked(auth, 1, U256::from(12345u64), U256::from(67890u64));
+        test_roundtrip(&signed_auth);
+    }
+
+    #[test]
+    fn test_tx_legacy_roundtrips() {
+        test_roundtrip(&TxLegacy::default());
+
+        let tx = TxLegacy {
+            chain_id: Some(1),
+            nonce: 42,
+            gas_price: 20_000_000_000,
+            gas_limit: 21000u64,
+            to: TxKind::Call(Address::repeat_byte(11)),
+            value: U256::from(1000000000000000000u64), // 1 ETH in wei
+            input: AlloBytes::from_static(b"hello world"),
+        };
+        test_roundtrip(&tx);
+    }
+
+    #[test]
+    fn test_tx_eip2930_roundtrips() {
+        test_roundtrip(&TxEip2930::default());
+
+        let access_list = AccessList(vec![AccessListItem {
+            address: Address::from([0x22; 20]),
+            storage_keys: vec![B256::from([0x33; 32])],
+        }]);
+
+        let tx = TxEip2930 {
+            chain_id: 1,
+            nonce: 42,
+            gas_price: 20_000_000_000,
+            gas_limit: 21000u64,
+            to: TxKind::Call(Address::repeat_byte(11)),
+            value: U256::from(1000000000000000000u64),
+            input: AlloBytes::from_static(b"eip2930 tx"),
+            access_list,
+        };
+        test_roundtrip(&tx);
+    }
+
+    #[test]
+    fn test_tx_eip1559_roundtrips() {
+        test_roundtrip(&TxEip1559::default());
+
+        let tx = TxEip1559 {
+            chain_id: 1,
+            nonce: 42,
+            gas_limit: 21000u64,
+            max_fee_per_gas: 30_000_000_000,
+            max_priority_fee_per_gas: 2_000_000_000,
+            to: TxKind::Call(Address::repeat_byte(11)),
+            value: U256::from(1000000000000000000u64),
+            input: AlloBytes::from_static(b"eip1559 tx"),
+            access_list: AccessList::default(),
+        };
+        test_roundtrip(&tx);
+    }
+
+    #[test]
+    fn test_tx_eip4844_roundtrips() {
+        test_roundtrip(&TxEip4844::default());
+
+        let tx = TxEip4844 {
+            chain_id: 1,
+            nonce: 42,
+            gas_limit: 21000u64,
+            max_fee_per_gas: 30_000_000_000,
+            max_priority_fee_per_gas: 2_000_000_000,
+            to: Address::repeat_byte(11),
+            value: U256::from(1000000000000000000u64),
+            input: AlloBytes::from_static(b"eip4844 tx"),
+            access_list: AccessList::default(),
+            blob_versioned_hashes: vec![B256::from([0x44; 32])],
+            max_fee_per_blob_gas: 1_000_000,
+        };
+        test_roundtrip(&tx);
+    }
+
+    #[test]
+    fn test_tx_eip7702_roundtrips() {
+        test_roundtrip(&TxEip7702::default());
+
+        let auth = SignedAuthorization::new_unchecked(
+            Authorization {
+                chain_id: U256::from(1u64),
+                address: Address::from([0x77; 20]),
+                nonce: 0,
+            },
+            1,
+            U256::from(12345u64),
+            U256::from(67890u64),
+        );
+
+        let tx = TxEip7702 {
+            chain_id: 1,
+            nonce: 42,
+            gas_limit: 21000u64,
+            max_fee_per_gas: 30_000_000_000,
+            max_priority_fee_per_gas: 2_000_000_000,
+            to: Address::repeat_byte(11),
+            value: U256::from(1000000000000000000u64),
+            input: AlloBytes::from_static(b"eip7702 tx"),
+            access_list: AccessList::default(),
+            authorization_list: vec![auth],
+        };
+        test_roundtrip(&tx);
+    }
+
+    #[test]
+    fn test_jump_table_roundtrips() {
+        // Empty jump table
+        test_roundtrip(&JumpTable::default());
+
+        // Jump table with some jumps
+        let jump_table = JumpTable::from_slice(&[0b10101010, 0b01010101], 16);
+        test_roundtrip(&jump_table);
+    }
+
+    #[test]
+    fn test_complex_combinations() {
+        // Test a complex Header with all fields populated
+        let header = Header {
+            number: 12345,
+            gas_limit: 8000000,
+            timestamp: 1234567890,
+            difficulty: U256::from(1000000u64),
+            parent_hash: keccak256(b"parent"),
+            ommers_hash: keccak256(b"ommers"),
+            beneficiary: Address::from([0xBE; 20]),
+            state_root: keccak256(b"state"),
+            transactions_root: keccak256(b"txs"),
+            receipts_root: keccak256(b"receipts"),
+            logs_bloom: Bloom::default(),
+            gas_used: 7999999,
+            mix_hash: keccak256(b"mix"),
+            nonce: [0x42; 8].into(),
+            extra_data: AlloBytes::from_static(b"extra data"),
+            base_fee_per_gas: Some(1000000000),
+            withdrawals_root: Some(keccak256(b"withdrawals_root")),
+            blob_gas_used: Some(500000),
+            excess_blob_gas: Some(10000),
+            parent_beacon_block_root: Some(keccak256(b"parent_beacon_block_root")),
+            requests_hash: Some(keccak256(b"requests_hash")),
+        };
+        test_roundtrip(&header);
+
+        // Test a complex EIP-1559 transaction
+        let access_list = AccessList(vec![
+            AccessListItem {
+                address: Address::repeat_byte(11),
+                storage_keys: vec![B256::from([0x22; 32]), B256::from([0x33; 32])],
+            },
+            AccessListItem { address: Address::from([0x44; 20]), storage_keys: vec![] },
+        ]);
+
+        let complex_tx = TxEip1559 {
+            chain_id: 1,
+            nonce: 123456,
+            gas_limit: 500000u64,
+            max_fee_per_gas: 50_000_000_000,
+            max_priority_fee_per_gas: 3_000_000_000,
+            to: TxKind::Create,
+            value: U256::ZERO,
+            input: AlloBytes::copy_from_slice(&[0xFF; 1000]), // Large input
+            access_list,
+        };
+        test_roundtrip(&complex_tx);
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        // Very large access list
+        let large_storage_keys: Vec<B256> =
+            (0..1000).map(|i| B256::from(U256::from(i).to_be_bytes::<32>())).collect();
+        let large_access_list = AccessList(vec![AccessListItem {
+            address: Address::from([0xAA; 20]),
+            storage_keys: large_storage_keys,
+        }]);
+        test_roundtrip(&large_access_list);
+
+        // Transaction with maximum values
+        let max_tx = TxEip1559 {
+            chain_id: u64::MAX,
+            nonce: u64::MAX,
+            gas_limit: u64::MAX,
+            max_fee_per_gas: u128::MAX,
+            max_priority_fee_per_gas: u128::MAX,
+            to: TxKind::Call(Address::repeat_byte(0xFF)),
+            value: U256::MAX,
+            input: AlloBytes::copy_from_slice(&[0xFF; 10000]), // Very large input
+            access_list: AccessList::default(),
+        };
+        test_roundtrip(&max_tx);
+
+        // BlockNumberList with many numbers
+        let mut large_list = BlockNumberList::empty();
+        for i in 0..10000u64 {
+            large_list.push(i).unwrap();
+        }
+        test_roundtrip(&large_list);
+    }
+
+    // KeySer Tests
+    // ============
+
+    /// Generic roundtrip test for any KeySer type
+    #[track_caller]
+    fn test_key_roundtrip<T>(original: &T)
+    where
+        T: KeySer + PartialEq + std::fmt::Debug,
+    {
+        let mut buf = [0u8; MAX_KEY_SIZE];
+        let encoded = original.encode_key(&mut buf);
+
+        // Assert that the encoded size matches the const SIZE
+        assert_eq!(
+            encoded.len(),
+            T::SIZE,
+            "Encoded key length mismatch: expected {}, got {}",
+            T::SIZE,
+            encoded.len()
+        );
+
+        // Decode and verify
+        let decoded = T::decode_key(encoded).expect("Failed to decode key");
+        assert_eq!(*original, decoded, "Key roundtrip failed");
+    }
+
+    /// Test ordering preservation for KeySer types
+    #[track_caller]
+    fn test_key_ordering<T>(keys: &[T])
+    where
+        T: KeySer + Ord + std::fmt::Debug + Clone,
+    {
+        let mut sorted_keys = keys.to_vec();
+        sorted_keys.sort();
+
+        let mut encoded_keys: Vec<_> = sorted_keys
+            .iter()
+            .map(|k| {
+                let mut buf = [0u8; MAX_KEY_SIZE];
+                let encoded = k.encode_key(&mut buf);
+                encoded.to_vec()
+            })
+            .collect();
+
+        // Check that encoded keys are also sorted lexicographically
+        let original_encoded = encoded_keys.clone();
+        encoded_keys.sort();
+
+        assert_eq!(original_encoded, encoded_keys, "Key encoding does not preserve ordering");
+    }
+
+    #[test]
+    fn test_sharded_key_b256_roundtrips() {
+        // Test with B256 keys
+        let key1 = ShardedKey { key: B256::ZERO, highest_block_number: 0 };
+        test_key_roundtrip(&key1);
+
+        let key2 = ShardedKey { key: B256::repeat_byte(0xFF), highest_block_number: u64::MAX };
+        test_key_roundtrip(&key2);
+
+        let key3 = ShardedKey {
+            key: B256::from([
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+                0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C,
+                0x1D, 0x1E, 0x1F, 0x20,
+            ]),
+            highest_block_number: 12345,
+        };
+        test_key_roundtrip(&key3);
+    }
+
+    #[test]
+    fn test_sharded_key_address_roundtrips() {
+        // Test with Address keys
+        let key1 = ShardedKey { key: Address::ZERO, highest_block_number: 0 };
+        test_key_roundtrip(&key1);
+
+        let key2: ShardedKey<Address> =
+            ShardedKey { key: Address::repeat_byte(0xFF), highest_block_number: u64::MAX };
+        test_key_roundtrip(&key2);
+
+        let key3 = ShardedKey {
+            key: Address::from([
+                0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC,
+                0xDE, 0xF0, 0x12, 0x34, 0x56, 0x78,
+            ]),
+            highest_block_number: 9876543210,
+        };
+        test_key_roundtrip(&key3);
+    }
+
+    #[test]
+    fn test_sharded_key_u256() {
+        let keys = vec![
+            ShardedKey { key: U256::ZERO, highest_block_number: 0 },
+            ShardedKey { key: U256::ZERO, highest_block_number: 1 },
+            ShardedKey { key: U256::ZERO, highest_block_number: u64::MAX },
+            ShardedKey { key: U256::from(1u64), highest_block_number: 0 },
+            ShardedKey { key: U256::from(1u64), highest_block_number: 1 },
+            ShardedKey { key: U256::MAX, highest_block_number: 0 },
+            ShardedKey { key: U256::MAX, highest_block_number: u64::MAX },
+        ];
+        test_key_ordering(&keys);
+
+        for key in &keys {
+            test_key_roundtrip(key);
+        }
+    }
+
+    #[test]
+    fn test_sharded_key_b256_ordering() {
+        let keys = vec![
+            ShardedKey { key: B256::ZERO, highest_block_number: 0 },
+            ShardedKey { key: B256::ZERO, highest_block_number: 1 },
+            ShardedKey { key: B256::ZERO, highest_block_number: u64::MAX },
+            ShardedKey { key: B256::from([0x01; 32]), highest_block_number: 0 },
+            ShardedKey { key: B256::from([0x01; 32]), highest_block_number: 1 },
+            ShardedKey { key: B256::repeat_byte(0xFF), highest_block_number: 0 },
+            ShardedKey { key: B256::repeat_byte(0xFF), highest_block_number: u64::MAX },
+        ];
+        test_key_ordering(&keys);
+    }
+
+    #[test]
+    fn test_sharded_key_address_ordering() {
+        let keys = vec![
+            ShardedKey { key: Address::ZERO, highest_block_number: 0 },
+            ShardedKey { key: Address::ZERO, highest_block_number: 1 },
+            ShardedKey { key: Address::ZERO, highest_block_number: u64::MAX },
+            ShardedKey { key: Address::from([0x01; 20]), highest_block_number: 0 },
+            ShardedKey { key: Address::from([0x01; 20]), highest_block_number: 1 },
+            ShardedKey { key: Address::repeat_byte(0xFF), highest_block_number: 0 },
+            ShardedKey { key: Address::repeat_byte(0xFF), highest_block_number: u64::MAX },
+        ];
+        test_key_ordering(&keys);
+    }
+
+    #[test]
+    fn test_key_decode_insufficient_data() {
+        // Test ShardedKey<B256> with insufficient data
+        let short_data = [0u8; 10]; // Much smaller than required
+
+        match ShardedKey::<B256>::decode_key(&short_data) {
+            Err(DeserError::InsufficientData { needed, available }) => {
+                assert_eq!(needed, ShardedKey::<B256>::SIZE);
+                assert_eq!(available, 10);
+            }
+            other => panic!("Expected InsufficientData error, got: {:?}", other),
+        }
+
+        // Test ShardedKey<Address> with insufficient data
+        match ShardedKey::<Address>::decode_key(&short_data) {
+            Err(DeserError::InsufficientData { needed, available }) => {
+                assert_eq!(needed, ShardedKey::<Address>::SIZE);
+                assert_eq!(available, 10);
+            }
+            other => panic!("Expected InsufficientData error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_key_encode_decode_boundary_values() {
+        // Test boundary values for block numbers
+        let boundary_keys = vec![
+            ShardedKey { key: B256::ZERO, highest_block_number: 0 },
+            ShardedKey { key: B256::ZERO, highest_block_number: 1 },
+            ShardedKey { key: B256::ZERO, highest_block_number: u64::MAX - 1 },
+            ShardedKey { key: B256::ZERO, highest_block_number: u64::MAX },
+        ];
+
+        for key in &boundary_keys {
+            test_key_roundtrip(key);
+        }
+
+        // Test that ordering is preserved across boundaries
+        test_key_ordering(&boundary_keys);
+    }
+}

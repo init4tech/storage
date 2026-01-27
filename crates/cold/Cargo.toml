@@ -1,0 +1,22 @@
+[package]
+name = "signet-cold"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+alloy.workspace = true
+signet-storage-types = { version = "0.0.1", path = "../types" }
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[features]
+default = []
+in-memory = []
+test-utils = ["in-memory"]
