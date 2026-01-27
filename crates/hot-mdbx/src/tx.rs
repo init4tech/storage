@@ -6,31 +6,75 @@ use signet_hot::{
     model::{DualTableTraverse, HotKvRead, HotKvWrite},
     tables::{DualKey, SingleKey, Table},
 };
-use signet_libmdbx::{Database, DatabaseFlags, RW, TransactionKind, TxSync, WriteFlags};
-use std::borrow::Cow;
+use signet_libmdbx::{Database, DatabaseFlags, RW, TransactionKind, TxUnsync, WriteFlags};
+use std::{borrow::Cow, cell::RefCell};
 
 const TX_BUFFER_SIZE: usize = MAX_KEY_SIZE + MAX_FIXED_VAL_SIZE;
 
 /// Wrapper for the libmdbx transaction.
-#[derive(Debug)]
+///
+/// This wraps [`TxUnsync`] in a [`RefCell`] to provide interior mutability,
+/// allowing trait implementations that use `&self` to call methods that
+/// require `&mut self` on the underlying transaction.
 pub struct Tx<K: TransactionKind> {
-    /// Libmdbx-sys transaction.
-    pub inner: TxSync<K>,
+    /// Libmdbx-sys transaction wrapped in RefCell for interior mutability.
+    inner: RefCell<TxUnsync<K>>,
 
     /// Cached FixedSizeInfo for tables.
     fsi_cache: FsiCache,
 }
 
+impl<K: TransactionKind> std::fmt::Debug for Tx<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tx").field("fsi_cache", &self.fsi_cache).finish_non_exhaustive()
+    }
+}
+
 impl<K: TransactionKind> Tx<K> {
     /// Creates new `Tx` object with a `RO` or `RW` transaction and optionally enables metrics.
     #[inline]
-    pub(crate) fn new(inner: TxSync<K>, fsi_cache: FsiCache) -> Self {
-        Self { inner, fsi_cache }
+    pub(crate) fn new(inner: TxUnsync<K>, fsi_cache: FsiCache) -> Self {
+        Self { inner: RefCell::new(inner), fsi_cache }
+    }
+
+    /// Borrows the inner transaction mutably and executes a closure.
+    #[inline]
+    fn with_tx<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut TxUnsync<K>) -> R,
+    {
+        let mut guard = self.inner.borrow_mut();
+        f(&mut *guard)
+    }
+
+    /// Like `with_tx` but for operations returning Cow that need lifetime extension.
+    ///
+    /// # Safety
+    ///
+    /// This is safe because:
+    /// - MDBX data returned by get() is valid for the transaction lifetime
+    /// - The Tx struct owns the transaction via RefCell
+    /// - The lifetime 'a is the Tx lifetime, so data outlives the returned Cow
+    /// - The RefCell borrow is released before returning, but the data remains
+    ///   valid because it's owned by MDBX, not the RefCell guard
+    #[inline]
+    unsafe fn with_tx_cow<'a, F>(&'a self, f: F) -> Result<Option<Cow<'a, [u8]>>, MdbxError>
+    where
+        F: FnOnce(&mut TxUnsync<K>) -> Result<Option<Cow<'_, [u8]>>, MdbxError>,
+    {
+        let mut guard = self.inner.borrow_mut();
+        let result = f(&mut *guard);
+        // SAFETY: The Cow data comes from MDBX which keeps it valid for the
+        // transaction lifetime. The Tx struct owns the transaction, so 'a
+        // (the Tx lifetime) is valid.
+        result.map(|opt| {
+            opt.map(|cow| unsafe { std::mem::transmute::<Cow<'_, [u8]>, Cow<'a, [u8]>>(cow) })
+        })
     }
 
     /// Gets the Database handle for a table (cached internally by signet-libmdbx).
     fn get_db(&self, name: Option<&str>) -> Result<Database, MdbxError> {
-        self.inner.open_db(name).map_err(MdbxError::Mdbx)
+        self.with_tx(|tx| tx.open_db(name).map_err(MdbxError::Mdbx))
     }
 
     /// Reads FixedSizeInfo from the metadata table.
@@ -40,9 +84,10 @@ impl<K: TransactionKind> Tx<K> {
         key[..to_copy].copy_from_slice(&name.as_bytes()[..to_copy]);
 
         let db = self.get_db(None)?;
-        let data = self
-            .inner
-            .get::<Cow<'_, [u8]>>(db.dbi(), key.as_slice())?
+        // Note: We request Vec<u8> (owned) since we only need it briefly for decoding
+        // and don't need zero-copy for this small metadata read.
+        let data: Vec<u8> = self
+            .with_tx(|tx| tx.get(db.dbi(), key.as_slice()).map_err(MdbxError::from))?
             .ok_or(MdbxError::UnknownTable(name))?;
 
         // Migration: handle both old (16 byte) and new (8 byte) formats
@@ -82,15 +127,34 @@ impl<K: TransactionKind> Tx<K> {
 
     /// Gets this transaction ID.
     pub fn id(&self) -> Result<u64, MdbxError> {
-        self.inner.id().map_err(MdbxError::Mdbx)
+        self.with_tx(|tx| tx.id().map_err(MdbxError::Mdbx))
     }
 
     /// Create [`Cursor`] for raw table name.
     pub fn new_cursor_raw<'a>(&'a self, name: &'static str) -> Result<Cursor<'a, K>, MdbxError> {
         let db = self.get_db(Some(name))?;
         let fsi = self.get_fsi(name)?;
-        let inner = self.inner.cursor(db)?;
-        Ok(Cursor::new(inner, fsi))
+
+        // Create cursor with RefCell borrow, then extend its lifetime.
+        //
+        // SAFETY: The cursor is valid for the transaction lifetime, which is
+        // owned by the Tx struct. The RefCell borrow is short-lived, but the
+        // underlying MDBX cursor remains valid because:
+        // 1. The transaction (TxUnsync) is owned by self.inner
+        // 2. MDBX cursors are valid for the transaction's lifetime
+        // 3. The Tx struct's lifetime 'a bounds how long the cursor can be used
+        let cursor = {
+            let guard = self.inner.borrow_mut();
+            let cursor = guard.cursor(db)?;
+            // Transmute the cursor lifetime from the RefCell borrow to 'a
+            unsafe {
+                std::mem::transmute::<
+                    signet_libmdbx::Cursor<'_, K, K::Inner>,
+                    signet_libmdbx::Cursor<'a, K, K::Inner>,
+                >(cursor)
+            }
+        };
+        Ok(Cursor::new(cursor, fsi))
     }
 
     /// Create a [`Cursor`] for the given table.
@@ -111,7 +175,7 @@ impl Tx<RW> {
         let mut value_buf = [0u8; 8];
         fsi.encode_value_to(&mut value_buf.as_mut_slice());
 
-        self.inner.put(db, key_buf, value_buf, WriteFlags::UPSERT)?;
+        self.with_tx(|tx| tx.put(db, key_buf, value_buf, WriteFlags::UPSERT))?;
         self.fsi_cache.write().insert(table, fsi);
 
         Ok(())
@@ -136,8 +200,13 @@ where
         key: &[u8],
     ) -> Result<Option<Cow<'a, [u8]>>, Self::Error> {
         let dbi = self.get_dbi_raw(table)?;
-
-        self.inner.get(dbi, key.as_ref()).map_err(MdbxError::from)
+        // SAFETY: MDBX data is valid for transaction lifetime
+        unsafe {
+            self.with_tx_cow(|tx| {
+                let result: Result<Option<Cow<'_, [u8]>>, _> = tx.get(dbi, key.as_ref());
+                result.map_err(MdbxError::from)
+            })
+        }
     }
 
     fn raw_get_dual<'a>(
@@ -177,8 +246,7 @@ impl HotKvWrite for Tx<RW> {
         value: &[u8],
     ) -> Result<(), Self::Error> {
         let db = self.get_db(Some(table))?;
-
-        self.inner.put(db, key, value, WriteFlags::UPSERT).map_err(MdbxError::Mdbx)
+        self.with_tx(|tx| tx.put(db, key, value, WriteFlags::UPSERT).map_err(MdbxError::Mdbx))
     }
 
     fn queue_raw_put_dual(
@@ -208,15 +276,19 @@ impl HotKvWrite for Tx<RW> {
 
             // get_both_range finds entry where key=key1 and value >= search_val
             // If found and the key2 portion matches, delete it
-            let mut cursor = self.inner.cursor(db).map_err(MdbxError::Mdbx)?;
-            if let Some(found_val) =
-                cursor.get_both_range::<Cow<'_, [u8]>>(key1, search_val).map_err(MdbxError::from)?
-            {
-                // Check if found value starts with our key2
-                if found_val.starts_with(key2) {
-                    cursor.del(Default::default()).map_err(MdbxError::Mdbx)?;
+            self.with_tx(|tx| {
+                let mut cursor = tx.cursor(db).map_err(MdbxError::Mdbx)?;
+                if let Some(found_val) = cursor
+                    .get_both_range::<Cow<'_, [u8]>>(key1, search_val)
+                    .map_err(MdbxError::from)?
+                {
+                    // Check if found value starts with our key2
+                    if found_val.starts_with(key2) {
+                        cursor.del(Default::default()).map_err(MdbxError::Mdbx)?;
+                    }
                 }
-            }
+                Ok::<_, MdbxError>(())
+            })?;
         }
 
         // For DUPSORT tables, the "value" is key2 concatenated with the actual
@@ -230,25 +302,24 @@ impl HotKvWrite for Tx<RW> {
             let mut combined = Vec::with_capacity(key2.len() + value.len());
             combined.extend_from_slice(key2);
             combined.extend_from_slice(value);
-            return self
-                .inner
-                .put(db, key1, &combined, WriteFlags::UPSERT)
-                .map_err(MdbxError::Mdbx);
-        } else {
-            // Use the scratch buffer
-            let mut buffer = [0u8; TX_BUFFER_SIZE];
-            let buf = &mut buffer[..key2.len() + value.len()];
-            buf[..key2.len()].copy_from_slice(key2);
-            buf[key2.len()..].copy_from_slice(value);
-            self.inner.put(db, key1, buf, WriteFlags::UPSERT)?;
+            return self.with_tx(|tx| {
+                tx.put(db, key1, &combined, WriteFlags::UPSERT).map_err(MdbxError::Mdbx)
+            });
         }
+
+        // Use the scratch buffer
+        let mut buffer = [0u8; TX_BUFFER_SIZE];
+        let buf = &mut buffer[..key2.len() + value.len()];
+        buf[..key2.len()].copy_from_slice(key2);
+        buf[key2.len()..].copy_from_slice(value);
+        self.with_tx(|tx| tx.put(db, key1, buf, WriteFlags::UPSERT))?;
 
         Ok(())
     }
 
     fn queue_raw_delete(&self, table: &'static str, key: &[u8]) -> Result<(), Self::Error> {
         let db = self.get_db(Some(table))?;
-        self.inner.del(db, key, None).map(|_| ()).map_err(MdbxError::Mdbx)
+        self.with_tx(|tx| tx.del(db, key, None).map(|_| ()).map_err(MdbxError::Mdbx))
     }
 
     fn queue_raw_delete_dual(
@@ -270,15 +341,15 @@ impl HotKvWrite for Tx<RW> {
             buffer[key2.len()..total_size].fill(0);
             let k2 = &buffer[..total_size];
 
-            self.inner.del(db, key1, Some(k2)).map(|_| ()).map_err(MdbxError::Mdbx)
+            self.with_tx(|tx| tx.del(db, key1, Some(k2)).map(|_| ()).map_err(MdbxError::Mdbx))
         } else {
-            self.inner.del(db, key1, Some(key2)).map(|_| ()).map_err(MdbxError::Mdbx)
+            self.with_tx(|tx| tx.del(db, key1, Some(key2)).map(|_| ()).map_err(MdbxError::Mdbx))
         }
     }
 
     fn queue_raw_clear(&self, table: &'static str) -> Result<(), Self::Error> {
         let db = self.get_db(Some(table))?;
-        self.inner.clear_db(db).map_err(MdbxError::Mdbx)
+        self.with_tx(|tx| tx.clear_db(db).map_err(MdbxError::Mdbx))
     }
 
     fn queue_raw_create(
@@ -310,7 +381,7 @@ impl HotKvWrite for Tx<RW> {
         // no clone. sad.
         let flags2 = DatabaseFlags::from_bits(flags.bits()).unwrap();
 
-        self.inner.create_db(Some(table), flags2)?;
+        self.with_tx(|tx| tx.create_db(Some(table), flags2))?;
         self.store_fsi(table, fsi)?;
 
         Ok(())
@@ -321,8 +392,8 @@ impl HotKvWrite for Tx<RW> {
         let mut key_buf = [0u8; MAX_KEY_SIZE];
         let key_bytes = key.encode_key(&mut key_buf);
 
-        self.inner
-            .with_reservation(
+        self.with_tx(|tx| {
+            tx.with_reservation(
                 db,
                 key_bytes,
                 value.encoded_size(),
@@ -330,6 +401,7 @@ impl HotKvWrite for Tx<RW> {
                 |mut reserved| value.encode_value_to(&mut reserved),
             )
             .map_err(MdbxError::from)
+        })
     }
 
     fn queue_put_many_dual<'a, 'b, 'c, T, I, J>(&self, groups: I) -> Result<(), Self::Error>
@@ -362,7 +434,7 @@ impl HotKvWrite for Tx<RW> {
         let mut key2_buf = [0u8; MAX_KEY_SIZE];
 
         // Calculate max entries per page to bound buffer size
-        let page_size = self.inner.env().stat()?.page_size() as usize;
+        let page_size = self.with_tx(|tx| tx.env().stat().map(|s| s.page_size() as usize))?;
         let max_entries_per_page = page_size / entry_size;
         let mut buffer = Vec::with_capacity(max_entries_per_page * entry_size);
 
@@ -397,7 +469,8 @@ impl HotKvWrite for Tx<RW> {
     }
 
     fn raw_commit(self) -> Result<(), Self::Error> {
-        // when committing, mdbx returns true on failure
-        self.inner.commit().map(drop).map_err(MdbxError::Mdbx)
+        // Take ownership of the inner transaction from the RefCell
+        let inner = self.inner.into_inner();
+        inner.commit().map_err(MdbxError::Mdbx)
     }
 }

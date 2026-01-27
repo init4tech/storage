@@ -5,7 +5,7 @@ use signet_hot::{
     MAX_FIXED_VAL_SIZE, MAX_KEY_SIZE,
     model::{DualKeyTraverse, KvTraverse, KvTraverseMut, RawDualKeyValue, RawKeyValue, RawValue},
 };
-use signet_libmdbx::{RO, RW, TransactionKind, tx::PtrSyncInner};
+use signet_libmdbx::{RO, RW, TransactionKind};
 use std::{
     borrow::Cow,
     ops::{Deref, DerefMut},
@@ -18,9 +18,14 @@ pub type CursorRO<'a> = Cursor<'a, RO>;
 pub type CursorRW<'a> = Cursor<'a, RW>;
 
 /// Cursor wrapper to access KV items.
+///
+/// The inner cursor type uses `K::Inner` which is the transaction's internal
+/// pointer access type:
+/// - For `RO`: `K::Inner = RoGuard`
+/// - For `RW`: `K::Inner = RwUnsync`
 pub struct Cursor<'a, K: TransactionKind> {
     /// Inner `libmdbx` cursor.
-    pub(crate) inner: signet_libmdbx::Cursor<'a, K, PtrSyncInner<K>>,
+    pub(crate) inner: signet_libmdbx::Cursor<'a, K, K::Inner>,
 
     /// Fixed size info for this table.
     fsi: FixedSizeInfo,
@@ -30,18 +35,14 @@ pub struct Cursor<'a, K: TransactionKind> {
     buf: [u8; MAX_KEY_SIZE + MAX_FIXED_VAL_SIZE],
 }
 
-impl<K: TransactionKind + std::fmt::Debug> std::fmt::Debug for Cursor<'_, K> {
+impl<K: TransactionKind> std::fmt::Debug for Cursor<'_, K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Cursor")
-            .field("inner", &self.inner)
-            .field("fsi", &self.fsi)
-            .field("buf", &self.buf)
-            .finish()
+        f.debug_struct("Cursor").field("fsi", &self.fsi).finish_non_exhaustive()
     }
 }
 
 impl<'a, K: TransactionKind> Deref for Cursor<'a, K> {
-    type Target = signet_libmdbx::Cursor<'a, K, PtrSyncInner<K>>;
+    type Target = signet_libmdbx::Cursor<'a, K, K::Inner>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -56,10 +57,7 @@ impl<'a> DerefMut for Cursor<'a, RW> {
 
 impl<'a, K: TransactionKind> Cursor<'a, K> {
     /// Creates a new `Cursor` wrapping the given `libmdbx` cursor.
-    pub const fn new(
-        inner: signet_libmdbx::Cursor<'a, K, PtrSyncInner<K>>,
-        fsi: FixedSizeInfo,
-    ) -> Self {
+    pub const fn new(inner: signet_libmdbx::Cursor<'a, K, K::Inner>, fsi: FixedSizeInfo) -> Self {
         Self { inner, fsi, buf: [0u8; MAX_KEY_SIZE + MAX_FIXED_VAL_SIZE] }
     }
 

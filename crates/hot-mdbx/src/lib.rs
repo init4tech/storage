@@ -386,7 +386,7 @@ impl DatabaseEnv {
     /// Start a new read-only transaction.
     fn tx(&self) -> Result<Tx<RO>, MdbxError> {
         self.inner
-            .begin_ro_txn()
+            .begin_ro_unsync()
             .map(|tx| Tx::new(tx, self.fsi_cache.clone()))
             .map_err(MdbxError::Mdbx)
     }
@@ -394,7 +394,7 @@ impl DatabaseEnv {
     /// Start a new read-write transaction.
     fn tx_mut(&self) -> Result<Tx<RW>, MdbxError> {
         self.inner
-            .begin_rw_txn()
+            .begin_rw_unsync()
             .map(|tx| Tx::new(tx, self.fsi_cache.clone()))
             .map_err(MdbxError::Mdbx)
     }
