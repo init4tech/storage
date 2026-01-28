@@ -14,7 +14,7 @@ bytes.workspace = true
 page_size.workspace = true
 parking_lot.workspace = true
 signet-hot.workspace = true
-signet-libmdbx = { workspace = true, features = ["read-tx-timeouts"] }
+signet-libmdbx.workspace = true
 sysinfo = "0.37.2"
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true

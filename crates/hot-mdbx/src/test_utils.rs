@@ -7,7 +7,6 @@ use signet_hot::{
     model::{HotKv, HotKvWrite},
     tables::{self, SingleKey, Table},
 };
-use signet_libmdbx::MaxReadTransactionDuration;
 use tempfile::{TempDir, tempdir};
 
 // Test table definitions for traversal tests
@@ -27,9 +26,7 @@ impl SingleKey for TestTable {}
 pub fn create_test_rw_db() -> (TempDir, DatabaseEnv) {
     let dir = tempdir().unwrap();
 
-    let args = DatabaseArguments::new()
-        .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded));
-
+    let args = DatabaseArguments::new();
     let db = DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, args).unwrap();
 
     // Create tables from the `crate::tables::hot` module
@@ -72,7 +69,7 @@ mod tests {
         model::{DualTableTraverse, HotKv, HotKvRead, HotKvWrite, TableTraverse, TableTraverseMut},
         tables,
     };
-    use signet_libmdbx::{RO, RW};
+    use signet_libmdbx::{Ro, Rw};
     use signet_storage_types::Account;
     use std::borrow::Cow;
     use trevm::revm::bytecode::Bytecode;
@@ -129,7 +126,7 @@ mod tests {
 
         // Test HotKv::writer() and basic write operations
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
 
             // Create tables first
             writer.queue_create::<tables::Bytecodes>().unwrap();
@@ -144,7 +141,7 @@ mod tests {
 
         // Test HotKv::reader() and basic read operations
         {
-            let reader: Tx<RO> = db.reader().unwrap();
+            let reader: Tx<Ro> = db.reader().unwrap();
 
             // Read account data
             let read_account: Option<Account> =
@@ -176,7 +173,7 @@ mod tests {
 
         // Test raw write operations
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
 
             // Create table
             writer.queue_raw_create(table_name, None, None, false).unwrap();
@@ -189,7 +186,7 @@ mod tests {
 
         // Test raw read operations
         {
-            let reader: Tx<RO> = db.reader().unwrap();
+            let reader: Tx<Ro> = db.reader().unwrap();
 
             let read_value = reader.raw_get(table_name, key).unwrap();
             assert_eq!(read_value.as_deref(), Some(value.as_slice()));
@@ -201,7 +198,7 @@ mod tests {
 
         // Test raw delete
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
 
             writer.queue_raw_delete(table_name, key).unwrap();
             writer.raw_commit().unwrap();
@@ -209,7 +206,7 @@ mod tests {
 
         // Verify deletion
         {
-            let reader: Tx<RO> = db.reader().unwrap();
+            let reader: Tx<Ro> = db.reader().unwrap();
             let deleted_value = reader.raw_get(table_name, key).unwrap();
             assert_eq!(deleted_value, None);
         }
@@ -228,7 +225,7 @@ mod tests {
 
         // Test dual-keyed table operations
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
 
             // Put storage data using dual keys
             writer
@@ -240,7 +237,7 @@ mod tests {
 
         // Test reading dual-keyed data
         {
-            let reader: Tx<RO> = db.reader().unwrap();
+            let reader: Tx<Ro> = db.reader().unwrap();
 
             // Read storage using dual key lookup
             let read_value = reader
@@ -262,28 +259,28 @@ mod tests {
         // Add some data
         let (block_number, header) = create_test_header();
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
             writer.queue_put::<tables::Headers>(&block_number, &header).unwrap();
             writer.raw_commit().unwrap();
         }
 
         // Verify data exists
         {
-            let reader: Tx<RO> = db.reader().unwrap();
+            let reader: Tx<Ro> = db.reader().unwrap();
             let read_header: Option<Header> = reader.get::<tables::Headers>(&block_number).unwrap();
             assert_eq!(read_header, Some(header.clone()));
         }
 
         // Clear the table
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
             writer.queue_clear::<tables::Headers>().unwrap();
             writer.raw_commit().unwrap();
         }
 
         // Verify table is empty
         {
-            let reader: Tx<RO> = db.reader().unwrap();
+            let reader: Tx<Ro> = db.reader().unwrap();
             let read_header: Option<Header> = reader.get::<tables::Headers>(&block_number).unwrap();
             assert_eq!(read_header, None);
         }
@@ -312,7 +309,7 @@ mod tests {
 
         // Test batch writes
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
 
             // Write multiple accounts
             for (address, account) in &accounts {
@@ -324,7 +321,7 @@ mod tests {
 
         // Test batch reads
         {
-            let reader: Tx<RO> = db.reader().unwrap();
+            let reader: Tx<Ro> = db.reader().unwrap();
 
             for (address, expected_account) in &accounts {
                 let read_account: Option<Account> =
@@ -335,7 +332,7 @@ mod tests {
 
         // Test batch get_many
         {
-            let reader: Tx<RO> = db.reader().unwrap();
+            let reader: Tx<Ro> = db.reader().unwrap();
             let addresses: Vec<Address> = accounts.iter().map(|(addr, _)| *addr).collect();
             let read_accounts: Vec<(_, Option<Account>)> =
                 reader.get_many::<tables::PlainAccountState, _>(addresses.iter()).unwrap();
@@ -356,17 +353,17 @@ mod tests {
 
         // Setup initial data
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
             writer.queue_put::<tables::PlainAccountState>(&address, &account).unwrap();
             writer.raw_commit().unwrap();
         }
 
         // Start a reader transaction
-        let reader: Tx<RO> = db.reader().unwrap();
+        let reader: Tx<Ro> = db.reader().unwrap();
 
         // Modify data in a writer transaction
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
             let modified_account =
                 Account { nonce: 999, balance: U256::from(9999u64), bytecode_hash: None };
             writer.queue_put::<tables::PlainAccountState>(&address, &modified_account).unwrap();
@@ -382,7 +379,7 @@ mod tests {
 
         // New reader should see modified data
         {
-            let new_reader: Tx<RO> = db.reader().unwrap();
+            let new_reader: Tx<Ro> = db.reader().unwrap();
             let read_account: Option<Account> =
                 new_reader.get::<tables::PlainAccountState>(&address).unwrap();
             assert_eq!(read_account.unwrap().nonce, 999);
@@ -399,15 +396,15 @@ mod tests {
 
         // Setup data
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
             writer.queue_put::<tables::PlainAccountState>(&address, &account).unwrap();
             writer.raw_commit().unwrap();
         }
 
         // Create multiple readers
-        let reader1: Tx<RO> = db.reader().unwrap();
-        let reader2: Tx<RO> = db.reader().unwrap();
-        let reader3: Tx<RO> = db.reader().unwrap();
+        let reader1: Tx<Ro> = db.reader().unwrap();
+        let reader2: Tx<Ro> = db.reader().unwrap();
+        let reader3: Tx<Ro> = db.reader().unwrap();
 
         // All readers should see the same data
         let account1: Option<Account> = reader1.get::<tables::PlainAccountState>(&address).unwrap();
@@ -427,7 +424,7 @@ mod tests {
     fn test_error_handling_inner(db: &DatabaseEnv) {
         // Test reading from non-existent table
         {
-            let reader: Tx<RO> = db.reader().unwrap();
+            let reader: Tx<Ro> = db.reader().unwrap();
             let result = reader.raw_get("nonexistent_table", b"key");
 
             // Should handle gracefully (may return None or error depending on MDBX behavior)
@@ -440,7 +437,7 @@ mod tests {
 
         // Test writing to a table without creating it first
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
             let (address, account) = create_test_account();
 
             // This should handle the case where table doesn't exist
@@ -468,7 +465,7 @@ mod tests {
         let header = header.seal_slow();
 
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
 
             // Write different types
             writer.put_header(&header).unwrap();
@@ -477,7 +474,7 @@ mod tests {
         }
 
         {
-            let reader: Tx<RO> = db.reader().unwrap();
+            let reader: Tx<Ro> = db.reader().unwrap();
 
             // Read and verify
             let read_header: Option<Header> = reader.get::<tables::Headers>(&block_number).unwrap();
@@ -501,14 +498,14 @@ mod tests {
         let large_bytecode = Bytecode::new_raw(large_code_vec.clone().into());
 
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
             writer.queue_create::<tables::Bytecodes>().unwrap();
             writer.queue_put::<tables::Bytecodes>(&hash, &large_bytecode).unwrap();
             writer.raw_commit().unwrap();
         }
 
         {
-            let reader: Tx<RO> = db.reader().unwrap();
+            let reader: Tx<Ro> = db.reader().unwrap();
             let read_bytecode: Option<Bytecode> = reader.get::<tables::Bytecodes>(&hash).unwrap();
             assert_eq!(read_bytecode, Some(large_bytecode));
         }
@@ -535,7 +532,7 @@ mod tests {
 
         // Insert test data
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
             for (key, value) in &test_data {
                 writer.queue_put::<TestTable>(key, value).unwrap();
             }
@@ -544,7 +541,7 @@ mod tests {
 
         // Test cursor traversal
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
             let mut cursor = tx.new_cursor::<TestTable>().unwrap();
 
             // Test first()
@@ -599,7 +596,7 @@ mod tests {
 
         // Insert test data
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
             for (key, value) in &test_data {
                 writer.queue_put::<TestTable>(key, value).unwrap();
             }
@@ -608,7 +605,7 @@ mod tests {
 
         // Test sequential navigation
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
             let mut cursor = tx.new_cursor::<TestTable>().unwrap();
 
             // Start from first and traverse forward
@@ -666,7 +663,7 @@ mod tests {
 
         // Insert test data
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
             for (key, value) in &test_data {
                 writer.queue_put::<TestTable>(key, value).unwrap();
             }
@@ -674,7 +671,7 @@ mod tests {
         }
         // Test cursor deletion
         {
-            let tx: Tx<RW> = db.writer().unwrap();
+            let tx: Tx<Rw> = db.writer().unwrap();
 
             let mut cursor = tx.new_cursor::<TestTable>().unwrap();
 
@@ -694,7 +691,7 @@ mod tests {
 
         // Verify deletion
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
             let mut cursor = tx.new_cursor::<TestTable>().unwrap();
 
             // Should only have first and third entries
@@ -738,7 +735,7 @@ mod tests {
 
         // Insert test data
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
 
             for (address, account) in &test_accounts {
                 writer.queue_put::<tables::PlainAccountState>(address, account).unwrap();
@@ -749,7 +746,7 @@ mod tests {
 
         // Test typed table traversal
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
             let mut cursor = tx.new_cursor::<tables::PlainAccountState>().unwrap();
 
             // Test first with type-safe operations
@@ -823,7 +820,7 @@ mod tests {
 
         // Insert test data
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
 
             for (address, storage_key, value) in &test_storage {
                 writer
@@ -836,7 +833,7 @@ mod tests {
 
         // Test dual-keyed traversal
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
             let mut cursor = tx.new_cursor::<tables::PlainStorageState>().unwrap();
 
             // Test exact dual lookup
@@ -900,7 +897,7 @@ mod tests {
         let value = U256::from(100);
 
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
             writer
                 .queue_put_dual::<tables::PlainStorageState>(&address, &storage_key, &value)
                 .unwrap();
@@ -908,7 +905,7 @@ mod tests {
         }
 
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
             let mut cursor = tx.new_cursor::<tables::PlainStorageState>().unwrap();
 
             // Test exact lookup for non-existent dual key
@@ -955,7 +952,7 @@ mod tests {
     fn test_table_traverse_empty_table_inner(db: &DatabaseEnv) {
         // TestTable is already created but empty
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
             let mut cursor = tx.new_cursor::<TestTable>().unwrap();
 
             // All operations should return None on empty table
@@ -983,7 +980,7 @@ mod tests {
         ];
 
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
             for (key, value) in &test_data {
                 writer.queue_put::<TestTable>(key, value).unwrap();
             }
@@ -991,7 +988,7 @@ mod tests {
         }
 
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
             let mut cursor = tx.new_cursor::<TestTable>().unwrap();
 
             // Test that cursor operations maintain state correctly
@@ -1049,7 +1046,7 @@ mod tests {
     fn test_get_fsi_inner(db: &DatabaseEnv) {
         // Tables are already created in create_test_rw_db()
         // Try to get FixedSizeInfo for an existing table
-        let reader: Tx<RO> = db.reader().unwrap();
+        let reader: Tx<Ro> = db.reader().unwrap();
 
         // This should work - Headers table was created in setup
         reader.get_fsi(tables::Headers::NAME).unwrap();
@@ -1076,7 +1073,7 @@ mod tests {
 
         // Write storage
         {
-            let writer: Tx<RW> = db.writer().unwrap();
+            let writer: Tx<Rw> = db.writer().unwrap();
 
             // Check fsi before write
             {
@@ -1090,7 +1087,7 @@ mod tests {
 
         // Read storage
         {
-            let reader: Tx<RO> = db.reader().unwrap();
+            let reader: Tx<Ro> = db.reader().unwrap();
 
             // Check fsi after write
             {
@@ -1140,7 +1137,7 @@ mod tests {
 
         // Write using put_multiple
         {
-            let tx: Tx<RW> = db.writer().unwrap();
+            let tx: Tx<Rw> = db.writer().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
             let written =
@@ -1154,7 +1151,7 @@ mod tests {
 
         // Verify all entries were written
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
             // Traverse and count entries
@@ -1181,7 +1178,7 @@ mod tests {
 
         // First, insert some initial data
         {
-            let tx: Tx<RW> = db.writer().unwrap();
+            let tx: Tx<Rw> = db.writer().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
             let mut initial_data = vec![0u8; data_size * 2];
@@ -1198,7 +1195,7 @@ mod tests {
 
         // Now replace ALL dups with new data using all_dups=true
         {
-            let tx: Tx<RW> = db.writer().unwrap();
+            let tx: Tx<Rw> = db.writer().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
             let mut new_data = vec![0u8; data_size * 3];
@@ -1219,7 +1216,7 @@ mod tests {
 
         // Verify: should have exactly 3 entries (old ones replaced)
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
             // Position at the key
@@ -1251,7 +1248,7 @@ mod tests {
         data[8..16].copy_from_slice(&[0x22u8; 8]);
 
         {
-            let tx: Tx<RW> = db.writer().unwrap();
+            let tx: Tx<Rw> = db.writer().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
             let written =
@@ -1277,7 +1274,7 @@ mod tests {
         // Intentionally wrong size: 32 bytes instead of 48 (16 * 3)
         let data = vec![0u8; 32];
 
-        let tx: Tx<RW> = db.writer().unwrap();
+        let tx: Tx<Rw> = db.writer().unwrap();
         let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
@@ -1300,7 +1297,7 @@ mod tests {
         // Intentionally oversized: 64 bytes instead of 32 (16 * 2)
         let data = vec![0u8; 64];
 
-        let tx: Tx<RW> = db.writer().unwrap();
+        let tx: Tx<Rw> = db.writer().unwrap();
         let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
@@ -1329,7 +1326,7 @@ mod tests {
         }
 
         {
-            let tx: Tx<RW> = db.writer().unwrap();
+            let tx: Tx<Rw> = db.writer().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
             let written =
@@ -1343,7 +1340,7 @@ mod tests {
 
         // Verify count
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
             cursor.inner.set::<Cow<'_, [u8]>>(&key).unwrap();
@@ -1385,7 +1382,7 @@ mod tests {
 
         // Write - MDBX should handle multi-page writes internally
         {
-            let tx: Tx<RW> = db.writer().unwrap();
+            let tx: Tx<Rw> = db.writer().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
             let written =
@@ -1401,7 +1398,7 @@ mod tests {
 
         // Verify at least partial write succeeded
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
             let found = cursor.inner.set::<Cow<'_, [u8]>>(&key).unwrap();
@@ -1442,7 +1439,7 @@ mod tests {
 
         // Write using put_multiple_fixed (safe wrapper)
         {
-            let tx: Tx<RW> = db.writer().unwrap();
+            let tx: Tx<Rw> = db.writer().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
             let written = cursor.put_multiple_fixed(&key, &data, count, false).unwrap();
@@ -1455,7 +1452,7 @@ mod tests {
 
         // Verify all entries were written
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
             // Position at key
@@ -1482,7 +1479,7 @@ mod tests {
         let key = 42u64.to_le_bytes();
         let data = vec![0u8; 16];
 
-        let tx: Tx<RW> = db.writer().unwrap();
+        let tx: Tx<Rw> = db.writer().unwrap();
         let mut cursor = tx.new_cursor::<TestTable>().unwrap();
 
         let result = cursor.put_multiple_fixed(&key, &data, 1, false);
@@ -1512,7 +1509,7 @@ mod tests {
 
         // Write using queue_put_many_dual
         {
-            let tx: Tx<RW> = db.writer().unwrap();
+            let tx: Tx<Rw> = db.writer().unwrap();
 
             let groups: Vec<(&Address, Vec<(&U256, &U256)>)> = vec![
                 (&addr1, slots1.iter().map(|(k, v)| (k, v)).collect()),
@@ -1526,7 +1523,7 @@ mod tests {
 
         // Verify all entries were written correctly
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
 
             // Check addr1 entries
             for (slot, expected_value) in &slots1 {
@@ -1559,7 +1556,7 @@ mod tests {
 
         // Write using queue_put_many_dual
         {
-            let tx: Tx<RW> = db.writer().unwrap();
+            let tx: Tx<Rw> = db.writer().unwrap();
 
             let groups: Vec<(&Address, Vec<(&U256, &U256)>)> =
                 vec![(&addr, slots.iter().map(|(k, v)| (k, v)).collect())];
@@ -1571,7 +1568,7 @@ mod tests {
 
         // Verify all entries were written
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
 
             // Spot check a few entries
             let value = tx.get_dual::<tables::PlainStorageState>(&addr, &U256::from(0)).unwrap();
@@ -1593,7 +1590,7 @@ mod tests {
     fn test_queue_put_many_dual_empty_groups_inner(db: &DatabaseEnv) {
         // Test with empty groups - should not error
         {
-            let tx: Tx<RW> = db.writer().unwrap();
+            let tx: Tx<Rw> = db.writer().unwrap();
 
             let groups: Vec<(&Address, Vec<(&U256, &U256)>)> = vec![];
 
@@ -1634,7 +1631,7 @@ mod tests {
 
         // Write using queue_put_many_dual - this should trigger multiple put_multiple_fixed calls
         {
-            let tx: Tx<RW> = db.writer().unwrap();
+            let tx: Tx<Rw> = db.writer().unwrap();
 
             let groups: Vec<(&Address, Vec<(&U256, &U256)>)> =
                 vec![(&addr, slots.iter().map(|(k, v)| (k, v)).collect())];
@@ -1646,7 +1643,7 @@ mod tests {
 
         // Verify ALL entries were written correctly
         {
-            let tx: Tx<RO> = db.reader().unwrap();
+            let tx: Tx<Ro> = db.reader().unwrap();
 
             // Check every entry to ensure no data loss at page boundaries
             for (slot, expected_value) in &slots {
