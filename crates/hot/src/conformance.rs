@@ -1978,7 +1978,11 @@ pub fn test_get_many<T: HotKv>(hot_kv: &T) {
     {
         let reader = hot_kv.reader().unwrap();
         let keys = [addr1, addr2, addr3, addr4];
-        let results = reader.get_many::<tables::PlainAccountState, _>(&keys).unwrap();
+        let results = reader
+            .get_many::<tables::PlainAccountState, _>(&keys)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
 
         assert_eq!(results.len(), 4);
 
