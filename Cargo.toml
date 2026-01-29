@@ -42,7 +42,7 @@ signet-storage = { version = "0.0.1", path = "./crates/storage" }
 signet-storage-types = { version = "0.0.1", path = "./crates/types" }
 
 # External, in-house
-signet-libmdbx = "0.6.0"
+signet-libmdbx = { version = "0.7.0" }
 
 signet-zenith = "0.16.0-rc.5"
 
@@ -64,4 +64,5 @@ tempfile = "3.20.0"
 thiserror = "2.0.18"
 tokio = { version = "1.45.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+itertools = "0.14"
 tracing = "0.1.44"

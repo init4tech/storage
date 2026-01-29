@@ -3,7 +3,10 @@
 use crate::{FixedSizeInfo, MdbxError};
 use signet_hot::{
     MAX_FIXED_VAL_SIZE, MAX_KEY_SIZE,
-    model::{DualKeyTraverse, KvTraverse, KvTraverseMut, RawDualKeyValue, RawKeyValue, RawValue},
+    model::{
+        DualKeyTraverse, DualKeyTraverseMut, KvTraverse, KvTraverseMut, RawDualKeyValue,
+        RawKeyValue, RawValue,
+    },
 };
 use signet_libmdbx::{Ro, Rw, RwSync, TransactionKind, tx::WriteMarker};
 use std::{
@@ -104,7 +107,7 @@ where
 
 impl<K: TransactionKind + WriteMarker> KvTraverseMut<MdbxError> for Cursor<'_, K> {
     fn delete_current(&mut self) -> Result<(), MdbxError> {
-        self.inner.del(Default::default()).map_err(MdbxError::Mdbx)
+        self.inner.del().map_err(MdbxError::Mdbx)
     }
 }
 
@@ -500,5 +503,26 @@ where
             }
             None => Ok(None),
         }
+    }
+}
+
+impl<K: TransactionKind + WriteMarker> DualKeyTraverseMut<MdbxError> for Cursor<'_, K> {
+    fn delete_current(&mut self) -> Result<(), MdbxError> {
+        // For DUPSORT tables, del() deletes only the current duplicate
+        self.inner.del().map_err(MdbxError::Mdbx)
+    }
+
+    fn clear_k1(&mut self, key1: &[u8]) -> Result<(), MdbxError> {
+        if !self.fsi.is_dupsort() {
+            return Err(MdbxError::NotDupSort);
+        }
+
+        // Position at the K1 - if it doesn't exist, nothing to delete
+        if self.inner.set::<()>(key1)?.is_none() {
+            return Ok(());
+        }
+        // Delete all K2 entries for this K1
+        self.inner.del_all_dups()?;
+        Ok(())
     }
 }

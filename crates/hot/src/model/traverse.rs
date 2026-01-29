@@ -6,7 +6,7 @@ use crate::{
     tables::{DualKey, SingleKey},
 };
 use core::marker::PhantomData;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 /// Trait for traversing key-value pairs in the database.
 pub trait KvTraverse<E: HotKvReadError> {
@@ -37,6 +37,36 @@ pub trait KvTraverse<E: HotKvReadError> {
     /// Returning `Ok(None)` indicates the cursor is before the start of the
     /// database.
     fn read_prev<'a>(&'a mut self) -> Result<Option<RawKeyValue<'a>>, E>;
+
+    /// Position at first entry and return iterator over all entries.
+    ///
+    /// The default implementation uses `first()` followed by repeated
+    /// `read_next()` calls. Implementations may override this to use
+    /// more efficient native iterators.
+    fn iter(&mut self) -> Result<impl Iterator<Item = Result<RawKeyValue<'_>, E>> + '_, E>
+    where
+        Self: Sized,
+    {
+        self.first()?;
+        Ok(RawKvIter { cursor: self, done: false, _marker: PhantomData })
+    }
+
+    /// Position at `key` and return iterator over subsequent entries.
+    ///
+    /// The iterator starts at the first entry with key >= `key`.
+    /// The default implementation uses `lower_bound()` followed by repeated
+    /// `read_next()` calls. Implementations may override this to use
+    /// more efficient native iterators.
+    fn iter_from<'a>(
+        &'a mut self,
+        key: &[u8],
+    ) -> Result<impl Iterator<Item = Result<RawKeyValue<'a>, E>> + 'a, E>
+    where
+        Self: Sized,
+    {
+        self.lower_bound(key)?;
+        Ok(RawKvIter { cursor: self, done: false, _marker: PhantomData })
+    }
 }
 
 /// Trait for traversing key-value pairs in the database with mutation
@@ -45,7 +75,7 @@ pub trait KvTraverseMut<E: HotKvReadError>: KvTraverse<E> {
     /// Delete the current key-value pair in the database.
     fn delete_current(&mut self) -> Result<(), E>;
 
-    /// Delete a range of key-value pairs in the database, from `start_key`
+    /// Delete a range of key-value pairs in the database (exclusive end).
     fn delete_range(&mut self, range: Range<&[u8]>) -> Result<(), E> {
         let Some((key, _)) = self.lower_bound(range.start)? else {
             return Ok(());
@@ -57,6 +87,25 @@ pub trait KvTraverseMut<E: HotKvReadError>: KvTraverse<E> {
 
         while let Some((key, _)) = self.read_next()? {
             if key.as_ref() >= range.end {
+                break;
+            }
+            self.delete_current()?;
+        }
+        Ok(())
+    }
+
+    /// Delete a range of key-value pairs in the database (inclusive end).
+    fn delete_range_inclusive(&mut self, start: &[u8], end: &[u8]) -> Result<(), E> {
+        let Some((key, _)) = self.lower_bound(start)? else {
+            return Ok(());
+        };
+        if key.as_ref() > end {
+            return Ok(());
+        }
+        self.delete_current()?;
+
+        while let Some((key, _)) = self.read_next()? {
+            if key.as_ref() > end {
                 break;
             }
             self.delete_current()?;
@@ -133,6 +182,108 @@ pub trait DualKeyTraverse<E: HotKvReadError> {
     /// duplicate values.
     /// Returning `Ok(None)` indicates there is no previous key2 for this key1.
     fn previous_k2<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, E>;
+
+    /// Position at first entry and return iterator over all entries.
+    ///
+    /// The default implementation uses `first()` followed by repeated
+    /// `read_next()` calls. Implementations may override this to use
+    /// more efficient native iterators.
+    fn iter(&mut self) -> Result<impl Iterator<Item = Result<RawDualKeyValue<'_>, E>> + '_, E>
+    where
+        Self: Sized,
+    {
+        self.first()?;
+        Ok(RawDualKeyIter { cursor: self, done: false, _marker: PhantomData })
+    }
+
+    /// Position at (k1, k2) and return iterator over subsequent entries.
+    ///
+    /// The iterator starts at the first entry with (k1, k2) >= the specified
+    /// keys and continues through all subsequent entries, crossing k1 boundaries.
+    fn iter_from<'a>(
+        &'a mut self,
+        k1: &[u8],
+        k2: &[u8],
+    ) -> Result<impl Iterator<Item = Result<RawDualKeyValue<'a>, E>> + 'a, E>
+    where
+        Self: Sized,
+    {
+        self.next_dual_above(k1, k2)?;
+        Ok(RawDualKeyIter { cursor: self, done: false, _marker: PhantomData })
+    }
+
+    /// Iterate k2 entries within a single k1.
+    ///
+    /// The iterator starts at the first entry with (k1, k2) >= the specified
+    /// keys and stops when k1 changes or the table is exhausted.
+    fn iter_k2<'a>(
+        &'a mut self,
+        k1: &[u8],
+        start_k2: &[u8],
+    ) -> Result<impl Iterator<Item = Result<RawDualKeyValue<'a>, E>> + 'a, E>
+    where
+        Self: Sized,
+    {
+        let entry = self.next_dual_above(k1, start_k2)?;
+        let Some((found_k1, _, _)) = entry else {
+            return Ok(RawDualKeyK2Iter {
+                cursor: self,
+                k1: Vec::new(),
+                done: true,
+                _marker: PhantomData,
+            });
+        };
+        // If the found k1 doesn't match, we're done
+        let done = found_k1.as_ref() != k1;
+        Ok(RawDualKeyK2Iter { cursor: self, k1: k1.to_vec(), done, _marker: PhantomData })
+    }
+}
+
+/// Trait for traversing dual-keyed key-value pairs with mutation capabilities.
+pub trait DualKeyTraverseMut<E: HotKvReadError>: DualKeyTraverse<E> {
+    /// Delete all K2 entries for the specified K1.
+    ///
+    /// This positions the cursor at the given K1 and removes all associated
+    /// K2 entries in a single operation.
+    ///
+    /// Returns `Ok(())` if the K1 was cleared or didn't exist.
+    fn clear_k1(&mut self, key1: &[u8]) -> Result<(), E>;
+
+    /// Delete the current dual-keyed entry.
+    fn delete_current(&mut self) -> Result<(), E>;
+
+    /// Delete a range of dual-keyed entries (inclusive).
+    ///
+    /// Deletes all entries where `(k1, k2) >= (start_k1, start_k2)` and
+    /// `(k1, k2) <= (end_k1, end_k2)`.
+    fn delete_range(
+        &mut self,
+        start_k1: &[u8],
+        start_k2: &[u8],
+        end_k1: &[u8],
+        end_k2: &[u8],
+    ) -> Result<(), E> {
+        let Some((k1, k2, _)) = self.next_dual_above(start_k1, start_k2)? else {
+            return Ok(());
+        };
+
+        // Check if first entry is past end of range
+        if k1.as_ref() > end_k1 || (k1.as_ref() == end_k1 && k2.as_ref() > end_k2) {
+            return Ok(());
+        }
+
+        self.delete_current()?;
+
+        while let Some((k1, k2, _)) = self.read_next()? {
+            // Check if we're past end of range
+            if k1.as_ref() > end_k1 || (k1.as_ref() == end_k1 && k2.as_ref() > end_k2) {
+                break;
+            }
+            self.delete_current()?;
+        }
+
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -183,51 +334,30 @@ pub trait TableTraverse<T: SingleKey, E: HotKvReadError>: KvTraverse<E> {
         KvTraverse::read_prev(self)?.map(T::decode_kv_tuple).transpose().map_err(Into::into)
     }
 
-    /// Iterate entries starting from a key while a predicate holds.
+    /// Position at `key` and return iterator over subsequent entries.
     ///
-    /// Positions the cursor at `start_key` and calls `f` for each entry
-    /// while `predicate` returns true.
-    ///
-    /// Returns `Ok(())` on successful completion, or the first error encountered.
-    fn for_each_while<P, F>(&mut self, start_key: &T::Key, predicate: P, mut f: F) -> Result<(), E>
+    /// The iterator starts at the first entry with key >= `key`.
+    fn iter_from(
+        &mut self,
+        key: &T::Key,
+    ) -> Result<impl Iterator<Item = Result<KeyValue<T>, E>> + '_, E>
     where
-        P: Fn(&T::Key, &T::Value) -> bool,
-        F: FnMut(T::Key, T::Value) -> Result<(), E>,
+        Self: Sized,
     {
-        let Some((k, v)) = TableTraverse::lower_bound(self, start_key)? else {
-            return Ok(());
-        };
-
-        if !predicate(&k, &v) {
-            return Ok(());
-        }
-
-        f(k, v)?;
-
-        while let Some((k, v)) = TableTraverse::read_next(self)? {
-            if !predicate(&k, &v) {
-                break;
-            }
-            f(k, v)?;
-        }
-
-        Ok(())
+        // Position the cursor at the key
+        TableTraverse::<T, E>::lower_bound(self, key)?;
+        // Return iterator that decodes from raw
+        Ok(KvTraverse::iter(self)?
+            .map(|r| r.and_then(|kv| T::decode_kv_tuple(kv).map_err(Into::into))))
     }
 
-    /// Collect entries from start_key while predicate holds.
-    ///
-    /// This is useful when you need to process entries after iteration completes
-    /// or when the closure would need to borrow mutably from multiple sources.
-    fn collect_while<P>(&mut self, start_key: &T::Key, predicate: P) -> Result<Vec<KeyValue<T>>, E>
+    /// Position at first entry and return iterator over all entries.
+    fn iter(&mut self) -> Result<impl Iterator<Item = Result<KeyValue<T>, E>> + '_, E>
     where
-        P: Fn(&T::Key, &T::Value) -> bool,
+        Self: Sized,
     {
-        let mut result = Vec::new();
-        self.for_each_while(start_key, predicate, |k, v| {
-            result.push((k, v));
-            Ok(())
-        })?;
-        Ok(result)
+        Ok(KvTraverse::iter(self)?
+            .map(|r| r.and_then(|kv| T::decode_kv_tuple(kv).map_err(Into::into))))
     }
 }
 
@@ -247,7 +377,7 @@ pub trait TableTraverseMut<T: SingleKey, E: HotKvReadError>: KvTraverseMut<E> {
         KvTraverseMut::delete_current(self)
     }
 
-    /// Delete a range of key-value pairs.
+    /// Delete a range of key-value pairs (exclusive end).
     fn delete_range(&mut self, range: Range<T::Key>) -> Result<(), E> {
         let mut start_key_buf = [0u8; MAX_KEY_SIZE];
         let mut end_key_buf = [0u8; MAX_KEY_SIZE];
@@ -255,6 +385,55 @@ pub trait TableTraverseMut<T: SingleKey, E: HotKvReadError>: KvTraverseMut<E> {
         let end_key_bytes = range.end.encode_key(&mut end_key_buf);
 
         KvTraverseMut::delete_range(self, start_key_bytes..end_key_bytes)
+    }
+
+    /// Delete a range of key-value pairs (inclusive end).
+    fn delete_range_inclusive(&mut self, range: RangeInclusive<T::Key>) -> Result<(), E>
+    where
+        Self: Sized,
+    {
+        let Some((key, _)) = TableTraverse::<T, E>::lower_bound(self, range.start())? else {
+            return Ok(());
+        };
+        if !range.contains(&key) {
+            return Ok(());
+        }
+        KvTraverseMut::delete_current(self)?;
+
+        while let Some((key, _)) = TableTraverse::<T, E>::read_next(self)? {
+            if !range.contains(&key) {
+                break;
+            }
+            KvTraverseMut::delete_current(self)?;
+        }
+        Ok(())
+    }
+
+    /// Delete a range of key-value pairs and return the removed entries.
+    fn take_range(&mut self, range: RangeInclusive<T::Key>) -> Result<Vec<KeyValue<T>>, E>
+    where
+        Self: Sized,
+    {
+        let mut result = Vec::new();
+
+        let Some((key, value)) = TableTraverse::<T, E>::lower_bound(self, range.start())? else {
+            return Ok(result);
+        };
+        if !range.contains(&key) {
+            return Ok(result);
+        }
+        result.push((key, value));
+        KvTraverseMut::delete_current(self)?;
+
+        while let Some((key, value)) = TableTraverse::<T, E>::read_next(self)? {
+            if !range.contains(&key) {
+                break;
+            }
+            result.push((key, value));
+            KvTraverseMut::delete_current(self)?;
+        }
+
+        Ok(result)
     }
 }
 
@@ -324,77 +503,34 @@ pub trait DualTableTraverse<T: DualKey, E: HotKvReadError>: DualKeyTraverse<E> {
     /// Move to the PREVIOUS key2 entry for the CURRENT key1.
     fn previous_k2(&mut self) -> Result<Option<DualKeyValue<T>>, E>;
 
-    /// Iterate entries (crossing k1 boundaries) while a predicate holds.
+    /// Position at (k1, k2) and iterate forward, crossing k1 boundaries.
     ///
-    /// Positions the cursor at `(key1, start_k2)` and calls `f` for each entry
-    /// while `predicate` returns true. Uses `read_next()` to cross k1 boundaries.
-    ///
-    /// Returns `Ok(())` on successful completion, or the first error encountered.
-    fn for_each_while<P, F>(
+    /// The iterator starts at the first entry with (k1, k2) >= the specified
+    /// keys and continues through all subsequent entries.
+    fn iter_from(
         &mut self,
-        key1: &T::Key,
-        start_k2: &T::Key2,
-        predicate: P,
-        mut f: F,
-    ) -> Result<(), E>
+        k1: &T::Key,
+        k2: &T::Key2,
+    ) -> Result<impl Iterator<Item = Result<DualKeyValue<T>, E>> + '_, E>
     where
-        P: Fn(&T::Key, &T::Key2, &T::Value) -> bool,
-        F: FnMut(T::Key, T::Key2, T::Value) -> Result<(), E>,
-    {
-        let Some((k1, k2, v)) = DualTableTraverse::next_dual_above(self, key1, start_k2)? else {
-            return Ok(());
-        };
+        T::Key: PartialEq;
 
-        if !predicate(&k1, &k2, &v) {
-            return Ok(());
-        }
+    /// Position at first entry and return iterator over all entries.
+    fn iter(&mut self) -> Result<impl Iterator<Item = Result<DualKeyValue<T>, E>> + '_, E>
+    where
+        T::Key: PartialEq;
 
-        f(k1, k2, v)?;
-
-        while let Some((k1, k2, v)) = DualTableTraverse::read_next(self)? {
-            if !predicate(&k1, &k2, &v) {
-                break;
-            }
-            f(k1, k2, v)?;
-        }
-
-        Ok(())
-    }
-
-    /// Iterate entries within the same k1 while a predicate holds.
+    /// Iterate k2 entries within a single k1.
     ///
-    /// Positions the cursor at `(key1, start_k2)` and calls `f` for each entry
-    /// while `predicate` returns true. Uses `next_k2()` which stays within
-    /// the same k1 value.
-    ///
-    /// Returns `Ok(())` on successful completion, or the first error encountered.
-    fn for_each_while_k2<P, F>(
+    /// The iterator starts at the first entry with (k1, k2) >= the specified
+    /// keys and stops when k1 changes or the table is exhausted.
+    fn iter_k2(
         &mut self,
-        key1: &T::Key,
+        k1: &T::Key,
         start_k2: &T::Key2,
-        predicate: P,
-        f: F,
-    ) -> Result<(), E>
+    ) -> Result<impl Iterator<Item = Result<DualKeyValue<T>, E>> + '_, E>
     where
-        P: Fn(&T::Key, &T::Key2, &T::Value) -> bool,
-        F: FnMut(T::Key, T::Key2, T::Value) -> Result<(), E>,
-    {
-        self.for_each_while(key1, start_k2, |k, k2, v| key1 == k && predicate(k, k2, v), f)
-    }
-
-    /// Iterate all k2 entries for a given k1, starting from `start_k2`.
-    ///
-    /// Calls `f` for each (k1, k2, v) tuple where k1 matches the provided key1
-    /// and k2 >= start_k2. Stops when k1 changes or the table is exhausted.
-    ///
-    /// Returns `Ok(())` on successful completion, or the first error encountered.
-    fn for_each_k2<F>(&mut self, key1: &T::Key, start_k2: &T::Key2, f: F) -> Result<(), E>
-    where
-        T::Key: PartialEq,
-        F: FnMut(T::Key, T::Key2, T::Value) -> Result<(), E>,
-    {
-        self.for_each_while_k2(key1, start_k2, |_, _, _| true, f)
-    }
+        T::Key: PartialEq;
 }
 
 impl<C, T, E> DualTableTraverse<T, E> for C
@@ -443,6 +579,337 @@ where
 
     fn previous_k2(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
         DualKeyTraverse::previous_k2(self)?.map(T::decode_kkv_tuple).transpose().map_err(Into::into)
+    }
+
+    fn iter_from(
+        &mut self,
+        k1: &T::Key,
+        k2: &T::Key2,
+    ) -> Result<impl Iterator<Item = Result<DualKeyValue<T>, E>> + '_, E>
+    where
+        T::Key: PartialEq,
+    {
+        // Position cursor at (k1, k2)
+        DualTableTraverse::<T, E>::next_dual_above(self, k1, k2)?;
+        // Return iterator that decodes from raw
+        Ok(DualKeyTraverse::iter(self)?
+            .map(|r| r.and_then(|kkv| T::decode_kkv_tuple(kkv).map_err(Into::into))))
+    }
+
+    fn iter(&mut self) -> Result<impl Iterator<Item = Result<DualKeyValue<T>, E>> + '_, E>
+    where
+        T::Key: PartialEq,
+    {
+        Ok(DualKeyTraverse::iter(self)?
+            .map(|r| r.and_then(|kkv| T::decode_kkv_tuple(kkv).map_err(Into::into))))
+    }
+
+    fn iter_k2(
+        &mut self,
+        k1: &T::Key,
+        start_k2: &T::Key2,
+    ) -> Result<impl Iterator<Item = Result<DualKeyValue<T>, E>> + '_, E>
+    where
+        T::Key: PartialEq,
+    {
+        // Position cursor and get the target k1 for comparison
+        let entry = DualTableTraverse::<T, E>::next_dual_above(self, k1, start_k2)?;
+        let Some((found_k1, _, _)) = entry else {
+            return Ok(DualTableK2Iter::<'_, C, T, E> {
+                cursor: self,
+                k1: k1.clone(),
+                done: true,
+                _marker: PhantomData,
+            });
+        };
+        // If the found k1 doesn't match, we're done
+        let done = found_k1 != *k1;
+        Ok(DualTableK2Iter::<'_, C, T, E> {
+            cursor: self,
+            k1: found_k1,
+            done,
+            _marker: PhantomData,
+        })
+    }
+}
+
+/// Extension trait for typed dual table traversal with mutation capabilities.
+pub trait DualTableTraverseMut<T: DualKey, E: HotKvReadError>: DualKeyTraverseMut<E> {
+    /// Delete all K2 entries for the specified K1.
+    fn clear_k1(&mut self, key1: &T::Key) -> Result<(), E> {
+        let mut key1_buf = [0u8; MAX_KEY_SIZE];
+        let key1_bytes = key1.encode_key(&mut key1_buf);
+        DualKeyTraverseMut::clear_k1(self, key1_bytes)
+    }
+
+    /// Delete the current dual-keyed entry.
+    fn delete_current(&mut self) -> Result<(), E> {
+        DualKeyTraverseMut::delete_current(self)
+    }
+
+    /// Delete a range of dual-keyed entries (inclusive).
+    fn delete_range(&mut self, range: RangeInclusive<(T::Key, T::Key2)>) -> Result<(), E>
+    where
+        Self: Sized,
+    {
+        let (start_k1, start_k2) = range.start();
+        let (end_k1, end_k2) = range.end();
+
+        // Loop using next_dual_above to handle backends where delete auto-advances
+        // the cursor (e.g., MDBX) vs those that don't (e.g., in-memory).
+        loop {
+            let Some((k1, k2, _)) =
+                DualTableTraverse::<T, E>::next_dual_above(self, start_k1, start_k2)?
+            else {
+                break;
+            };
+
+            // Check if entry is past end of range (typed comparison)
+            if &k1 > end_k1 || (&k1 == end_k1 && &k2 > end_k2) {
+                break;
+            }
+
+            DualKeyTraverseMut::delete_current(self)?;
+        }
+
+        Ok(())
+    }
+
+    /// Delete a range of dual-keyed entries and return the removed entries.
+    fn take_range(
+        &mut self,
+        range: RangeInclusive<(T::Key, T::Key2)>,
+    ) -> Result<Vec<DualKeyValue<T>>, E>
+    where
+        Self: Sized,
+    {
+        let (start_k1, start_k2) = range.start();
+        let (end_k1, end_k2) = range.end();
+
+        let mut result = Vec::new();
+
+        // Loop using next_dual_above to handle backends where delete auto-advances
+        // the cursor (e.g., MDBX) vs those that don't (e.g., in-memory).
+        loop {
+            let Some((k1, k2, value)) =
+                DualTableTraverse::<T, E>::next_dual_above(self, start_k1, start_k2)?
+            else {
+                break;
+            };
+
+            // Check if entry is past end of range (typed comparison)
+            if &k1 > end_k1 || (&k1 == end_k1 && &k2 > end_k2) {
+                break;
+            }
+
+            result.push((k1, k2, value));
+            DualKeyTraverseMut::delete_current(self)?;
+        }
+
+        Ok(result)
+    }
+}
+
+/// Blanket implementation of `DualTableTraverseMut`.
+impl<C, T, E> DualTableTraverseMut<T, E> for C
+where
+    C: DualKeyTraverseMut<E>,
+    T: DualKey,
+    E: HotKvReadError,
+{
+}
+
+// ============================================================================
+// Raw Iterator Structs (for base traits)
+// ============================================================================
+
+/// Default forward iterator over raw key-value entries.
+///
+/// This iterator wraps a cursor implementing `KvTraverse` and yields entries
+/// by calling `read_next` on each iteration.
+pub struct RawKvIter<'a, C, E> {
+    cursor: &'a mut C,
+    done: bool,
+    _marker: PhantomData<fn() -> E>,
+}
+
+impl<'a, C, E> Iterator for RawKvIter<'a, C, E>
+where
+    C: KvTraverse<E>,
+    E: HotKvReadError,
+{
+    type Item = Result<RawKeyValue<'a>, E>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        // SAFETY: We're using a mutable borrow of the cursor, so the lifetime
+        // of the returned data is correctly tied to this iterator.
+        // We transmute the lifetime because the borrow checker can't see
+        // that the cursor's internal state keeps the data alive.
+        let result = unsafe {
+            std::mem::transmute::<
+                Result<Option<RawKeyValue<'_>>, E>,
+                Result<Option<RawKeyValue<'a>>, E>,
+            >(self.cursor.read_next())
+        };
+        match result {
+            Ok(Some(kv)) => Some(Ok(kv)),
+            Ok(None) => {
+                self.done = true;
+                None
+            }
+            Err(e) => {
+                self.done = true;
+                Some(Err(e))
+            }
+        }
+    }
+}
+
+/// Default forward iterator over raw dual-keyed entries.
+///
+/// This iterator wraps a cursor implementing `DualKeyTraverse` and yields
+/// entries by calling `read_next` on each iteration.
+pub struct RawDualKeyIter<'a, C, E> {
+    cursor: &'a mut C,
+    done: bool,
+    _marker: PhantomData<fn() -> E>,
+}
+
+impl<'a, C, E> Iterator for RawDualKeyIter<'a, C, E>
+where
+    C: DualKeyTraverse<E>,
+    E: HotKvReadError,
+{
+    type Item = Result<RawDualKeyValue<'a>, E>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        // SAFETY: Same rationale as RawKvIter - the cursor's internal state
+        // keeps the data alive for the duration of iteration.
+        let result = unsafe {
+            std::mem::transmute::<
+                Result<Option<RawDualKeyValue<'_>>, E>,
+                Result<Option<RawDualKeyValue<'a>>, E>,
+            >(self.cursor.read_next())
+        };
+        match result {
+            Ok(Some(kv)) => Some(Ok(kv)),
+            Ok(None) => {
+                self.done = true;
+                None
+            }
+            Err(e) => {
+                self.done = true;
+                Some(Err(e))
+            }
+        }
+    }
+}
+
+/// Default forward iterator over raw dual-keyed entries within a single k1.
+///
+/// This iterator wraps a cursor implementing `DualKeyTraverse` and yields
+/// entries while k1 remains unchanged.
+pub struct RawDualKeyK2Iter<'a, C, E> {
+    cursor: &'a mut C,
+    k1: Vec<u8>,
+    done: bool,
+    _marker: PhantomData<fn() -> E>,
+}
+
+impl<'a, C, E> Iterator for RawDualKeyK2Iter<'a, C, E>
+where
+    C: DualKeyTraverse<E>,
+    E: HotKvReadError,
+{
+    type Item = Result<RawDualKeyValue<'a>, E>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        // SAFETY: Same rationale as RawKvIter
+        let result = unsafe {
+            std::mem::transmute::<
+                Result<Option<RawDualKeyValue<'_>>, E>,
+                Result<Option<RawDualKeyValue<'a>>, E>,
+            >(self.cursor.read_next())
+        };
+        match result {
+            Ok(Some((k1, k2, v))) => {
+                if k1.as_ref() != self.k1.as_slice() {
+                    self.done = true;
+                    None
+                } else {
+                    Some(Ok((k1, k2, v)))
+                }
+            }
+            Ok(None) => {
+                self.done = true;
+                None
+            }
+            Err(e) => {
+                self.done = true;
+                Some(Err(e))
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Typed Iterator Structs (for extension traits)
+// ============================================================================
+
+/// Forward iterator over k2 entries within a single k1.
+///
+/// This iterator wraps a cursor and yields entries while k1 remains equal
+/// to the initial k1 value.
+pub struct DualTableK2Iter<'a, C, T, E>
+where
+    T: DualKey,
+{
+    cursor: &'a mut C,
+    k1: T::Key,
+    done: bool,
+    _marker: PhantomData<fn() -> E>,
+}
+
+impl<'a, C, T, E> Iterator for DualTableK2Iter<'a, C, T, E>
+where
+    C: DualKeyTraverse<E>,
+    T: DualKey,
+    T::Key: PartialEq,
+    E: HotKvReadError,
+{
+    type Item = Result<DualKeyValue<T>, E>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        match DualTableTraverse::<T, E>::read_next(self.cursor) {
+            Ok(Some((k1, k2, v))) => {
+                if k1 != self.k1 {
+                    self.done = true;
+                    None
+                } else {
+                    Some(Ok((k1, k2, v)))
+                }
+            }
+            Ok(None) => {
+                self.done = true;
+                None
+            }
+            Err(e) => {
+                self.done = true;
+                Some(Err(e))
+            }
+        }
     }
 }
 
@@ -519,28 +986,19 @@ where
         TableTraverse::<T, E>::read_prev(&mut self.inner)
     }
 
-    /// Iterate entries starting from a key while a predicate holds.
+    /// Position at `key` and return iterator over subsequent entries.
     ///
-    /// Positions the cursor at `start_key` and calls `f` for each entry
-    /// while `predicate` returns true.
-    pub fn for_each_while<P, F>(&mut self, start_key: &T::Key, predicate: P, f: F) -> Result<(), E>
-    where
-        P: Fn(&T::Key, &T::Value) -> bool,
-        F: FnMut(T::Key, T::Value) -> Result<(), E>,
-    {
-        TableTraverse::<T, E>::for_each_while(&mut self.inner, start_key, predicate, f)
+    /// The iterator starts at the first entry with key >= `key`.
+    pub fn iter_from(
+        &mut self,
+        key: &T::Key,
+    ) -> Result<impl Iterator<Item = Result<KeyValue<T>, E>> + '_, E> {
+        TableTraverse::<T, E>::iter_from(&mut self.inner, key)
     }
 
-    /// Collect entries from start_key while predicate holds.
-    pub fn collect_while<P>(
-        &mut self,
-        start_key: &T::Key,
-        predicate: P,
-    ) -> Result<Vec<KeyValue<T>>, E>
-    where
-        P: Fn(&T::Key, &T::Value) -> bool,
-    {
-        TableTraverse::<T, E>::collect_while(&mut self.inner, start_key, predicate)
+    /// Position at first entry and return iterator over all entries.
+    pub fn iter(&mut self) -> Result<impl Iterator<Item = Result<KeyValue<T>, E>> + '_, E> {
+        TableTraverse::<T, E>::iter(&mut self.inner)
     }
 }
 
@@ -555,9 +1013,19 @@ where
         TableTraverseMut::<T, E>::delete_current(&mut self.inner)
     }
 
-    /// Delete a range of key-value pairs.
+    /// Delete a range of key-value pairs (exclusive end).
     pub fn delete_range(&mut self, range: Range<T::Key>) -> Result<(), E> {
         TableTraverseMut::<T, E>::delete_range(&mut self.inner, range)
+    }
+
+    /// Delete a range of key-value pairs (inclusive end).
+    pub fn delete_range_inclusive(&mut self, range: RangeInclusive<T::Key>) -> Result<(), E> {
+        TableTraverseMut::<T, E>::delete_range_inclusive(&mut self.inner, range)
+    }
+
+    /// Delete a range of key-value pairs and return the removed entries.
+    pub fn take_range(&mut self, range: RangeInclusive<T::Key>) -> Result<Vec<KeyValue<T>>, E> {
+        TableTraverseMut::<T, E>::take_range(&mut self.inner, range)
     }
 }
 
@@ -666,65 +1134,72 @@ where
     pub fn read_prev(&mut self) -> Result<Option<DualKeyValue<T>>, E> {
         DualTableTraverse::<T, E>::read_prev(&mut self.inner)
     }
+}
 
-    /// Iterate all k2 entries for a given k1, starting from `start_k2`.
+// Iterator methods for DualTableCursor - require T::Key: PartialEq for k2 iteration
+impl<C, T, E> DualTableCursor<C, T, E>
+where
+    C: DualTableTraverse<T, E>,
+    T: DualKey,
+    T::Key: PartialEq,
+    E: HotKvReadError,
+{
+    /// Position at (k1, k2) and iterate forward, crossing k1 boundaries.
     ///
-    /// Calls `f` for each (k1, k2, v) tuple where k1 matches the provided key1
-    /// and k2 >= start_k2. Stops when k1 changes or the table is exhausted.
-    pub fn for_each_k2<F>(&mut self, key1: &T::Key, start_k2: &T::Key2, f: F) -> Result<(), E>
-    where
-        T::Key: PartialEq,
-        F: FnMut(T::Key, T::Key2, T::Value) -> Result<(), E>,
-    {
-        DualTableTraverse::<T, E>::for_each_k2(&mut self.inner, key1, start_k2, f)
+    /// The iterator starts at the first entry with (k1, k2) >= the specified
+    /// keys and continues through all subsequent entries.
+    pub fn iter_from(
+        &mut self,
+        k1: &T::Key,
+        k2: &T::Key2,
+    ) -> Result<impl Iterator<Item = Result<DualKeyValue<T>, E>> + '_, E> {
+        DualTableTraverse::<T, E>::iter_from(&mut self.inner, k1, k2)
     }
 
-    /// Iterate entries within the same k1 while a predicate holds.
-    ///
-    /// Positions the cursor at `(key1, start_k2)` and calls `f` for each entry
-    /// while `predicate` returns true. Uses `next_k2()` which stays within
-    /// the same k1 value.
-    pub fn for_each_while_k2<P, F>(
-        &mut self,
-        key1: &T::Key,
-        start_k2: &T::Key2,
-        predicate: P,
-        f: F,
-    ) -> Result<(), E>
-    where
-        P: Fn(&T::Key, &T::Key2, &T::Value) -> bool,
-        F: FnMut(T::Key, T::Key2, T::Value) -> Result<(), E>,
-    {
-        DualTableTraverse::<T, E>::for_each_while_k2(&mut self.inner, key1, start_k2, predicate, f)
+    /// Position at first entry and return iterator over all entries.
+    pub fn iter(&mut self) -> Result<impl Iterator<Item = Result<DualKeyValue<T>, E>> + '_, E> {
+        DualTableTraverse::<T, E>::iter(&mut self.inner)
     }
 
-    /// Iterate entries (crossing k1 boundaries) while a predicate holds.
+    /// Iterate k2 entries within a single k1.
     ///
-    /// Positions the cursor at `(key1, start_k2)` and calls `f` for each entry
-    /// while `predicate` returns true. Uses `read_next()` to cross k1 boundaries.
-    pub fn for_each_while<P, F>(
+    /// The iterator starts at the first entry with (k1, k2) >= the specified
+    /// keys and stops when k1 changes or the table is exhausted.
+    pub fn iter_k2(
         &mut self,
-        key1: &T::Key,
+        k1: &T::Key,
         start_k2: &T::Key2,
-        predicate: P,
-        f: F,
-    ) -> Result<(), E>
-    where
-        P: Fn(&T::Key, &T::Key2, &T::Value) -> bool,
-        F: FnMut(T::Key, T::Key2, T::Value) -> Result<(), E>,
-    {
-        DualTableTraverse::<T, E>::for_each_while(&mut self.inner, key1, start_k2, predicate, f)
+    ) -> Result<impl Iterator<Item = Result<DualKeyValue<T>, E>> + '_, E> {
+        DualTableTraverse::<T, E>::iter_k2(&mut self.inner, k1, start_k2)
     }
 }
 
 impl<C, T, E> DualTableCursor<C, T, E>
 where
-    C: KvTraverseMut<E>,
+    C: DualTableTraverseMut<T, E>,
     T: DualKey,
     E: HotKvReadError,
 {
     /// Delete the current key-value pair.
     pub fn delete_current(&mut self) -> Result<(), E> {
-        KvTraverseMut::delete_current(&mut self.inner)
+        DualTableTraverseMut::<T, E>::delete_current(&mut self.inner)
+    }
+
+    /// Delete all K2 entries for the specified K1.
+    pub fn clear_k1(&mut self, key1: &T::Key) -> Result<(), E> {
+        DualTableTraverseMut::<T, E>::clear_k1(&mut self.inner, key1)
+    }
+
+    /// Delete a range of dual-keyed entries (inclusive).
+    pub fn delete_range(&mut self, range: RangeInclusive<(T::Key, T::Key2)>) -> Result<(), E> {
+        DualTableTraverseMut::<T, E>::delete_range(&mut self.inner, range)
+    }
+
+    /// Delete a range of dual-keyed entries and return the removed entries.
+    pub fn take_range(
+        &mut self,
+        range: RangeInclusive<(T::Key, T::Key2)>,
+    ) -> Result<Vec<DualKeyValue<T>>, E> {
+        DualTableTraverseMut::<T, E>::take_range(&mut self.inner, range)
     }
 }

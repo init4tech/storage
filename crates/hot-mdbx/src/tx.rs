@@ -225,7 +225,7 @@ macro_rules! impl_hot_kv_write {
                         && found_val.starts_with(key2)
                     // Check if found value starts with our key2
                     {
-                        cursor.del(Default::default()).map_err(MdbxError::Mdbx)?;
+                        cursor.del().map_err(MdbxError::Mdbx)?;
                     }
                 }
 
@@ -269,18 +269,37 @@ macro_rules! impl_hot_kv_write {
                 let db = self.inner.open_db(Some(table))?;
                 let fsi = self.get_fsi(table)?;
 
-                // For DUPSORT tables, the "value" is key2 concatenated with the actual
-                // value. If the table is ALSO dupfixed, we need to pad key2 to the
-                // fixed size
-                if let Some(total_size) = fsi.total_size() {
-                    // Copy key2 to scratch buffer and zero-pad to total fixed size
-                    let mut buffer = [0u8; TX_BUFFER_SIZE];
-                    buffer[..key2.len()].copy_from_slice(key2);
-                    buffer[key2.len()..total_size].fill(0);
-                    let k2 = &buffer[..total_size];
+                // For DUPSORT tables, the "value" is key2 || actual_value.
+                // For DUP_FIXED tables, we cannot use del() with a partial value
+                // because MDBX requires an exact match. We must use a cursor to
+                // find and delete the entry.
+                if fsi.is_dupsort() {
+                    // Prepare search value (key2, optionally padded for DUP_FIXED)
+                    let mut search_buf = [0u8; TX_BUFFER_SIZE];
+                    let search_val = if let Some(ts) = fsi.total_size() {
+                        search_buf[..key2.len()].copy_from_slice(key2);
+                        search_buf[key2.len()..ts].fill(0);
+                        &search_buf[..ts]
+                    } else {
+                        key2
+                    };
 
-                    self.inner.del(db, key1, Some(k2)).map(drop).map_err(MdbxError::Mdbx)
+                    // Use cursor to find and delete the entry
+                    let mut cursor = self.inner.cursor(db).map_err(MdbxError::Mdbx)?;
+
+                    // get_both_range finds entry where key=key1 and value >= search_val
+                    // If found and the key2 portion matches, delete it
+                    if let Some(found_val) = cursor
+                        .get_both_range::<Cow<'_, [u8]>>(key1, search_val)
+                        .map_err(MdbxError::from)?
+                        && found_val.starts_with(key2)
+                    {
+                        cursor.del().map_err(MdbxError::Mdbx)?;
+                    }
+
+                    Ok(())
                 } else {
+                    // Non-DUPSORT table - just delete by key1
                     self.inner.del(db, key1, Some(key2)).map(drop).map_err(MdbxError::Mdbx)
                 }
             }

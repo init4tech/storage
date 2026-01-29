@@ -45,8 +45,8 @@ pub use traits::{HotKv, HotKvRead, HotKvWrite};
 
 mod traverse;
 pub use traverse::{
-    DualKeyTraverse, DualTableCursor, DualTableTraverse, KvTraverse, KvTraverseMut, TableCursor,
-    TableTraverse, TableTraverseMut,
+    DualKeyTraverse, DualKeyTraverseMut, DualTableCursor, DualTableTraverse, DualTableTraverseMut,
+    KvTraverse, KvTraverseMut, TableCursor, TableTraverse, TableTraverseMut,
 };
 
 use crate::tables::{DualKey, Table};

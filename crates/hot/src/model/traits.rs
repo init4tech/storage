@@ -1,13 +1,13 @@
 use crate::{
     model::{
-        DualKeyTraverse, DualKeyValue, DualTableCursor, HotKvError, HotKvReadError, KeyValue,
+        DualKeyTraverse, DualKeyTraverseMut, DualTableCursor, HotKvError, HotKvReadError,
         KvTraverse, KvTraverseMut, TableCursor,
         revm::{RevmRead, RevmWrite},
     },
     ser::{KeySer, MAX_KEY_SIZE, ValSer},
     tables::{DualKey, SingleKey, Table},
 };
-use std::{borrow::Cow, ops::RangeInclusive};
+use std::borrow::Cow;
 
 /// Trait for hot storage. This is a KV store with read/write transactions.
 ///
@@ -182,7 +182,7 @@ pub trait HotKvRead {
 /// This extends the [`HotKvRead`] trait with write capabilities.
 pub trait HotKvWrite: HotKvRead {
     /// The mutable cursor type for traversing key-value pairs.
-    type TraverseMut<'a>: KvTraverseMut<Self::Error> + DualKeyTraverse<Self::Error>
+    type TraverseMut<'a>: KvTraverseMut<Self::Error> + DualKeyTraverseMut<Self::Error>
     where
         Self: 'a;
 
@@ -387,127 +387,10 @@ pub trait HotKvWrite: HotKvRead {
         self.queue_raw_clear(T::NAME)
     }
 
-    /// Remove all data in the given range and return the removed keys.
-    fn clear_with_op<T: SingleKey>(
-        &self,
-        range: RangeInclusive<T::Key>,
-        mut op: impl FnMut(T::Key, T::Value),
-    ) -> Result<(), Self::Error> {
-        let mut cursor = self.traverse_mut::<T>()?;
-
-        // Position cursor at first entry at or above range start
-        let Some((key, value)) = cursor.lower_bound(range.start())? else {
-            // No entries at or above range start
-            return Ok(());
-        };
-
-        if !range.contains(&key) {
-            // First entry is outside range
-            return Ok(());
-        }
-
-        op(key, value);
-        cursor.delete_current()?;
-
-        // Iterate through remaining entries
-        while let Some((key, value)) = cursor.read_next()? {
-            if !range.contains(&key) {
-                break;
-            }
-            op(key, value);
-            cursor.delete_current()?;
-        }
-
-        Ok(())
-    }
-
-    /// Remove all data in the given range from the database.
-    fn clear_range<T: SingleKey>(&self, range: RangeInclusive<T::Key>) -> Result<(), Self::Error> {
-        self.clear_with_op::<T>(range, |_, _| {})
-    }
-
-    /// Remove all data in the given range and return the removed key-value
-    /// pairs.
-    fn take_range<T: SingleKey>(
-        &self,
-        range: RangeInclusive<T::Key>,
-    ) -> Result<Vec<KeyValue<T>>, Self::Error> {
-        let mut vec = Vec::new();
-        self.clear_with_op::<T>(range, |key, value| vec.push((key, value)))?;
-        Ok(vec)
-    }
-
-    /// Remove all dual-keyed data in the given range from the database.
-    fn clear_range_dual_with_op<T: DualKey>(
-        &self,
-        range: RangeInclusive<(T::Key, T::Key2)>,
-        mut op: impl FnMut(T::Key, T::Key2, T::Value),
-    ) -> Result<(), Self::Error> {
+    /// Clear all K2 entries for a specific K1 in a dual-keyed table.
+    fn clear_k1_for<T: DualKey>(&self, key1: &T::Key) -> Result<(), Self::Error> {
         let mut cursor = self.traverse_dual_mut::<T>()?;
-
-        let (start_k1, start_k2) = range.start();
-
-        // Position at first entry at or above (range.start(), minimal_k2)
-        let Some((k1, k2, value)) = cursor.next_dual_above(start_k1, start_k2)? else {
-            // No entries at or above range start
-            return Ok(());
-        };
-
-        // inline range contains to avoid moving k1,k2
-        let (range_1, range_2) = range.start();
-        if range_1 > &k1 || (range_1 == &k1 && range_2 > &k2) {
-            // First entry is outside range
-            return Ok(());
-        }
-        let (range_1, range_2) = range.end();
-        if range_1 < &k1 || (range_1 == &k1 && range_2 < &k2) {
-            // First entry is outside range
-            return Ok(());
-        }
-        // end of inline range contains
-
-        op(k1, k2, value);
-        cursor.delete_current()?;
-
-        // Iterate through all entries (both k1 and k2 changes)
-        // Use read_next() instead of next_k2() to navigate across different k1 values
-        while let Some((k1, k2, value)) = cursor.read_next()? {
-            // inline range contains to avoid moving k1,k2
-            let (range_1, range_2) = range.start();
-            if range_1 > &k1 || (range_1 == &k1 && range_2 > &k2) {
-                break;
-            }
-            let (range_1, range_2) = range.end();
-            if range_1 < &k1 || (range_1 == &k1 && range_2 < &k2) {
-                break;
-            }
-            // end of inline range contains
-            op(k1, k2, value);
-            cursor.delete_current()?;
-        }
-
-        Ok(())
-    }
-
-    /// Remove all dual-keyed data in the given k1,k2 range from the database.
-    fn clear_range_dual<T: DualKey>(
-        &self,
-        range: RangeInclusive<(T::Key, T::Key2)>,
-    ) -> Result<(), Self::Error> {
-        self.clear_range_dual_with_op::<T>(range, |_, _, _| {})
-    }
-
-    /// Remove all dual-keyed data in the given k1,k2 range and return the
-    /// removed key-key-value tuples.
-    fn take_range_dual<T: DualKey>(
-        &self,
-        range: RangeInclusive<(T::Key, T::Key2)>,
-    ) -> Result<Vec<DualKeyValue<T>>, Self::Error> {
-        let mut vec = Vec::new();
-        self.clear_range_dual_with_op::<T>(range, |k1, k2, value| {
-            vec.push((k1, k2, value));
-        })?;
-        Ok(vec)
+        cursor.clear_k1(key1)
     }
 
     /// Commit the queued operations.

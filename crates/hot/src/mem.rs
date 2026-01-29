@@ -5,8 +5,8 @@
 
 use crate::{
     model::{
-        DualKeyTraverse, HotKv, HotKvError, HotKvRead, HotKvReadError, HotKvWrite, KvTraverse,
-        KvTraverseMut, RawDualKeyValue, RawKeyValue, RawValue,
+        DualKeyTraverse, DualKeyTraverseMut, HotKv, HotKvError, HotKvRead, HotKvReadError,
+        HotKvWrite, KvTraverse, KvTraverseMut, RawDualKeyValue, RawKeyValue, RawValue,
     },
     ser::{DeserError, MAX_KEY_SIZE},
 };
@@ -1036,6 +1036,40 @@ impl<'a> DualKeyTraverse<MemKvError> for MemKvCursorMut<'a> {
             Cow::Owned(found_k2.to_vec()),
             Cow::Owned(value.to_vec()),
         )))
+    }
+}
+
+impl DualKeyTraverseMut<MemKvError> for MemKvCursorMut<'_> {
+    fn delete_current(&mut self) -> Result<(), MemKvError> {
+        // Delegate to KvTraverseMut since the cursor position is shared
+        KvTraverseMut::delete_current(self)
+    }
+
+    fn clear_k1(&mut self, key1: &[u8]) -> Result<(), MemKvError> {
+        // Build prefix for k1: [k1 padded to MAX_KEY_SIZE][zeros for k2]
+        let prefix_start = MemKv::dual_key(key1, &[0u8; MAX_KEY_SIZE]);
+        let prefix_end = MemKv::dual_key(key1, &[0xffu8; MAX_KEY_SIZE]);
+
+        // Collect all keys to delete from both committed storage and queued ops
+        let mut keys_to_delete: Vec<_> = if !self.is_cleared {
+            self.table.range(prefix_start..=prefix_end).map(|(k, _)| *k).collect()
+        } else {
+            Vec::new()
+        };
+
+        // Also collect any keys in queued ops within this range
+        {
+            let queued_ops = self.queued_ops.lock().unwrap();
+            keys_to_delete.extend(queued_ops.range(prefix_start..=prefix_end).map(|(k, _)| *k));
+        }
+
+        // Queue deletion for all keys
+        let mut queued_ops = self.queued_ops.lock().unwrap();
+        for key in keys_to_delete {
+            queued_ops.insert(key, QueuedKvOp::Delete);
+        }
+
+        Ok(())
     }
 }
 
@@ -2352,5 +2386,75 @@ mod tests {
         // previous_k1 at first k1 should return None
         let result = DualTableTraverse::<DualTestTable, _>::previous_k1(&mut cursor).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_clear_k1() {
+        use crate::model::DualTableTraverseMut;
+
+        let store = MemKv::new();
+
+        // Setup test data:
+        // k1=1: k2=[10, 20, 30]
+        // k1=2: k2=[100, 200]
+        // k1=3: k2=[1000]
+        let dual_data = vec![
+            (1u64, 10u32, Bytes::from_static(b"v1_10")),
+            (1u64, 20u32, Bytes::from_static(b"v1_20")),
+            (1u64, 30u32, Bytes::from_static(b"v1_30")),
+            (2u64, 100u32, Bytes::from_static(b"v2_100")),
+            (2u64, 200u32, Bytes::from_static(b"v2_200")),
+            (3u64, 1000u32, Bytes::from_static(b"v3_1000")),
+        ];
+
+        // Insert data
+        {
+            let writer = store.writer().unwrap();
+            for (key1, key2, value) in &dual_data {
+                writer.queue_put_dual::<DualTestTable>(key1, key2, value).unwrap();
+            }
+            writer.raw_commit().unwrap();
+        }
+
+        // Clear all K2 entries for K1=2
+        {
+            let writer = store.writer().unwrap();
+            {
+                let mut cursor = writer.raw_traverse_mut(DualTestTable::NAME).unwrap();
+                DualTableTraverseMut::<DualTestTable, _>::clear_k1(&mut cursor, &2u64).unwrap();
+            }
+            writer.raw_commit().unwrap();
+        }
+
+        // Verify K1=2 entries are deleted, others remain
+        {
+            let reader = store.reader().unwrap();
+            // K1=1 should exist
+            assert!(reader.get_dual::<DualTestTable>(&1u64, &10u32).unwrap().is_some());
+            assert!(reader.get_dual::<DualTestTable>(&1u64, &20u32).unwrap().is_some());
+            assert!(reader.get_dual::<DualTestTable>(&1u64, &30u32).unwrap().is_some());
+            // K1=2 should be deleted
+            assert!(reader.get_dual::<DualTestTable>(&2u64, &100u32).unwrap().is_none());
+            assert!(reader.get_dual::<DualTestTable>(&2u64, &200u32).unwrap().is_none());
+            // K1=3 should exist
+            assert!(reader.get_dual::<DualTestTable>(&3u64, &1000u32).unwrap().is_some());
+        }
+
+        // Test idempotent - clearing already deleted K1 should be no-op
+        {
+            let writer = store.writer().unwrap();
+            {
+                let mut cursor = writer.raw_traverse_mut(DualTestTable::NAME).unwrap();
+                DualTableTraverseMut::<DualTestTable, _>::clear_k1(&mut cursor, &2u64).unwrap();
+            }
+            writer.raw_commit().unwrap();
+        }
+
+        // Verify state is unchanged
+        {
+            let reader = store.reader().unwrap();
+            assert!(reader.get_dual::<DualTestTable>(&1u64, &10u32).unwrap().is_some());
+            assert!(reader.get_dual::<DualTestTable>(&3u64, &1000u32).unwrap().is_some());
+        }
     }
 }
