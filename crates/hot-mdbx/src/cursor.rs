@@ -5,19 +5,30 @@ use signet_hot::{
     MAX_FIXED_VAL_SIZE, MAX_KEY_SIZE,
     model::{DualKeyTraverse, KvTraverse, KvTraverseMut, RawDualKeyValue, RawKeyValue, RawValue},
 };
-use signet_libmdbx::{RO, RW, TransactionKind};
+use signet_libmdbx::{Ro, Rw, RwSync, TransactionKind, tx::WriteMarker};
 use std::{
     borrow::Cow,
     ops::{Deref, DerefMut},
 };
 
 /// Read only Cursor.
-pub type CursorRO<'a> = Cursor<'a, RO>;
+pub type CursorRo<'a> = Cursor<'a, Ro>;
 
 /// Read write cursor.
-pub type CursorRW<'a> = Cursor<'a, RW>;
+pub type CursorRw<'a> = Cursor<'a, Rw>;
+
+/// Synchronized read only cursor.
+pub type CursorRoSync<'a> = Cursor<'a, signet_libmdbx::RoSync>;
+
+/// Synchronized read write cursor.
+pub type CursorRwSync<'a> = Cursor<'a, RwSync>;
 
 /// Cursor wrapper to access KV items.
+///
+/// The inner cursor type uses `K::Inner` which is the transaction's internal
+/// pointer access type:
+/// - For `RO`: `K::Inner = RoGuard`
+/// - For `RW`: `K::Inner = RwUnsync`
 pub struct Cursor<'a, K: TransactionKind> {
     /// Inner `libmdbx` cursor.
     pub(crate) inner: signet_libmdbx::Cursor<'a, K>,
@@ -30,13 +41,9 @@ pub struct Cursor<'a, K: TransactionKind> {
     buf: [u8; MAX_KEY_SIZE + MAX_FIXED_VAL_SIZE],
 }
 
-impl<K: TransactionKind + std::fmt::Debug> std::fmt::Debug for Cursor<'_, K> {
+impl<K: TransactionKind> std::fmt::Debug for Cursor<'_, K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Cursor")
-            .field("inner", &self.inner)
-            .field("fsi", &self.fsi)
-            .field("buf", &self.buf)
-            .finish()
+        f.debug_struct("Cursor").field("fsi", &self.fsi).finish_non_exhaustive()
     }
 }
 
@@ -48,7 +55,7 @@ impl<'a, K: TransactionKind> Deref for Cursor<'a, K> {
     }
 }
 
-impl<'a> DerefMut for Cursor<'a, RW> {
+impl<'a, K: TransactionKind> DerefMut for Cursor<'a, K> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
@@ -95,13 +102,13 @@ where
     }
 }
 
-impl KvTraverseMut<MdbxError> for Cursor<'_, RW> {
+impl<K: TransactionKind + WriteMarker> KvTraverseMut<MdbxError> for Cursor<'_, K> {
     fn delete_current(&mut self) -> Result<(), MdbxError> {
         self.inner.del(Default::default()).map_err(MdbxError::Mdbx)
     }
 }
 
-impl Cursor<'_, RW> {
+impl<K: TransactionKind + WriteMarker> Cursor<'_, K> {
     /// Stores multiple contiguous fixed-size data elements in a single request.
     ///
     /// This directly calls MDBX FFI, bypassing the transaction execution wrapper

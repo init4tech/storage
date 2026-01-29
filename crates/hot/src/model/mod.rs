@@ -52,8 +52,12 @@ pub use traverse::{
 use crate::tables::{DualKey, Table};
 use std::borrow::Cow;
 
-/// A key-value pair from a table.
+/// Output of the `get_many` iterator
 pub type GetManyItem<'a, T> = (&'a <T as Table>::Key, Option<<T as Table>::Value>);
+
+/// Output of the `get_many_dual` iterator
+pub type GetManyDualItem<'a, T> =
+    (&'a <T as Table>::Key, &'a <T as DualKey>::Key2, Option<<T as Table>::Value>);
 
 /// A key-value tuple from a table.
 pub type KeyValue<T> = (<T as Table>::Key, <T as Table>::Value);

@@ -6,31 +6,35 @@ use signet_hot::{
     model::{DualTableTraverse, HotKvRead, HotKvWrite},
     tables::{DualKey, SingleKey, Table},
 };
-use signet_libmdbx::{Database, DatabaseFlags, RW, Transaction, TransactionKind, WriteFlags};
+use signet_libmdbx::{Rw, RwSync, TransactionKind, WriteFlags, tx::WriteMarker};
 use std::borrow::Cow;
 
 const TX_BUFFER_SIZE: usize = MAX_KEY_SIZE + MAX_FIXED_VAL_SIZE;
 
 /// Wrapper for the libmdbx transaction.
-#[derive(Debug)]
+///
+/// This wraps [`TxUnsync`] in a [`RefCell`] to provide interior mutability,
+/// allowing trait implementations that use `&self` to call methods that
+/// require `&mut self` on the underlying transaction.
 pub struct Tx<K: TransactionKind> {
-    /// Libmdbx-sys transaction.
-    pub inner: Transaction<K>,
+    /// Libmdbx-sys transaction wrapped in RefCell for interior mutability.
+    inner: signet_libmdbx::tx::Tx<K>,
 
     /// Cached FixedSizeInfo for tables.
     fsi_cache: FsiCache,
 }
 
+impl<K: TransactionKind> std::fmt::Debug for Tx<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tx").field("fsi_cache", &self.fsi_cache).finish_non_exhaustive()
+    }
+}
+
 impl<K: TransactionKind> Tx<K> {
     /// Creates new `Tx` object with a `RO` or `RW` transaction and optionally enables metrics.
     #[inline]
-    pub(crate) const fn new(inner: Transaction<K>, fsi_cache: FsiCache) -> Self {
+    pub(crate) fn new(inner: signet_libmdbx::tx::Tx<K>, fsi_cache: FsiCache) -> Self {
         Self { inner, fsi_cache }
-    }
-
-    /// Gets the Database handle for a table (cached internally by signet-libmdbx).
-    fn get_db(&self, name: Option<&str>) -> Result<Database, MdbxError> {
-        self.inner.open_db(name).map_err(MdbxError::Mdbx)
     }
 
     /// Reads FixedSizeInfo from the metadata table.
@@ -39,10 +43,13 @@ impl<K: TransactionKind> Tx<K> {
         let to_copy = core::cmp::min(32, name.len());
         key[..to_copy].copy_from_slice(&name.as_bytes()[..to_copy]);
 
-        let db = self.get_db(None)?;
-        let data = self
+        let db = self.inner.open_db(None)?;
+        // Note: We request Vec<u8> (owned) since we only need it briefly for decoding
+        // and don't need zero-copy for this small metadata read.
+        let data: Vec<u8> = self
             .inner
-            .get::<Cow<'_, [u8]>>(db.dbi(), key.as_slice())?
+            .get(db.dbi(), key.as_slice())
+            .map_err(MdbxError::from)?
             .ok_or(MdbxError::UnknownTable(name))?;
 
         // Migration: handle both old (16 byte) and new (8 byte) formats
@@ -72,7 +79,7 @@ impl<K: TransactionKind> Tx<K> {
 
     /// Gets the database handle (dbi) for the given table name.
     pub fn get_dbi_raw(&self, table: &'static str) -> Result<u32, MdbxError> {
-        self.get_db(Some(table)).map(|db| db.dbi())
+        self.inner.open_db(Some(table)).map(|db| db.dbi()).map_err(MdbxError::Mdbx)
     }
 
     /// Gets the database handle (dbi) for the given table.
@@ -87,10 +94,12 @@ impl<K: TransactionKind> Tx<K> {
 
     /// Create [`Cursor`] for raw table name.
     pub fn new_cursor_raw<'a>(&'a self, name: &'static str) -> Result<Cursor<'a, K>, MdbxError> {
-        let db = self.get_db(Some(name))?;
+        let db = self.inner.open_db(Some(name))?;
         let fsi = self.get_fsi(name)?;
-        let inner = self.inner.cursor(db)?;
-        Ok(Cursor::new(inner, fsi))
+
+        let cursor = self.inner.cursor(db)?;
+
+        Ok(Cursor::new(cursor, fsi))
     }
 
     /// Create a [`Cursor`] for the given table.
@@ -99,10 +108,10 @@ impl<K: TransactionKind> Tx<K> {
     }
 }
 
-impl Tx<RW> {
+impl<K: TransactionKind + WriteMarker> Tx<K> {
     /// Stores FixedSizeInfo in the metadata table.
     fn store_fsi(&self, table: &'static str, fsi: FixedSizeInfo) -> Result<(), MdbxError> {
-        let db = self.get_db(None)?;
+        let db = self.inner.open_db(None)?;
 
         let mut key_buf = [0u8; MAX_KEY_SIZE];
         let to_copy = core::cmp::min(32, table.len());
@@ -111,7 +120,7 @@ impl Tx<RW> {
         let mut value_buf = [0u8; 8];
         fsi.encode_value_to(&mut value_buf.as_mut_slice());
 
-        self.inner.put(db.dbi(), key_buf, value_buf, WriteFlags::UPSERT)?;
+        self.inner.put(db, key_buf, value_buf, WriteFlags::UPSERT)?;
         self.fsi_cache.write().insert(table, fsi);
 
         Ok(())
@@ -136,8 +145,8 @@ where
         key: &[u8],
     ) -> Result<Option<Cow<'a, [u8]>>, Self::Error> {
         let dbi = self.get_dbi_raw(table)?;
-
-        self.inner.get(dbi, key.as_ref()).map_err(MdbxError::from)
+        let result: Result<Option<Cow<'_, [u8]>>, _> = self.inner.get(dbi, key.as_ref());
+        result.map_err(MdbxError::from)
     }
 
     fn raw_get_dual<'a>(
@@ -159,247 +168,254 @@ where
         DualTableTraverse::<T, MdbxError>::exact_dual(&mut cursor, key1, key2)
     }
 }
+macro_rules! impl_hot_kv_write {
+    ($ty:ty) => {
+        impl HotKvWrite for Tx<$ty> {
+            type TraverseMut<'a> = Cursor<'a, $ty>;
 
-impl HotKvWrite for Tx<RW> {
-    type TraverseMut<'a> = Cursor<'a, RW>;
+            fn raw_traverse_mut<'a>(
+                &'a self,
+                table: &'static str,
+            ) -> Result<Self::TraverseMut<'a>, Self::Error> {
+                self.new_cursor_raw(table)
+            }
 
-    fn raw_traverse_mut<'a>(
-        &'a self,
-        table: &'static str,
-    ) -> Result<Self::TraverseMut<'a>, Self::Error> {
-        self.new_cursor_raw(table)
-    }
+            fn queue_raw_put(
+                &self,
+                table: &'static str,
+                key: &[u8],
+                value: &[u8],
+            ) -> Result<(), Self::Error> {
+                let db = self.inner.open_db(Some(table))?;
+                self.inner.put(db, key, value, WriteFlags::UPSERT).map_err(MdbxError::Mdbx)
+            }
 
-    fn queue_raw_put(
-        &self,
-        table: &'static str,
-        key: &[u8],
-        value: &[u8],
-    ) -> Result<(), Self::Error> {
-        let dbi = self.get_dbi_raw(table)?;
+            fn queue_raw_put_dual(
+                &self,
+                table: &'static str,
+                key1: &[u8],
+                key2: &[u8],
+                value: &[u8],
+            ) -> Result<(), Self::Error> {
+                let db = self.inner.open_db(Some(table))?;
+                let fsi = self.get_fsi(table)?;
 
-        self.inner.put(dbi, key, value, WriteFlags::UPSERT).map(|_| ()).map_err(MdbxError::Mdbx)
-    }
+                // For DUPSORT tables, we must delete any existing entry with the same
+                // (key1, key2) before inserting, because MDBX stores key2 as part of
+                // the value (key2||actual_value). Without deletion, putting a new value
+                // for the same key2 creates a duplicate entry instead of replacing.
+                if fsi.is_dupsort() {
+                    // Prepare search value (key2, optionally padded for DUP_FIXED)
+                    let mut search_buf = [0u8; TX_BUFFER_SIZE];
+                    let search_val = if let Some(ts) = fsi.total_size() {
+                        search_buf[..key2.len()].copy_from_slice(key2);
+                        search_buf[key2.len()..ts].fill(0);
+                        &search_buf[..ts]
+                    } else {
+                        key2
+                    };
 
-    fn queue_raw_put_dual(
-        &self,
-        table: &'static str,
-        key1: &[u8],
-        key2: &[u8],
-        value: &[u8],
-    ) -> Result<(), Self::Error> {
-        let db = self.get_db(Some(table))?;
-        let fsi = self.get_fsi(table)?;
-        let dbi = db.dbi();
+                    // get_both_range finds entry where key=key1 and value >= search_val
+                    // If found and the key2 portion matches, delete it
+                    let mut cursor = self.inner.cursor(db).map_err(MdbxError::Mdbx)?;
 
-        // For DUPSORT tables, we must delete any existing entry with the same
-        // (key1, key2) before inserting, because MDBX stores key2 as part of
-        // the value (key2||actual_value). Without deletion, putting a new value
-        // for the same key2 creates a duplicate entry instead of replacing.
-        if fsi.is_dupsort() {
-            // Prepare search value (key2, optionally padded for DUP_FIXED)
-            let mut search_buf = [0u8; TX_BUFFER_SIZE];
-            let search_val = if let Some(ts) = fsi.total_size() {
-                search_buf[..key2.len()].copy_from_slice(key2);
-                search_buf[key2.len()..ts].fill(0);
-                &search_buf[..ts]
-            } else {
-                key2
-            };
+                    if let Some(found_val) = cursor
+                        .get_both_range::<Cow<'_, [u8]>>(key1, search_val)
+                        .map_err(MdbxError::from)?
+                        && found_val.starts_with(key2)
+                    // Check if found value starts with our key2
+                    {
+                        cursor.del(Default::default()).map_err(MdbxError::Mdbx)?;
+                    }
+                }
 
-            // get_both_range finds entry where key=key1 and value >= search_val
-            // If found and the key2 portion matches, delete it
-            let mut cursor = self.inner.cursor(db).map_err(MdbxError::Mdbx)?;
-            if let Some(found_val) =
-                cursor.get_both_range::<Cow<'_, [u8]>>(key1, search_val).map_err(MdbxError::from)?
+                // For DUPSORT tables, the "value" is key2 concatenated with the actual
+                // value.
+                // If the value is fixed size, we can write directly into our scratch
+                // buffer. Otherwise, we need to allocate
+                //
+                // NB: DUPSORT and RESERVE are incompatible :(
+                if key2.len() + value.len() > TX_BUFFER_SIZE {
+                    // Allocate a buffer for the combined value
+                    let mut combined = Vec::with_capacity(key2.len() + value.len());
+                    combined.extend_from_slice(key2);
+                    combined.extend_from_slice(value);
+                    return self
+                        .inner
+                        .put(db, key1, &combined, WriteFlags::UPSERT)
+                        .map_err(MdbxError::Mdbx);
+                }
+
+                // Use the scratch buffer
+                let mut buffer = [0u8; TX_BUFFER_SIZE];
+                let buf = &mut buffer[..key2.len() + value.len()];
+                buf[..key2.len()].copy_from_slice(key2);
+                buf[key2.len()..].copy_from_slice(value);
+
+                self.inner.put(db, key1, buf, WriteFlags::UPSERT).map_err(MdbxError::Mdbx).map(drop)
+            }
+
+            fn queue_raw_delete(&self, table: &'static str, key: &[u8]) -> Result<(), Self::Error> {
+                let db = self.inner.open_db(Some(table))?;
+                self.inner.del(db, key, None).map(drop).map_err(MdbxError::Mdbx)
+            }
+
+            fn queue_raw_delete_dual(
+                &self,
+                table: &'static str,
+                key1: &[u8],
+                key2: &[u8],
+            ) -> Result<(), Self::Error> {
+                let db = self.inner.open_db(Some(table))?;
+                let fsi = self.get_fsi(table)?;
+
+                // For DUPSORT tables, the "value" is key2 concatenated with the actual
+                // value. If the table is ALSO dupfixed, we need to pad key2 to the
+                // fixed size
+                if let Some(total_size) = fsi.total_size() {
+                    // Copy key2 to scratch buffer and zero-pad to total fixed size
+                    let mut buffer = [0u8; TX_BUFFER_SIZE];
+                    buffer[..key2.len()].copy_from_slice(key2);
+                    buffer[key2.len()..total_size].fill(0);
+                    let k2 = &buffer[..total_size];
+
+                    self.inner.del(db, key1, Some(k2)).map(drop).map_err(MdbxError::Mdbx)
+                } else {
+                    self.inner.del(db, key1, Some(key2)).map(drop).map_err(MdbxError::Mdbx)
+                }
+            }
+
+            fn queue_raw_clear(&self, table: &'static str) -> Result<(), Self::Error> {
+                let db = self.inner.open_db(Some(table))?;
+                self.inner.clear_db(db).map_err(MdbxError::Mdbx)
+            }
+
+            fn queue_raw_create(
+                &self,
+                table: &'static str,
+                dual_key: Option<usize>,
+                fixed_val: Option<usize>,
+                int_key: bool,
+            ) -> Result<(), Self::Error> {
+                let mut flags = signet_libmdbx::DatabaseFlags::default();
+
+                let mut fsi = FixedSizeInfo::None;
+
+                if let Some(key2_size) = dual_key {
+                    flags.set(signet_libmdbx::DatabaseFlags::DUP_SORT, true);
+                    if let Some(value_size) = fixed_val {
+                        flags.set(signet_libmdbx::DatabaseFlags::DUP_FIXED, true);
+                        fsi = FixedSizeInfo::DupFixed {
+                            key2_size,
+                            total_size: key2_size + value_size,
+                        };
+                    } else {
+                        // DUPSORT without DUP_FIXED - variable value size
+                        fsi = FixedSizeInfo::DupSort { key2_size };
+                    }
+                }
+
+                if int_key {
+                    flags.set(signet_libmdbx::DatabaseFlags::INTEGER_KEY, true);
+                }
+
+                self.inner.create_db(Some(table), flags)?;
+                self.store_fsi(table, fsi)?;
+
+                Ok(())
+            }
+
+            fn queue_put<T: SingleKey>(
+                &self,
+                key: &T::Key,
+                value: &T::Value,
+            ) -> Result<(), Self::Error> {
+                let db = self.inner.open_db(Some(T::NAME))?;
+                let mut key_buf = [0u8; MAX_KEY_SIZE];
+                let key_bytes = key.encode_key(&mut key_buf);
+
+                self.inner
+                    .with_reservation(
+                        db,
+                        key_bytes,
+                        value.encoded_size(),
+                        WriteFlags::UPSERT,
+                        |mut reserved| value.encode_value_to(&mut reserved),
+                    )
+                    .map_err(MdbxError::from)
+            }
+
+            fn queue_put_many_dual<'a, 'b, 'c, T, I, J>(&self, groups: I) -> Result<(), Self::Error>
+            where
+                T: DualKey,
+                T::Key: 'a,
+                T::Key2: 'b,
+                T::Value: 'c,
+                I: IntoIterator<Item = (&'a T::Key, J)>,
+                J: IntoIterator<Item = (&'b T::Key2, &'c T::Value)>,
             {
-                // Check if found value starts with our key2
-                if found_val.starts_with(key2) {
-                    cursor.del(Default::default()).map_err(MdbxError::Mdbx)?;
+                // Compile-time check - optimizer eliminates dead branch per table type
+                if !(T::IS_FIXED_VAL && T::DUAL_KEY) {
+                    // Not a DUP_FIXED table - use default loop implementation
+                    for (key1, entries) in groups {
+                        for (key2, value) in entries {
+                            self.queue_put_dual::<T>(key1, key2, value)?;
+                        }
+                    }
+                    return Ok(());
                 }
-            }
-        }
 
-        // For DUPSORT tables, the "value" is key2 concatenated with the actual
-        // value.
-        // If the value is fixed size, we can write directly into our scratch
-        // buffer. Otherwise, we need to allocate
-        //
-        // NB: DUPSORT and RESERVE are incompatible :(
-        if key2.len() + value.len() > TX_BUFFER_SIZE {
-            // Allocate a buffer for the combined value
-            let mut combined = Vec::with_capacity(key2.len() + value.len());
-            combined.extend_from_slice(key2);
-            combined.extend_from_slice(value);
-            return self
-                .inner
-                .put(dbi, key1, &combined, WriteFlags::UPSERT)
-                .map(|_| ())
-                .map_err(MdbxError::Mdbx);
-        } else {
-            // Use the scratch buffer
-            let mut buffer = [0u8; TX_BUFFER_SIZE];
-            let buf = &mut buffer[..key2.len() + value.len()];
-            buf[..key2.len()].copy_from_slice(key2);
-            buf[key2.len()..].copy_from_slice(value);
-            self.inner.put(dbi, key1, buf, WriteFlags::UPSERT)?;
-        }
+                // Sizes known at compile time (monomorphizes per table)
+                let dual_key_size = T::DUAL_KEY_SIZE.unwrap();
+                let fixed_val_size = T::FIXED_VAL_SIZE.unwrap();
+                let entry_size = dual_key_size + fixed_val_size;
 
-        Ok(())
-    }
+                let mut cursor = self.new_cursor::<T>()?;
+                let mut key1_buf = [0u8; MAX_KEY_SIZE];
+                let mut key2_buf = [0u8; MAX_KEY_SIZE];
 
-    fn queue_raw_delete(&self, table: &'static str, key: &[u8]) -> Result<(), Self::Error> {
-        let dbi = self.get_dbi_raw(table)?;
-        self.inner.del(dbi, key, None).map(|_| ()).map_err(MdbxError::Mdbx)
-    }
+                // Calculate max entries per page to bound buffer size
+                let page_size = self.inner.env().stat().map(|s| s.page_size() as usize)?;
+                let max_entries_per_page = page_size / entry_size;
+                let mut buffer = Vec::with_capacity(max_entries_per_page * entry_size);
 
-    fn queue_raw_delete_dual(
-        &self,
-        table: &'static str,
-        key1: &[u8],
-        key2: &[u8],
-    ) -> Result<(), Self::Error> {
-        let dbi = self.get_dbi_raw(table)?;
-        let fsi = self.get_fsi(table)?;
-
-        // For DUPSORT tables, the "value" is key2 concatenated with the actual
-        // value. If the table is ALSO dupfixed, we need to pad key2 to the
-        // fixed size
-        if let Some(total_size) = fsi.total_size() {
-            // Copy key2 to scratch buffer and zero-pad to total fixed size
-            let mut buffer = [0u8; TX_BUFFER_SIZE];
-            buffer[..key2.len()].copy_from_slice(key2);
-            buffer[key2.len()..total_size].fill(0);
-            let k2 = &buffer[..total_size];
-
-            self.inner.del(dbi, key1, Some(k2)).map(|_| ()).map_err(MdbxError::Mdbx)
-        } else {
-            self.inner.del(dbi, key1, Some(key2)).map(|_| ()).map_err(MdbxError::Mdbx)
-        }
-    }
-
-    fn queue_raw_clear(&self, table: &'static str) -> Result<(), Self::Error> {
-        let dbi = self.get_dbi_raw(table)?;
-        self.inner.clear_db(dbi).map(|_| ()).map_err(MdbxError::Mdbx)
-    }
-
-    fn queue_raw_create(
-        &self,
-        table: &'static str,
-        dual_key: Option<usize>,
-        fixed_val: Option<usize>,
-        int_key: bool,
-    ) -> Result<(), Self::Error> {
-        let mut flags = DatabaseFlags::default();
-
-        let mut fsi = FixedSizeInfo::None;
-
-        if let Some(key2_size) = dual_key {
-            flags.set(signet_libmdbx::DatabaseFlags::DUP_SORT, true);
-            if let Some(value_size) = fixed_val {
-                flags.set(signet_libmdbx::DatabaseFlags::DUP_FIXED, true);
-                fsi = FixedSizeInfo::DupFixed { key2_size, total_size: key2_size + value_size };
-            } else {
-                // DUPSORT without DUP_FIXED - variable value size
-                fsi = FixedSizeInfo::DupSort { key2_size };
-            }
-        }
-
-        if int_key {
-            flags.set(signet_libmdbx::DatabaseFlags::INTEGER_KEY, true);
-        }
-
-        // no clone. sad.
-        let flags2 = DatabaseFlags::from_bits(flags.bits()).unwrap();
-
-        self.inner.create_db(Some(table), flags2)?;
-        self.store_fsi(table, fsi)?;
-
-        Ok(())
-    }
-
-    fn queue_put<T: SingleKey>(&self, key: &T::Key, value: &T::Value) -> Result<(), Self::Error> {
-        let dbi = self.get_dbi::<T>()?;
-        let mut key_buf = [0u8; MAX_KEY_SIZE];
-        let key_bytes = key.encode_key(&mut key_buf);
-
-        self.inner
-            .with_reservation(
-                dbi,
-                key_bytes,
-                value.encoded_size(),
-                WriteFlags::UPSERT,
-                |mut reserved| value.encode_value_to(&mut reserved),
-            )
-            .map_err(MdbxError::from)
-    }
-
-    fn queue_put_many_dual<'a, 'b, 'c, T, I, J>(&self, groups: I) -> Result<(), Self::Error>
-    where
-        T: DualKey,
-        T::Key: 'a,
-        T::Key2: 'b,
-        T::Value: 'c,
-        I: IntoIterator<Item = (&'a T::Key, J)>,
-        J: IntoIterator<Item = (&'b T::Key2, &'c T::Value)>,
-    {
-        // Compile-time check - optimizer eliminates dead branch per table type
-        if !(T::IS_FIXED_VAL && T::DUAL_KEY) {
-            // Not a DUP_FIXED table - use default loop implementation
-            for (key1, entries) in groups {
-                for (key2, value) in entries {
-                    self.queue_put_dual::<T>(key1, key2, value)?;
-                }
-            }
-            return Ok(());
-        }
-
-        // Sizes known at compile time (monomorphizes per table)
-        let dual_key_size = T::DUAL_KEY_SIZE.unwrap();
-        let fixed_val_size = T::FIXED_VAL_SIZE.unwrap();
-        let entry_size = dual_key_size + fixed_val_size;
-
-        let mut cursor = self.new_cursor::<T>()?;
-        let mut key1_buf = [0u8; MAX_KEY_SIZE];
-        let mut key2_buf = [0u8; MAX_KEY_SIZE];
-
-        // Calculate max entries per page to bound buffer size
-        let page_size = self.inner.env().stat()?.page_size() as usize;
-        let max_entries_per_page = page_size / entry_size;
-        let mut buffer = Vec::with_capacity(max_entries_per_page * entry_size);
-
-        // Process each key1 group
-        for (key1, entries) in groups {
-            let key1_bytes = key1.encode_key(&mut key1_buf);
-            buffer.clear();
-            let mut entry_count = 0;
-
-            for (key2, value) in entries {
-                let key2_bytes = key2.encode_key(&mut key2_buf);
-                let value_bytes = value.encoded();
-                buffer.extend_from_slice(key2_bytes);
-                buffer.extend_from_slice(&value_bytes);
-                entry_count += 1;
-
-                // Flush when buffer reaches page capacity
-                if entry_count == max_entries_per_page {
-                    cursor.put_multiple_fixed(key1_bytes, &buffer, entry_count, false)?;
+                // Process each key1 group
+                for (key1, entries) in groups {
+                    let key1_bytes = key1.encode_key(&mut key1_buf);
                     buffer.clear();
-                    entry_count = 0;
+                    let mut entry_count = 0;
+
+                    for (key2, value) in entries {
+                        let key2_bytes = key2.encode_key(&mut key2_buf);
+                        let value_bytes = value.encoded();
+                        buffer.extend_from_slice(key2_bytes);
+                        buffer.extend_from_slice(&value_bytes);
+                        entry_count += 1;
+
+                        // Flush when buffer reaches page capacity
+                        if entry_count == max_entries_per_page {
+                            cursor.put_multiple_fixed(key1_bytes, &buffer, entry_count, false)?;
+                            buffer.clear();
+                            entry_count = 0;
+                        }
+                    }
+
+                    // Flush remaining entries for this key1
+                    if entry_count > 0 {
+                        cursor.put_multiple_fixed(key1_bytes, &buffer, entry_count, false)?;
+                    }
                 }
+
+                Ok(())
             }
 
-            // Flush remaining entries for this key1
-            if entry_count > 0 {
-                cursor.put_multiple_fixed(key1_bytes, &buffer, entry_count, false)?;
+            fn raw_commit(self) -> Result<(), Self::Error> {
+                // Take ownership of the inner transaction from the RefCell
+                self.inner.commit().map_err(MdbxError::Mdbx)
             }
         }
-
-        Ok(())
-    }
-
-    fn raw_commit(self) -> Result<(), Self::Error> {
-        // when committing, mdbx returns true on failure
-        self.inner.commit().map(drop).map_err(MdbxError::Mdbx)
-    }
+    };
 }
+
+impl_hot_kv_write!(RwSync);
+impl_hot_kv_write!(Rw);

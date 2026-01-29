@@ -15,7 +15,6 @@ trevm.workspace = true
 
 alloy.workspace = true
 
-
 auto_impl.workspace = true
 bytes.workspace = true
 thiserror.workspace = true

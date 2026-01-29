@@ -34,8 +34,8 @@
 
 use parking_lot::RwLock;
 use signet_libmdbx::{
-    Environment, EnvironmentFlags, Geometry, HandleSlowReadersReturnCode,
-    MaxReadTransactionDuration, Mode, PageSize, RO, RW, SyncMode, ffi,
+    Environment, EnvironmentFlags, Geometry, Mode, Ro, RoSync, Rw, RwSync, SyncMode, ffi,
+    sys::{HandleSlowReadersReturnCode, PageSize},
 };
 use std::{
     collections::HashMap,
@@ -45,7 +45,7 @@ use std::{
 };
 
 mod cursor;
-pub use cursor::{Cursor, CursorRO, CursorRW};
+pub use cursor::{Cursor, CursorRo, CursorRoSync, CursorRw, CursorRwSync};
 
 mod db_info;
 pub use db_info::{FixedSizeInfo, FsiCache};
@@ -105,8 +105,6 @@ pub struct DatabaseArguments {
     /// Database geometry settings.
     geometry: Geometry<Range<usize>>,
 
-    /// Maximum duration of a read transaction. If [None], the default value is used.
-    max_read_transaction_duration: Option<MaxReadTransactionDuration>,
     /// Open environment in exclusive/monopolistic mode. If [None], the default value is used.
     ///
     /// This can be used as a replacement for `MDB_NOLOCK`, which don't supported by MDBX. In this
@@ -165,7 +163,6 @@ impl DatabaseArguments {
                 shrink_threshold: Some(0),
                 page_size: Some(PageSize::Set(utils::default_page_size())),
             },
-            max_read_transaction_duration: None,
             exclusive: None,
             max_readers: None,
             sync_mode: SyncMode::Durable,
@@ -203,23 +200,6 @@ impl DatabaseArguments {
         if let Some(growth_step) = growth_step {
             self.geometry.growth_step = Some(growth_step as isize);
         }
-        self
-    }
-
-    /// Set the maximum duration of a read transaction.
-    pub const fn max_read_transaction_duration(
-        &mut self,
-        max_read_transaction_duration: Option<MaxReadTransactionDuration>,
-    ) {
-        self.max_read_transaction_duration = max_read_transaction_duration;
-    }
-
-    /// Set the maximum duration of a read transaction.
-    pub const fn with_max_read_transaction_duration(
-        mut self,
-        max_read_transaction_duration: Option<MaxReadTransactionDuration>,
-    ) -> Self {
-        self.max_read_transaction_duration(max_read_transaction_duration);
         self
     }
 
@@ -372,10 +352,6 @@ impl DatabaseEnv {
         // https://github.com/paradigmxyz/reth/blob/fa2b9b685ed9787636d962f4366caf34a9186e66/crates/storage/libmdbx-rs/mdbx-sys/libmdbx/mdbx.c#L16017.
         inner_env.set_rp_augment_limit(256 * 1024);
 
-        if let Some(max_read_transaction_duration) = args.max_read_transaction_duration {
-            inner_env.set_max_read_transaction_duration(max_read_transaction_duration);
-        }
-
         let fsi_cache = Arc::new(RwLock::new(HashMap::new()));
         let env = Self { inner: inner_env.open(path)?, fsi_cache, _lock_file };
 
@@ -383,17 +359,33 @@ impl DatabaseEnv {
     }
 
     /// Start a new read-only transaction.
-    fn tx(&self) -> Result<Tx<RO>, MdbxError> {
+    pub fn tx(&self) -> Result<Tx<Ro>, MdbxError> {
         self.inner
-            .begin_ro_txn()
+            .begin_ro_unsync()
             .map(|tx| Tx::new(tx, self.fsi_cache.clone()))
             .map_err(MdbxError::Mdbx)
     }
 
     /// Start a new read-write transaction.
-    fn tx_mut(&self) -> Result<Tx<RW>, MdbxError> {
+    pub fn tx_rw(&self) -> Result<Tx<Rw>, MdbxError> {
         self.inner
-            .begin_rw_txn()
+            .begin_rw_unsync()
+            .map(|tx| Tx::new(tx, self.fsi_cache.clone()))
+            .map_err(MdbxError::Mdbx)
+    }
+
+    /// Start a new read-only synchronous transaction.
+    pub fn tx_sync(&self) -> Result<Tx<RoSync>, MdbxError> {
+        self.inner
+            .begin_ro_sync()
+            .map(|tx| Tx::new(tx, self.fsi_cache.clone()))
+            .map_err(MdbxError::Mdbx)
+    }
+
+    /// Start a new read-write synchronous transaction.
+    pub fn tx_rw_sync(&self) -> Result<Tx<RwSync>, MdbxError> {
+        self.inner
+            .begin_rw_sync()
             .map(|tx| Tx::new(tx, self.fsi_cache.clone()))
             .map_err(MdbxError::Mdbx)
     }
@@ -408,14 +400,14 @@ impl Deref for DatabaseEnv {
 }
 
 impl HotKv for DatabaseEnv {
-    type RoTx = Tx<RO>;
-    type RwTx = Tx<RW>;
+    type RoTx = Tx<Ro>;
+    type RwTx = Tx<Rw>;
 
     fn reader(&self) -> Result<Self::RoTx, HotKvError> {
         self.tx().map_err(HotKvError::from_err)
     }
 
     fn writer(&self) -> Result<Self::RwTx, HotKvError> {
-        self.tx_mut().map_err(HotKvError::from_err)
+        self.tx_rw().map_err(HotKvError::from_err)
     }
 }

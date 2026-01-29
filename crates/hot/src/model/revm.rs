@@ -75,7 +75,10 @@ impl<U: HotKvRead> HotKvRead for RevmRead<U> {
         self.reader.get_dual::<T>(key1, key2)
     }
 
-    fn get_many<'a, T, I>(&self, keys: I) -> Result<Vec<GetManyItem<'a, T>>, Self::Error>
+    fn get_many<'a, T, I>(
+        &self,
+        keys: I,
+    ) -> impl IntoIterator<Item = Result<GetManyItem<'a, T>, Self::Error>>
     where
         T::Key: 'a,
         T: SingleKey,
@@ -153,7 +156,10 @@ impl<U: HotKvWrite> HotKvRead for RevmWrite<U> {
         self.writer.get_dual::<T>(key1, key2)
     }
 
-    fn get_many<'a, T, I>(&self, keys: I) -> Result<Vec<GetManyItem<'a, T>>, Self::Error>
+    fn get_many<'a, T, I>(
+        &self,
+        keys: I,
+    ) -> impl IntoIterator<Item = Result<GetManyItem<'a, T>, Self::Error>>
     where
         T::Key: 'a,
         T: SingleKey,
