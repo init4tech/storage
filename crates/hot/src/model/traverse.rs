@@ -5,6 +5,7 @@ use crate::{
     ser::{KeySer, MAX_KEY_SIZE},
     tables::{DualKey, SingleKey},
 };
+use core::marker::PhantomData;
 use std::ops::Range;
 
 /// Trait for traversing key-value pairs in the database.
@@ -448,8 +449,6 @@ where
 // ============================================================================
 // Wrapper Structs
 // ============================================================================
-
-use core::marker::PhantomData;
 
 /// A wrapper struct for typed table traversal.
 ///

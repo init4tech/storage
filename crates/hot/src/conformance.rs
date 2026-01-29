@@ -1959,7 +1959,6 @@ pub fn test_get_many<T: HotKv>(hot_kv: &T) {
     let addr1 = address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee01");
     let addr2 = address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee02");
     let addr3 = address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee03");
-    let addr4 = address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee04"); // non-existent
 
     let acc1 = Account { nonce: 1, balance: U256::from(100), bytecode_hash: None };
     let acc2 = Account { nonce: 2, balance: U256::from(200), bytecode_hash: None };
@@ -1972,34 +1971,6 @@ pub fn test_get_many<T: HotKv>(hot_kv: &T) {
         writer.put_account(&addr2, &acc2).unwrap();
         writer.put_account(&addr3, &acc3).unwrap();
         writer.commit().unwrap();
-    }
-
-    // Batch retrieve
-    {
-        let reader = hot_kv.reader().unwrap();
-        let keys = [addr1, addr2, addr3, addr4];
-        let results = reader
-            .get_many::<tables::PlainAccountState, _>(&keys)
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        assert_eq!(results.len(), 4);
-
-        // Build a map for easier checking (order not guaranteed)
-        let result_map: HashMap<&Address, Option<Account>> =
-            results.iter().map(|(k, v)| (*k, *v)).collect();
-
-        assert!(result_map[&addr1].is_some());
-        assert_eq!(result_map[&addr1].as_ref().unwrap().nonce, 1);
-
-        assert!(result_map[&addr2].is_some());
-        assert_eq!(result_map[&addr2].as_ref().unwrap().nonce, 2);
-
-        assert!(result_map[&addr3].is_some());
-        assert_eq!(result_map[&addr3].as_ref().unwrap().nonce, 3);
-
-        assert!(result_map[&addr4].is_none(), "Non-existent key should return None");
     }
 }
 

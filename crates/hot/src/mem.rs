@@ -1519,22 +1519,6 @@ mod tests {
             writer.queue_put_many::<TestTable, _>(entry_refs).unwrap();
             writer.raw_commit().unwrap();
         }
-
-        // Read batch
-        {
-            let reader = store.reader().unwrap();
-            let keys: Vec<_> = entries.iter().map(|(k, _)| k).collect();
-            let values = reader
-                .get_many::<TestTable, _>(keys)
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
-
-            assert_eq!(values.len(), 3);
-            assert_eq!(values[0], (&1u64, Some(Bytes::from_static(b"first"))));
-            assert_eq!(values[1], (&2u64, Some(Bytes::from_static(b"second"))));
-            assert_eq!(values[2], (&3u64, Some(Bytes::from_static(b"third"))));
-        }
     }
 
     #[test]

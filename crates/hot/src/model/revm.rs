@@ -1,5 +1,5 @@
 use crate::{
-    model::{GetManyItem, HotKvError, HotKvRead, HotKvWrite},
+    model::{HotKvError, HotKvRead, HotKvWrite},
     tables::{self, Bytecodes, DualKey, PlainAccountState, SingleKey, Table},
 };
 use alloy::primitives::{Address, B256, KECCAK256_EMPTY};
@@ -74,18 +74,6 @@ impl<U: HotKvRead> HotKvRead for RevmRead<U> {
     ) -> Result<Option<T::Value>, Self::Error> {
         self.reader.get_dual::<T>(key1, key2)
     }
-
-    fn get_many<'a, T, I>(
-        &self,
-        keys: I,
-    ) -> impl IntoIterator<Item = Result<GetManyItem<'a, T>, Self::Error>>
-    where
-        T::Key: 'a,
-        T: SingleKey,
-        I: IntoIterator<Item = &'a T::Key>,
-    {
-        self.reader.get_many::<T, I>(keys)
-    }
 }
 
 /// Read-write REVM database adapter. This adapter allows committing changes.
@@ -154,18 +142,6 @@ impl<U: HotKvWrite> HotKvRead for RevmWrite<U> {
         key2: &T::Key2,
     ) -> Result<Option<T::Value>, Self::Error> {
         self.writer.get_dual::<T>(key1, key2)
-    }
-
-    fn get_many<'a, T, I>(
-        &self,
-        keys: I,
-    ) -> impl IntoIterator<Item = Result<GetManyItem<'a, T>, Self::Error>>
-    where
-        T::Key: 'a,
-        T: SingleKey,
-        I: IntoIterator<Item = &'a T::Key>,
-    {
-        self.writer.get_many::<T, I>(keys)
     }
 }
 

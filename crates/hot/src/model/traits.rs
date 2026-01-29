@@ -1,7 +1,7 @@
 use crate::{
     model::{
-        DualKeyTraverse, DualKeyValue, DualTableCursor, GetManyDualItem, GetManyItem, HotKvError,
-        HotKvReadError, KeyValue, KvTraverse, KvTraverseMut, TableCursor,
+        DualKeyTraverse, DualKeyValue, DualTableCursor, HotKvError, HotKvReadError, KeyValue,
+        KvTraverse, KvTraverseMut, TableCursor,
         revm::{RevmRead, RevmWrite},
     },
     ser::{KeySer, MAX_KEY_SIZE, ValSer},
@@ -174,79 +174,6 @@ pub trait HotKvRead {
             return Ok(None);
         };
         T::Value::decode_value(&value_bytes).map(Some).map_err(Into::into)
-    }
-
-    /// Get many values from a specific table.
-    ///
-    /// # Arguments
-    ///
-    /// * `keys` - An iterator over keys to retrieve.
-    ///
-    /// # Returns
-    ///
-    /// An iterator of [`KeyValue`] where each element corresponds to the value
-    /// for the respective key in the input iterator. If a key does not exist
-    /// in the table, the corresponding element will be `None`.
-    ///
-    /// Implementations ARE NOT required to preserve the order of the input
-    /// keys in the output iterator. Users should not rely on any specific
-    /// ordering.
-    ///
-    /// If any error occurs during retrieval or deserialization, the entire
-    /// operation will return an error.
-    fn get_many<'a, T, I>(
-        &self,
-        keys: I,
-    ) -> impl IntoIterator<Item = Result<GetManyItem<'a, T>, Self::Error>>
-    where
-        T::Key: 'a,
-        T: SingleKey,
-        I: IntoIterator<Item = &'a T::Key>,
-    {
-        let mut key_buf = [0u8; MAX_KEY_SIZE];
-
-        keys.into_iter()
-            .map(move |key| (key, self.raw_get(T::NAME, key.encode_key(&mut key_buf))))
-            .map(|(key, maybe_val)| {
-                maybe_val
-                    .and_then(|val| {
-                        <T::Value as ValSer>::maybe_decode_value(val.as_deref()).map_err(Into::into)
-                    })
-                    .map(|res| (key, res))
-            })
-    }
-
-    /// Get many values from a specific dual-keyed table.
-    ///
-    /// # Arguments
-    /// * `keys` - An iterator over tuples of (key1, key2) to retrieve.
-    ///
-    /// # Returns
-    fn get_many_dual<'a, T, I>(
-        &self,
-        keys: I,
-    ) -> impl IntoIterator<Item = Result<GetManyDualItem<'a, T>, Self::Error>>
-    where
-        T: DualKey,
-        T::Key: 'a,
-        T::Key2: 'a,
-        I: IntoIterator<Item = (&'a T::Key, &'a T::Key2)>,
-    {
-        let mut key_buf = [0u8; MAX_KEY_SIZE];
-        let mut key2_buf = [0u8; MAX_KEY_SIZE];
-        keys.into_iter().map(move |(key1, key2)| {
-            let key1_bytes = key1.encode_key(&mut key_buf);
-            let key2_bytes = key2.encode_key(&mut key2_buf);
-
-            let maybe_val = self.raw_get_dual(T::NAME, key1_bytes, key2_bytes)?;
-
-            let decoded_val = match maybe_val {
-                Some(val) => Some(<T::Value as ValSer>::decode_value(&val)?),
-                None => None,
-            };
-
-            Ok((key1, key2, decoded_val))
-        })
     }
 }
 

@@ -329,21 +329,6 @@ mod tests {
                 assert_eq!(read_account.as_ref(), Some(expected_account));
             }
         }
-
-        // Test batch get_many
-        {
-            let reader: Tx<Ro> = db.reader().unwrap();
-            let addresses: Vec<Address> = accounts.iter().map(|(addr, _)| *addr).collect();
-            let read_accounts: Vec<(_, Option<Account>)> = reader
-                .get_many::<tables::PlainAccountState, _>(addresses.iter())
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
-
-            for (i, (_, expected_account)) in accounts.iter().enumerate() {
-                assert_eq!(read_accounts[i].1.as_ref(), Some(expected_account));
-            }
-        }
     }
 
     #[test]
