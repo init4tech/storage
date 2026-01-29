@@ -148,8 +148,8 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
     fn write_wipe(&self, block_number: u64, address: &Address) -> Result<(), Self::Error> {
         let mut cursor = self.traverse_dual::<tables::PlainStorageState>()?;
 
-        for entry in cursor.iter_k2(address, &U256::ZERO)? {
-            let (_addr, slot, value) = entry?;
+        for entry in cursor.iter_k2(address)? {
+            let (slot, value) = entry?;
             self.write_storage_prestate(block_number, *address, &slot, &value)?;
         }
         Ok(())

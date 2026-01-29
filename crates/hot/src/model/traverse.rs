@@ -6,7 +6,17 @@ use crate::{
     tables::{DualKey, SingleKey},
 };
 use core::marker::PhantomData;
+use std::borrow::Cow;
 use std::ops::{Range, RangeInclusive};
+
+/// Raw k2-value pair: (key2, value).
+///
+/// This is returned by `iter_k2()` on dual-keyed tables. The caller already
+/// knows k1 (they passed it in), so we don't return it redundantly.
+pub type RawK2Value<'a> = (Cow<'a, [u8]>, RawValue<'a>);
+
+/// Typed k2-value pair for a dual-keyed table.
+pub type K2Value<T> = (<T as DualKey>::Key2, <T as crate::tables::Table>::Value);
 
 /// Trait for traversing key-value pairs in the database.
 pub trait KvTraverse<E: HotKvReadError> {
@@ -212,30 +222,29 @@ pub trait DualKeyTraverse<E: HotKvReadError> {
         Ok(RawDualKeyIter { cursor: self, done: false, _marker: PhantomData })
     }
 
-    /// Iterate k2 entries within a single k1.
+    /// Iterate all k2 entries within a single k1.
     ///
-    /// The iterator starts at the first entry with (k1, k2) >= the specified
-    /// keys and stops when k1 changes or the table is exhausted.
+    /// The iterator yields `(k2, value)` pairs for the specified k1, starting
+    /// from the first k2 value, and stops when k1 changes or the table is
+    /// exhausted.
+    ///
+    /// Note: k1 is not included in the output since the caller already knows
+    /// it (they passed it in). This avoids redundant allocations.
     fn iter_k2<'a>(
         &'a mut self,
         k1: &[u8],
-        start_k2: &[u8],
-    ) -> Result<impl Iterator<Item = Result<RawDualKeyValue<'a>, E>> + 'a, E>
+    ) -> Result<impl Iterator<Item = Result<RawK2Value<'a>, E>> + 'a, E>
     where
         Self: Sized,
     {
-        let entry = self.next_dual_above(k1, start_k2)?;
+        // Position at first entry for this k1 (using empty slice as minimum k2)
+        let entry = self.next_dual_above(k1, &[])?;
         let Some((found_k1, _, _)) = entry else {
-            return Ok(RawDualKeyK2Iter {
-                cursor: self,
-                k1: Vec::new(),
-                done: true,
-                _marker: PhantomData,
-            });
+            return Ok(RawDualKeyK2Iter { cursor: self, done: true, _marker: PhantomData });
         };
         // If the found k1 doesn't match, we're done
         let done = found_k1.as_ref() != k1;
-        Ok(RawDualKeyK2Iter { cursor: self, k1: k1.to_vec(), done, _marker: PhantomData })
+        Ok(RawDualKeyK2Iter { cursor: self, done, _marker: PhantomData })
     }
 }
 
@@ -520,15 +529,18 @@ pub trait DualTableTraverse<T: DualKey, E: HotKvReadError>: DualKeyTraverse<E> {
     where
         T::Key: PartialEq;
 
-    /// Iterate k2 entries within a single k1.
+    /// Iterate all k2 entries within a single k1.
     ///
-    /// The iterator starts at the first entry with (k1, k2) >= the specified
-    /// keys and stops when k1 changes or the table is exhausted.
+    /// The iterator yields `(k2, value)` pairs for the specified k1, starting
+    /// from the first k2 value, and stops when k1 changes or the table is
+    /// exhausted.
+    ///
+    /// Note: k1 is not included in the output since the caller already knows
+    /// it (they passed it in). This avoids redundant allocations.
     fn iter_k2(
         &mut self,
         k1: &T::Key,
-        start_k2: &T::Key2,
-    ) -> Result<impl Iterator<Item = Result<DualKeyValue<T>, E>> + '_, E>
+    ) -> Result<impl Iterator<Item = Result<K2Value<T>, E>> + '_, E>
     where
         T::Key: PartialEq;
 }
@@ -607,29 +619,26 @@ where
     fn iter_k2(
         &mut self,
         k1: &T::Key,
-        start_k2: &T::Key2,
-    ) -> Result<impl Iterator<Item = Result<DualKeyValue<T>, E>> + '_, E>
+    ) -> Result<impl Iterator<Item = Result<K2Value<T>, E>> + '_, E>
     where
         T::Key: PartialEq,
     {
-        // Position cursor and get the target k1 for comparison
-        let entry = DualTableTraverse::<T, E>::next_dual_above(self, k1, start_k2)?;
+        // Position cursor at first entry for this k1 using raw interface with empty k2
+        let mut key1_buf = [0u8; MAX_KEY_SIZE];
+        let key1_bytes = k1.encode_key(&mut key1_buf);
+        let entry = DualKeyTraverse::next_dual_above(self, key1_bytes, &[])?;
         let Some((found_k1, _, _)) = entry else {
             return Ok(DualTableK2Iter::<'_, C, T, E> {
                 cursor: self,
-                k1: k1.clone(),
                 done: true,
                 _marker: PhantomData,
             });
         };
+        // Decode the found k1 to check if it matches
+        let decoded_k1 = T::decode_key(found_k1)?;
         // If the found k1 doesn't match, we're done
-        let done = found_k1 != *k1;
-        Ok(DualTableK2Iter::<'_, C, T, E> {
-            cursor: self,
-            k1: found_k1,
-            done,
-            _marker: PhantomData,
-        })
+        let done = decoded_k1 != *k1;
+        Ok(DualTableK2Iter::<'_, C, T, E> { cursor: self, done, _marker: PhantomData })
     }
 }
 
@@ -811,13 +820,13 @@ where
     }
 }
 
-/// Default forward iterator over raw dual-keyed entries within a single k1.
+/// Default forward iterator over raw k2-value entries within a single k1.
 ///
 /// This iterator wraps a cursor implementing `DualKeyTraverse` and yields
-/// entries while k1 remains unchanged.
+/// `(k2, value)` pairs while k1 remains unchanged. The iterator stops when k1
+/// changes or the table is exhausted.
 pub struct RawDualKeyK2Iter<'a, C, E> {
     cursor: &'a mut C,
-    k1: Vec<u8>,
     done: bool,
     _marker: PhantomData<fn() -> E>,
 }
@@ -827,7 +836,7 @@ where
     C: DualKeyTraverse<E>,
     E: HotKvReadError,
 {
-    type Item = Result<RawDualKeyValue<'a>, E>;
+    type Item = Result<RawK2Value<'a>, E>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -838,17 +847,10 @@ where
             std::mem::transmute::<
                 Result<Option<RawDualKeyValue<'_>>, E>,
                 Result<Option<RawDualKeyValue<'a>>, E>,
-            >(self.cursor.read_next())
+            >(self.cursor.next_k2())
         };
         match result {
-            Ok(Some((k1, k2, v))) => {
-                if k1.as_ref() != self.k1.as_slice() {
-                    self.done = true;
-                    None
-                } else {
-                    Some(Ok((k1, k2, v)))
-                }
-            }
+            Ok(Some((_k1, k2, v))) => Some(Ok((k2, v))),
             Ok(None) => {
                 self.done = true;
                 None
@@ -865,42 +867,34 @@ where
 // Typed Iterator Structs (for extension traits)
 // ============================================================================
 
-/// Forward iterator over k2 entries within a single k1.
+/// Forward iterator over k2-value pairs within a single k1.
 ///
-/// This iterator wraps a cursor and yields entries while k1 remains equal
-/// to the initial k1 value.
+/// This iterator wraps a cursor and yields `(k2, value)` pairs by calling
+/// `next_k2()` on each iteration. The iterator stops when there are no more
+/// k2 entries for the current k1 or when an error occurs.
 pub struct DualTableK2Iter<'a, C, T, E>
 where
     T: DualKey,
 {
     cursor: &'a mut C,
-    k1: T::Key,
     done: bool,
-    _marker: PhantomData<fn() -> E>,
+    _marker: PhantomData<fn() -> (T, E)>,
 }
 
 impl<'a, C, T, E> Iterator for DualTableK2Iter<'a, C, T, E>
 where
     C: DualKeyTraverse<E>,
     T: DualKey,
-    T::Key: PartialEq,
     E: HotKvReadError,
 {
-    type Item = Result<DualKeyValue<T>, E>;
+    type Item = Result<K2Value<T>, E>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
         }
-        match DualTableTraverse::<T, E>::read_next(self.cursor) {
-            Ok(Some((k1, k2, v))) => {
-                if k1 != self.k1 {
-                    self.done = true;
-                    None
-                } else {
-                    Some(Ok((k1, k2, v)))
-                }
-            }
+        match DualTableTraverse::<T, E>::next_k2(self.cursor) {
+            Ok(Some((_k1, k2, v))) => Some(Ok((k2, v))),
             Ok(None) => {
                 self.done = true;
                 None
@@ -1161,16 +1155,19 @@ where
         DualTableTraverse::<T, E>::iter(&mut self.inner)
     }
 
-    /// Iterate k2 entries within a single k1.
+    /// Iterate all k2 entries within a single k1.
     ///
-    /// The iterator starts at the first entry with (k1, k2) >= the specified
-    /// keys and stops when k1 changes or the table is exhausted.
+    /// The iterator yields `(k2, value)` pairs for the specified k1, starting
+    /// from the first k2 value, and stops when k1 changes or the table is
+    /// exhausted.
+    ///
+    /// Note: k1 is not included in the output since the caller already knows
+    /// it (they passed it in). This avoids redundant allocations.
     pub fn iter_k2(
         &mut self,
         k1: &T::Key,
-        start_k2: &T::Key2,
-    ) -> Result<impl Iterator<Item = Result<DualKeyValue<T>, E>> + '_, E> {
-        DualTableTraverse::<T, E>::iter_k2(&mut self.inner, k1, start_k2)
+    ) -> Result<impl Iterator<Item = Result<K2Value<T>, E>> + '_, E> {
+        DualTableTraverse::<T, E>::iter_k2(&mut self.inner, k1)
     }
 }
 
