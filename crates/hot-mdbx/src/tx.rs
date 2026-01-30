@@ -51,17 +51,7 @@ impl<K: TransactionKind> Tx<K> {
             .map_err(MdbxError::from)?
             .ok_or(MdbxError::UnknownTable(name))?;
 
-        // Migration: handle both old (16 byte) and new (8 byte) formats
-        let fsi = if data.len() == 16 {
-            // Old format: skip dbi (4) + flags (4), read FixedSizeInfo from offset 8
-            FixedSizeInfo::decode_value(&data[8..16])
-        } else {
-            // New format: 8 bytes of FixedSizeInfo
-            FixedSizeInfo::decode_value(&data)
-        }
-        .map_err(MdbxError::Deser)?;
-
-        Ok(fsi)
+        FixedSizeInfo::decode_value(&data).map_err(MdbxError::Deser)
     }
 
     /// Gets cached FixedSizeInfo for a table.
