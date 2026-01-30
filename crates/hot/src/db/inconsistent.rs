@@ -1,17 +1,16 @@
 use crate::{
     db::{HistoryError, HistoryRead},
-    model::{DualKeyTraverse, DualTableCursor, HotKvWrite, KvTraverse, TableCursor},
+    model::HotKvWrite,
     tables,
 };
+use ahash::AHashMap;
 use alloy::{
     consensus::Header,
     primitives::{Address, B256, BlockNumber, U256},
 };
+use itertools::Itertools;
 use signet_storage_types::{Account, BlockNumberList, SealedHeader, ShardedKey};
-use std::{
-    collections::{BTreeMap, HashMap, hash_map},
-    ops::RangeInclusive,
-};
+use std::ops::RangeInclusive;
 use trevm::revm::{
     bytecode::Bytecode,
     database::{
@@ -25,7 +24,7 @@ use trevm::revm::{
 /// Maps address -> (old_account, new_account, storage_changes)
 /// where storage_changes maps slot (B256) -> (old_value, new_value)
 pub type BundleInit =
-    HashMap<Address, (Option<Account>, Option<Account>, HashMap<B256, (U256, U256)>)>;
+    AHashMap<Address, (Option<Account>, Option<Account>, AHashMap<B256, (U256, U256)>)>;
 
 /// Trait for database write operations on standard hot tables.
 ///
@@ -150,9 +149,11 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
     fn write_wipe(&self, block_number: u64, address: &Address) -> Result<(), Self::Error> {
         let mut cursor = self.traverse_dual::<tables::PlainStorageState>()?;
 
-        cursor.for_each_k2(address, &U256::ZERO, |_addr, slot, value| {
-            self.write_storage_prestate(block_number, *address, &slot, &value)
-        })
+        for entry in cursor.iter_k2(address)? {
+            let (slot, value) = entry?;
+            self.write_storage_prestate(block_number, *address, &slot, &value)?;
+        }
+        Ok(())
     }
 
     /// Write a block's plain state revert information.
@@ -175,7 +176,8 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
 
         for entry in storage {
             if entry.wiped {
-                return self.write_wipe(block_number, &entry.address);
+                self.write_wipe(block_number, &entry.address)?;
+                continue;
             }
             for (key, old_value) in entry.storage_revert.iter() {
                 self.write_storage_prestate(
@@ -226,16 +228,7 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
         PlainStorageChangeset { address, wipe_storage, storage }: &PlainStorageChangeset,
     ) -> Result<(), Self::Error> {
         if *wipe_storage {
-            let mut cursor = self.traverse_dual_mut::<tables::PlainStorageState>()?;
-
-            while let Some((key, _, _)) = cursor.next_k2()? {
-                if key != *address {
-                    break;
-                }
-                cursor.delete_current()?;
-            }
-
-            return Ok(());
+            return self.clear_k1_for::<tables::PlainStorageState>(address);
         }
 
         storage.iter().try_for_each(|(key, value)| self.put_storage(address, key, value))
@@ -270,27 +263,23 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
     /// Get all changed accounts with the list of block numbers in the given
     /// range.
     ///
-    /// Note: This iterates using `next_k2()` which stays within the same k1
-    /// (block number). It effectively only collects changes from the first
-    /// block number in the range.
+    /// Iterates over entries starting from the first block in the range,
+    /// collecting changes while the block number remains in range.
+    // TODO: estimate capacity from block range size for better allocation
     fn changed_accounts_with_range(
         &self,
         range: RangeInclusive<BlockNumber>,
-    ) -> Result<BTreeMap<Address, Vec<u64>>, Self::Error> {
-        let mut changeset_cursor = self.traverse_dual::<tables::AccountChangeSets>()?;
-        let mut result: BTreeMap<Address, Vec<u64>> = BTreeMap::new();
-
-        changeset_cursor.for_each_while_k2(
-            range.start(),
-            &Address::ZERO,
-            |num, _, _| range.contains(num),
-            |num, addr, _| {
-                result.entry(addr).or_default().push(num);
-                Ok(())
-            },
-        )?;
-
-        Ok(result)
+    ) -> Result<AHashMap<Address, Vec<u64>>, Self::Error> {
+        self.traverse_dual::<tables::AccountChangeSets>()?
+            .iter_from(range.start(), &Address::ZERO)?
+            .process_results(|iter| {
+                iter.take_while(|(num, _, _)| range.contains(num))
+                    .map(|(num, addr, _)| (addr, num))
+                    .into_group_map_by(|(addr, _)| *addr)
+                    .into_iter()
+                    .map(|(addr, pairs)| (addr, pairs.into_iter().map(|(_, num)| num).collect()))
+                    .collect()
+            })
     }
 
     /// Append account history indices for multiple accounts.
@@ -299,46 +288,13 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
         index_updates: impl IntoIterator<Item = (Address, impl IntoIterator<Item = u64>)>,
     ) -> Result<(), HistoryError<Self::Error>> {
         for (acct, indices) in index_updates {
-            // Get the existing last shard (if any) and remember its key so we can
-            // delete it before writing new shards
             let existing = self.last_account_history(acct)?;
-            // Save the old key before taking ownership of the list
-            let old_key = existing.as_ref().map(|(key, _)| *key);
-            // Take ownership instead of cloning
-            let mut last_shard = existing.map(|(_, list)| list).unwrap_or_default();
-
-            last_shard.append(indices).map_err(HistoryError::IntList)?;
-
-            // Delete the existing shard before writing new ones to avoid duplicates
-            if let Some(old_key) = old_key {
-                self.queue_delete_dual::<tables::AccountsHistory>(&acct, &old_key)?;
-            }
-
-            // fast path: all indices fit in one shard
-            if last_shard.len() <= ShardedKey::SHARD_COUNT as u64 {
-                self.write_account_history(&acct, u64::MAX, &last_shard)?;
-                continue;
-            }
-
-            // slow path: rechunk into multiple shards
-            // Reuse a single buffer to avoid allocating a new Vec per chunk
-            let mut chunk_buf = Vec::with_capacity(ShardedKey::SHARD_COUNT);
-            let mut iter = last_shard.iter().peekable();
-
-            while iter.peek().is_some() {
-                chunk_buf.clear();
-                chunk_buf.extend(iter.by_ref().take(ShardedKey::SHARD_COUNT));
-
-                let highest_block_number = if iter.peek().is_some() {
-                    *chunk_buf.last().expect("chunk_buf is non-empty")
-                } else {
-                    // Insert last list with `u64::MAX`.
-                    u64::MAX
-                };
-
-                let shard = BlockNumberList::new_pre_sorted(chunk_buf.iter().copied());
-                self.write_account_history(&acct, highest_block_number, &shard)?;
-            }
+            append_to_sharded_history(
+                existing,
+                indices,
+                |key| self.queue_delete_dual::<tables::AccountsHistory>(&acct, &key),
+                |height, list| self.write_account_history(&acct, height, list),
+            )?;
         }
         Ok(())
     }
@@ -346,28 +302,24 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
     /// Get all changed storages with the list of block numbers in the given
     /// range.
     ///
-    /// Note: This iterates using `next_k2()` which stays within the same k1
-    /// (block number + address). It effectively only collects changes from
-    /// the first key1 value in the range.
+    /// Iterates over entries starting from the first block in the range,
+    /// collecting changes while the block number remains in range.
+    // TODO: estimate capacity from block range size for better allocation
     #[allow(clippy::type_complexity)]
     fn changed_storages_with_range(
         &self,
         range: RangeInclusive<BlockNumber>,
-    ) -> Result<BTreeMap<(Address, U256), Vec<u64>>, Self::Error> {
-        let mut changeset_cursor = self.traverse_dual::<tables::StorageChangeSets>()?;
-        let mut result: BTreeMap<(Address, U256), Vec<u64>> = BTreeMap::new();
-
-        changeset_cursor.for_each_while_k2(
-            &(*range.start(), Address::ZERO),
-            &U256::ZERO,
-            |num_addr, _, _| range.contains(&num_addr.0),
-            |num_addr, slot, _| {
-                result.entry((num_addr.1, slot)).or_default().push(num_addr.0);
-                Ok(())
-            },
-        )?;
-
-        Ok(result)
+    ) -> Result<AHashMap<(Address, U256), Vec<u64>>, Self::Error> {
+        self.traverse_dual::<tables::StorageChangeSets>()?
+            .iter_from(&(*range.start(), Address::ZERO), &U256::ZERO)?
+            .process_results(|iter| {
+                iter.take_while(|(num_addr, _, _)| range.contains(&num_addr.0))
+                    .map(|(num_addr, slot, _)| ((num_addr.1, slot), num_addr.0))
+                    .into_group_map_by(|(key, _)| *key)
+                    .into_iter()
+                    .map(|(key, pairs)| (key, pairs.into_iter().map(|(_, num)| num).collect()))
+                    .collect()
+            })
     }
 
     /// Append storage history indices for multiple (address, slot) pairs.
@@ -376,46 +328,13 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
         index_updates: impl IntoIterator<Item = ((Address, U256), impl IntoIterator<Item = u64>)>,
     ) -> Result<(), HistoryError<Self::Error>> {
         for ((addr, slot), indices) in index_updates {
-            // Get the existing last shard (if any) and remember its key so we can
-            // delete it before writing new shards
             let existing = self.last_storage_history(&addr, &slot)?;
-            // Save the old key before taking ownership of the list (clone is cheap for ShardedKey)
-            let old_key = existing.as_ref().map(|(key, _)| key.clone());
-            // Take ownership instead of cloning the BlockNumberList
-            let mut last_shard = existing.map(|(_, list)| list).unwrap_or_default();
-
-            last_shard.append(indices).map_err(HistoryError::IntList)?;
-
-            // Delete the existing shard before writing new ones to avoid duplicates
-            if let Some(old_key) = old_key {
-                self.queue_delete_dual::<tables::StorageHistory>(&addr, &old_key)?;
-            }
-
-            // fast path: all indices fit in one shard
-            if last_shard.len() <= ShardedKey::SHARD_COUNT as u64 {
-                self.write_storage_history(&addr, slot, u64::MAX, &last_shard)?;
-                continue;
-            }
-
-            // slow path: rechunk into multiple shards
-            // Reuse a single buffer to avoid allocating a new Vec per chunk
-            let mut chunk_buf = Vec::with_capacity(ShardedKey::SHARD_COUNT);
-            let mut iter = last_shard.iter().peekable();
-
-            while iter.peek().is_some() {
-                chunk_buf.clear();
-                chunk_buf.extend(iter.by_ref().take(ShardedKey::SHARD_COUNT));
-
-                let highest_block_number = if iter.peek().is_some() {
-                    *chunk_buf.last().expect("chunk_buf is non-empty")
-                } else {
-                    // Insert last list with `u64::MAX`.
-                    u64::MAX
-                };
-
-                let shard = BlockNumberList::new_pre_sorted(chunk_buf.iter().copied());
-                self.write_storage_history(&addr, slot, highest_block_number, &shard)?;
-            }
+            append_to_sharded_history(
+                existing,
+                indices,
+                |key| self.queue_delete_dual::<tables::StorageHistory>(&addr, &key),
+                |height, list| self.write_storage_history(&addr, slot, height, list),
+            )?;
         }
         Ok(())
     }
@@ -480,75 +399,67 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
     ) -> Result<(), Self::Error> {
         blocks.iter().try_for_each(|(header, state)| self.append_block_inconsistent(header, state))
     }
-
-    /// Populate a [`BundleInit`] using cursors over the
-    /// [`tables::PlainAccountState`] and [`tables::PlainStorageState`] tables,
-    /// based on the given storage and account changesets.
-    ///
-    /// Returns a map of address -> (old_account, new_account, storage_changes)
-    /// where storage_changes maps slot -> (old_value, new_value).
-    fn populate_bundle_state<C, D>(
-        &self,
-        account_changeset: Vec<(u64, Address, Account)>,
-        storage_changeset: Vec<((u64, Address), U256, U256)>,
-        plain_accounts_cursor: &mut TableCursor<C, tables::PlainAccountState, Self::Error>,
-        plain_storage_cursor: &mut DualTableCursor<D, tables::PlainStorageState, Self::Error>,
-    ) -> Result<BundleInit, Self::Error>
-    where
-        C: KvTraverse<Self::Error>,
-        D: DualKeyTraverse<Self::Error>,
-    {
-        // iterate previous value and get plain state value to create changeset
-        // Double option around Account represent if Account state is known (first option) and
-        // account is removed (second option)
-        let mut state: BundleInit = Default::default();
-
-        // add account changeset changes in reverse order
-        for (_block_number, address, old_account) in account_changeset.into_iter().rev() {
-            match state.entry(address) {
-                hash_map::Entry::Vacant(entry) => {
-                    let new_account = plain_accounts_cursor.exact(&address)?;
-                    entry.insert((Some(old_account), new_account, HashMap::default()));
-                }
-                hash_map::Entry::Occupied(mut entry) => {
-                    // overwrite old account state.
-                    entry.get_mut().0 = Some(old_account);
-                }
-            }
-        }
-
-        // add storage changeset changes
-        for ((_block, address), storage_key, old_value) in storage_changeset.into_iter().rev() {
-            // get account state or insert from plain state.
-            let account_state = match state.entry(address) {
-                hash_map::Entry::Vacant(entry) => {
-                    let present_account = plain_accounts_cursor.exact(&address)?;
-                    entry.insert((present_account, present_account, HashMap::default()))
-                }
-                hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            };
-
-            // Convert U256 storage key to B256 for the BundleInit map
-            let storage_key_b256 = B256::from(storage_key);
-
-            // match storage.
-            match account_state.2.entry(storage_key_b256) {
-                hash_map::Entry::Vacant(entry) => {
-                    let new_value = plain_storage_cursor
-                        .next_dual_above(&address, &storage_key)?
-                        .filter(|(k, k2, _)| *k == address && *k2 == storage_key)
-                        .map(|(_, _, v)| v)
-                        .unwrap_or_default();
-                    entry.insert((old_value, new_value));
-                }
-                hash_map::Entry::Occupied(mut entry) => {
-                    entry.get_mut().0 = old_value;
-                }
-            };
-        }
-
-        Ok(state)
-    }
 }
 
 impl<T> UnsafeHistoryWrite for T where T: UnsafeDbWrite + HotKvWrite {}
+
+/// Append indices to a sharded history entry, handling shard splitting.
+///
+/// This helper handles the common pattern of:
+/// 1. Appending new block numbers to an existing shard
+/// 2. Deleting the old shard if it exists
+/// 3. Splitting into multiple shards if the result exceeds the shard size
+///
+/// # Arguments
+/// - `existing`: The current last shard (key, list) if any
+/// - `indices`: New block numbers to append
+/// - `delete_old`: Called to delete the old shard key before writing new ones
+/// - `write_shard`: Called for each resulting shard (highest_block, list)
+fn append_to_sharded_history<K, E, D, W>(
+    existing: Option<(K, BlockNumberList)>,
+    indices: impl IntoIterator<Item = u64>,
+    mut delete_old: D,
+    mut write_shard: W,
+) -> Result<(), HistoryError<E>>
+where
+    E: std::error::Error,
+    D: FnMut(K) -> Result<(), E>,
+    W: FnMut(u64, &BlockNumberList) -> Result<(), E>,
+{
+    let (old_key, last_shard) =
+        existing.map_or_else(|| (None, BlockNumberList::default()), |(k, list)| (Some(k), list));
+    let mut last_shard = last_shard;
+
+    last_shard.append(indices).map_err(HistoryError::IntList)?;
+
+    // Delete the existing shard before writing new ones to avoid duplicates
+    if let Some(key) = old_key {
+        delete_old(key).map_err(HistoryError::Db)?;
+    }
+
+    // Fast path: all indices fit in one shard
+    if last_shard.len() <= ShardedKey::SHARD_COUNT as u64 {
+        return write_shard(u64::MAX, &last_shard).map_err(HistoryError::Db);
+    }
+
+    // Slow path: rechunk into multiple shards
+    // Reuse a single buffer to avoid allocating a new Vec per chunk
+    let mut chunk_buf = Vec::with_capacity(ShardedKey::SHARD_COUNT);
+    let mut iter = last_shard.iter().peekable();
+
+    while iter.peek().is_some() {
+        chunk_buf.clear();
+        chunk_buf.extend(iter.by_ref().take(ShardedKey::SHARD_COUNT));
+
+        let highest = if iter.peek().is_some() {
+            *chunk_buf.last().expect("chunk_buf is non-empty")
+        } else {
+            // Insert last list with `u64::MAX`
+            u64::MAX
+        };
+
+        let shard = BlockNumberList::new_pre_sorted(chunk_buf.iter().copied());
+        write_shard(highest, &shard).map_err(HistoryError::Db)?;
+    }
+    Ok(())
+}

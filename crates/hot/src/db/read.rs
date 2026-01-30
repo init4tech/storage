@@ -220,23 +220,11 @@ pub trait HistoryRead: HotDbRead {
 
     /// Get headers in a range (inclusive).
     fn get_headers_range(&self, start: u64, end: u64) -> Result<Vec<Header>, Self::Error> {
-        let mut cursor = self.traverse::<tables::Headers>()?;
-        let mut headers = Vec::new();
-
-        if cursor.lower_bound(&start)?.is_none() {
-            return Ok(headers);
-        }
-
-        loop {
-            match cursor.read_next()? {
-                Some((num, header)) if num <= end => {
-                    headers.push(header);
-                }
-                _ => break,
-            }
-        }
-
-        Ok(headers)
+        self.traverse::<tables::Headers>()?
+            .iter_from(&start)?
+            .take_while(|r| r.as_ref().is_ok_and(|(num, _)| *num <= end))
+            .map(|r| r.map(|(_, header)| header))
+            .collect()
     }
 }
 

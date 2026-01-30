@@ -2,9 +2,9 @@ use crate::{
     db::{HistoryError, UnsafeDbWrite, UnsafeHistoryWrite},
     tables,
 };
+use ahash::AHashSet;
 use alloy::primitives::{Address, BlockNumber, U256, address};
 use signet_storage_types::{BlockNumberList, SealedHeader};
-use std::collections::HashSet;
 use trevm::revm::database::BundleState;
 
 /// Maximum address value (all bits set to 1).
@@ -24,13 +24,10 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
     where
         I: IntoIterator<Item = &'a SealedHeader>,
     {
-        let headers: Vec<_> = headers.into_iter().collect();
-        if headers.is_empty() {
-            return Err(HistoryError::EmptyRange);
-        }
+        let mut iter = headers.into_iter();
+        let first = iter.next().ok_or(HistoryError::EmptyRange)?;
 
         // Validate first header against current DB tip
-        let first = headers[0];
         match self.get_chain_tip().map_err(HistoryError::Db)? {
             None => {
                 // Empty DB - first block is valid as genesis
@@ -52,11 +49,8 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
             }
         }
 
-        // Validate each subsequent header extends the previous
-        for window in headers.windows(2) {
-            let prev = window[0];
-            let curr = window[1];
-
+        // Validate each subsequent header extends the previous using fold
+        iter.try_fold(first, |prev, curr| {
             let expected_number = prev.number + 1;
             if curr.number != expected_number {
                 return Err(HistoryError::NonContiguousBlock {
@@ -72,7 +66,9 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
                     got: curr.parent_hash,
                 });
             }
-        }
+
+            Ok(curr)
+        })?;
 
         Ok(())
     }
@@ -93,128 +89,136 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
 
     /// Unwind all data above the given block number.
     ///
-    /// This completely reverts the database state to what it was at block `block`,
-    /// including:
+    /// This completely reverts the database state to what it was at block
+    /// `block`, including:
     /// - Plain account state
     /// - Plain storage state
     /// - Headers and header number mappings
     /// - Account and storage change sets
     /// - Account and storage history indices
     fn unwind_above(&self, block: BlockNumber) -> Result<(), HistoryError<Self::Error>> {
-        let first_block_number = block + 1;
-        let Some(last_block_number) = self.last_block_number()? else {
+        let first_block = block + 1;
+        let Some(last_block) = self.last_block_number()? else {
             return Ok(());
         };
 
-        if first_block_number > last_block_number {
+        if first_block > last_block {
             return Ok(());
         }
 
-        let storage_range_start = ((first_block_number, Address::ZERO), U256::ZERO);
-        let storage_range_end = ((last_block_number, ADDRESS_MAX), U256::MAX);
-        let storage_range = storage_range_start..=storage_range_end;
+        // ═══════════════════════════════════════════════════════════════════
+        // 1. STREAM AccountChangeSets → restore + filter history in one pass
+        // ═══════════════════════════════════════════════════════════════════
+        // TODO: estimate capacity from block range size for better allocation
+        let mut seen_accounts: AHashSet<Address> = AHashSet::new();
+        let mut account_cursor = self.traverse_dual::<tables::AccountChangeSets>()?;
 
-        let acct_range_start = (first_block_number, Address::ZERO);
-        let acct_range_end = (last_block_number, ADDRESS_MAX);
-        let acct_range = acct_range_start..=acct_range_end;
+        // Position at first entry
+        let mut current = account_cursor.next_dual_above(&first_block, &Address::ZERO)?;
 
-        // 1. Take and process changesets (reverts plain state)
-        let storage_changeset = self.take_range_dual::<tables::StorageChangeSets>(storage_range)?;
-        let account_changeset = self.take_range_dual::<tables::AccountChangeSets>(acct_range)?;
+        while let Some((block_num, address, old_account)) = current {
+            if block_num > last_block {
+                break;
+            }
 
-        // Collect affected addresses and slots for history cleanup
-        let mut affected_addresses: HashSet<Address> = HashSet::new();
-        let mut affected_storage: HashSet<(Address, U256)> = HashSet::new();
+            // First occurrence = process both plain state and history
+            if seen_accounts.insert(address) {
+                // Restore plain state
+                if old_account.is_empty() {
+                    self.queue_delete::<tables::PlainAccountState>(&address)?;
+                } else {
+                    self.put_account(&address, &old_account)?;
+                }
 
-        for (_, address, _) in &account_changeset {
-            affected_addresses.insert(*address);
+                // Filter history index
+                if let Some((shard_key, list)) = self.last_account_history(address)? {
+                    self.queue_delete_dual::<tables::AccountsHistory>(&address, &shard_key)?;
+                    let mut filtered = list.iter().take_while(|&bn| bn <= block).peekable();
+                    if filtered.peek().is_some() {
+                        self.write_account_history(
+                            &address,
+                            u64::MAX,
+                            &BlockNumberList::new_pre_sorted(filtered),
+                        )?;
+                    }
+                }
+            }
+
+            current = account_cursor.read_next()?;
         }
-        for (block_addr, slot, _) in &storage_changeset {
-            affected_storage.insert((block_addr.1, *slot));
+
+        // ═══════════════════════════════════════════════════════════════════
+        // 2. STREAM StorageChangeSets → restore + filter history in one pass
+        // ═══════════════════════════════════════════════════════════════════
+        // TODO: estimate capacity from block range size for better allocation
+        let mut seen_storage: AHashSet<(Address, U256)> = AHashSet::new();
+        let mut storage_cursor = self.traverse_dual::<tables::StorageChangeSets>()?;
+
+        // Position at first entry
+        let mut current_storage =
+            storage_cursor.next_dual_above(&(first_block, Address::ZERO), &U256::ZERO)?;
+
+        while let Some(((block_num, address), slot, old_value)) = current_storage {
+            if block_num > last_block {
+                break;
+            }
+
+            if seen_storage.insert((address, slot)) {
+                // Restore plain state
+                if old_value.is_zero() {
+                    self.queue_delete_dual::<tables::PlainStorageState>(&address, &slot)?;
+                } else {
+                    self.put_storage(&address, &slot, &old_value)?;
+                }
+
+                // Filter history index
+                if let Some((shard_key, list)) = self.last_storage_history(&address, &slot)? {
+                    self.queue_delete_dual::<tables::StorageHistory>(&address, &shard_key)?;
+                    let mut filtered = list.iter().take_while(|&bn| bn <= block).peekable();
+                    if filtered.peek().is_some() {
+                        self.write_storage_history(
+                            &address,
+                            slot,
+                            u64::MAX,
+                            &BlockNumberList::new_pre_sorted(filtered),
+                        )?;
+                    }
+                }
+            }
+
+            current_storage = storage_cursor.read_next()?;
         }
 
-        // Revert plain state using existing logic
-        let mut plain_accounts_cursor = self.traverse_mut::<tables::PlainAccountState>()?;
-        let mut plain_storage_cursor = self.traverse_dual_mut::<tables::PlainStorageState>()?;
-
-        let state = self.populate_bundle_state(
-            account_changeset,
-            storage_changeset,
-            &mut plain_accounts_cursor,
-            &mut plain_storage_cursor,
+        // ═══════════════════════════════════════════════════════════════════
+        // 3. DELETE changeset ranges
+        // ═══════════════════════════════════════════════════════════════════
+        self.traverse_dual_mut::<tables::AccountChangeSets>()?
+            .delete_range((first_block, Address::ZERO)..=(last_block, ADDRESS_MAX))?;
+        self.traverse_dual_mut::<tables::StorageChangeSets>()?.delete_range(
+            ((first_block, Address::ZERO), U256::ZERO)..=((last_block, ADDRESS_MAX), U256::MAX),
         )?;
 
-        for (address, (old_account, new_account, storage)) in &state {
-            if old_account != new_account {
-                let existing_entry = plain_accounts_cursor.lower_bound(address)?;
-                if let Some(account) = old_account {
-                    // Check if the old account is effectively empty (account didn't exist before)
-                    // An empty account has nonce=0, balance=0, no bytecode
-                    let is_empty = account.nonce == 0
-                        && account.balance.is_zero()
-                        && account.bytecode_hash.is_none();
+        // ═══════════════════════════════════════════════════════════════════
+        // 4. STREAM Headers → delete HeaderNumbers, then clear Headers
+        // ═══════════════════════════════════════════════════════════════════
+        let mut header_cursor = self.traverse::<tables::Headers>()?;
 
-                    if is_empty {
-                        // Account was created - delete it
-                        if existing_entry.is_some_and(|(k, _)| k == *address) {
-                            plain_accounts_cursor.delete_current()?;
-                        }
-                    } else {
-                        // Account existed before - restore it
-                        self.put_account(address, account)?;
-                    }
-                } else if existing_entry.is_some_and(|(k, _)| k == *address) {
-                    plain_accounts_cursor.delete_current()?;
+        // Position at first entry and process it
+        let first_entry = header_cursor.lower_bound(&first_block)?;
+        if let Some((block_num, header)) = first_entry
+            && block_num <= last_block
+        {
+            self.delete_header_number(&header.hash_slow())?;
+
+            // Continue with remaining entries
+            while let Some((block_num, header)) = header_cursor.read_next()? {
+                if block_num > last_block {
+                    break;
                 }
-            }
-
-            for (storage_key_b256, (old_storage_value, _)) in storage {
-                let storage_key = U256::from_be_bytes(storage_key_b256.0);
-
-                if plain_storage_cursor
-                    .next_dual_above(address, &storage_key)?
-                    .is_some_and(|(k, k2, _)| k == *address && k2 == storage_key)
-                {
-                    plain_storage_cursor.delete_current()?;
-                }
-
-                if !old_storage_value.is_zero() {
-                    self.put_storage(address, &storage_key, old_storage_value)?;
-                }
+                self.delete_header_number(&header.hash_slow())?;
             }
         }
-
-        // 2. Remove headers and header number mappings
-        let removed_headers =
-            self.take_range::<tables::Headers>(first_block_number..=last_block_number)?;
-        for (_, header) in removed_headers {
-            let hash = header.hash_slow();
-            self.delete_header_number(&hash)?;
-        }
-
-        // 3. Clean up account history indices
-        for address in affected_addresses {
-            if let Some((shard_key, list)) = self.last_account_history(address)? {
-                let filtered: Vec<u64> = list.iter().filter(|&bn| bn <= block).collect();
-                self.queue_delete_dual::<tables::AccountsHistory>(&address, &shard_key)?;
-                if !filtered.is_empty() {
-                    let new_list = BlockNumberList::new_pre_sorted(filtered);
-                    self.write_account_history(&address, u64::MAX, &new_list)?;
-                }
-            }
-        }
-
-        // 4. Clean up storage history indices
-        for (address, slot) in affected_storage {
-            if let Some((shard_key, list)) = self.last_storage_history(&address, &slot)? {
-                let filtered: Vec<u64> = list.iter().filter(|&bn| bn <= block).collect();
-                self.queue_delete_dual::<tables::StorageHistory>(&address, &shard_key)?;
-                if !filtered.is_empty() {
-                    let new_list = BlockNumberList::new_pre_sorted(filtered);
-                    self.write_storage_history(&address, slot, u64::MAX, &new_list)?;
-                }
-            }
-        }
+        self.traverse_mut::<tables::Headers>()?.delete_range_inclusive(first_block..=last_block)?;
 
         Ok(())
     }

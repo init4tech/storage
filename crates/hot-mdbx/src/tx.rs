@@ -44,25 +44,14 @@ impl<K: TransactionKind> Tx<K> {
         key[..to_copy].copy_from_slice(&name.as_bytes()[..to_copy]);
 
         let db = self.inner.open_db(None)?;
-        // Note: We request Vec<u8> (owned) since we only need it briefly for decoding
-        // and don't need zero-copy for this small metadata read.
-        let data: Vec<u8> = self
+
+        let data: [u8; 8] = self
             .inner
             .get(db.dbi(), key.as_slice())
             .map_err(MdbxError::from)?
             .ok_or(MdbxError::UnknownTable(name))?;
 
-        // Migration: handle both old (16 byte) and new (8 byte) formats
-        let fsi = if data.len() == 16 {
-            // Old format: skip dbi (4) + flags (4), read FixedSizeInfo from offset 8
-            FixedSizeInfo::decode_value(&data[8..16])
-        } else {
-            // New format: 8 bytes of FixedSizeInfo
-            FixedSizeInfo::decode_value(&data)
-        }
-        .map_err(MdbxError::Deser)?;
-
-        Ok(fsi)
+        FixedSizeInfo::decode_value(&data).map_err(MdbxError::Deser)
     }
 
     /// Gets cached FixedSizeInfo for a table.
@@ -225,7 +214,7 @@ macro_rules! impl_hot_kv_write {
                         && found_val.starts_with(key2)
                     // Check if found value starts with our key2
                     {
-                        cursor.del(Default::default()).map_err(MdbxError::Mdbx)?;
+                        cursor.del().map_err(MdbxError::Mdbx)?;
                     }
                 }
 
@@ -269,18 +258,37 @@ macro_rules! impl_hot_kv_write {
                 let db = self.inner.open_db(Some(table))?;
                 let fsi = self.get_fsi(table)?;
 
-                // For DUPSORT tables, the "value" is key2 concatenated with the actual
-                // value. If the table is ALSO dupfixed, we need to pad key2 to the
-                // fixed size
-                if let Some(total_size) = fsi.total_size() {
-                    // Copy key2 to scratch buffer and zero-pad to total fixed size
-                    let mut buffer = [0u8; TX_BUFFER_SIZE];
-                    buffer[..key2.len()].copy_from_slice(key2);
-                    buffer[key2.len()..total_size].fill(0);
-                    let k2 = &buffer[..total_size];
+                // For DUPSORT tables, the "value" is key2 || actual_value.
+                // For DUP_FIXED tables, we cannot use del() with a partial value
+                // because MDBX requires an exact match. We must use a cursor to
+                // find and delete the entry.
+                if fsi.is_dupsort() {
+                    // Prepare search value (key2, optionally padded for DUP_FIXED)
+                    let mut search_buf = [0u8; TX_BUFFER_SIZE];
+                    let search_val = if let Some(ts) = fsi.total_size() {
+                        search_buf[..key2.len()].copy_from_slice(key2);
+                        search_buf[key2.len()..ts].fill(0);
+                        &search_buf[..ts]
+                    } else {
+                        key2
+                    };
 
-                    self.inner.del(db, key1, Some(k2)).map(drop).map_err(MdbxError::Mdbx)
+                    // Use cursor to find and delete the entry
+                    let mut cursor = self.inner.cursor(db).map_err(MdbxError::Mdbx)?;
+
+                    // get_both_range finds entry where key=key1 and value >= search_val
+                    // If found and the key2 portion matches, delete it
+                    if let Some(found_val) = cursor
+                        .get_both_range::<Cow<'_, [u8]>>(key1, search_val)
+                        .map_err(MdbxError::from)?
+                        && found_val.starts_with(key2)
+                    {
+                        cursor.del().map_err(MdbxError::Mdbx)?;
+                    }
+
+                    Ok(())
                 } else {
+                    // Non-DUPSORT table - just delete by key1
                     self.inner.del(db, key1, Some(key2)).map(drop).map_err(MdbxError::Mdbx)
                 }
             }

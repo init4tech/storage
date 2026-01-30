@@ -15,8 +15,10 @@ trevm.workspace = true
 
 alloy.workspace = true
 
+ahash.workspace = true
 auto_impl.workspace = true
 bytes.workspace = true
+itertools.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

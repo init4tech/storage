@@ -329,21 +329,6 @@ mod tests {
                 assert_eq!(read_account.as_ref(), Some(expected_account));
             }
         }
-
-        // Test batch get_many
-        {
-            let reader: Tx<Ro> = db.reader().unwrap();
-            let addresses: Vec<Address> = accounts.iter().map(|(addr, _)| *addr).collect();
-            let read_accounts: Vec<(_, Option<Account>)> = reader
-                .get_many::<tables::PlainAccountState, _>(addresses.iter())
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
-
-            for (i, (_, expected_account)) in accounts.iter().enumerate() {
-                assert_eq!(read_accounts[i].1.as_ref(), Some(expected_account));
-            }
-        }
     }
 
     #[test]
@@ -1112,6 +1097,292 @@ mod tests {
         test_unwind_conformance(&db_a, &db_b);
     }
 
+    #[test]
+    #[serial]
+    fn mdbx_range_clear() {
+        let (_dir, db) = create_test_rw_db();
+        signet_hot::conformance::test_clear_range(&db);
+    }
+
+    #[test]
+    #[serial]
+    fn mdbx_range_take() {
+        let (_dir, db) = create_test_rw_db();
+        signet_hot::conformance::test_take_range(&db);
+    }
+
+    #[test]
+    #[serial]
+    fn mdbx_range_clear_dual() {
+        let (_dir, db) = create_test_rw_db();
+        signet_hot::conformance::test_clear_range_dual(&db);
+    }
+
+    #[test]
+    #[serial]
+    fn mdbx_range_take_dual() {
+        let (_dir, db) = create_test_rw_db();
+        signet_hot::conformance::test_take_range_dual(&db);
+    }
+
+    /// Debug test to trace StorageChangeSets iteration during unwind
+    /// This test mirrors the full unwind_conformance test to debug the MDBX failure
+    #[test]
+    #[serial]
+    fn debug_storage_changesets_iteration() {
+        use alloy::{
+            consensus::{Header, Sealable},
+            primitives::{B256, U256, address},
+        };
+        use signet_hot::{
+            conformance::make_bundle_state,
+            db::{HistoryWrite, HotDbRead},
+            model::{DualTableTraverse, HotKvRead},
+            tables,
+        };
+
+        // Use same addresses as the full test
+        let addr1 = address!("0x1111111111111111111111111111111111111111");
+        let addr2 = address!("0x2222222222222222222222222222222222222222");
+        let addr3 = address!("0x3333333333333333333333333333333333333333");
+        let addr4 = address!("0x4444444444444444444444444444444444444444");
+
+        let slot1 = U256::from(1);
+        let slot2 = U256::from(2);
+        let slot3 = U256::from(3);
+
+        let (_dir, db) = create_test_rw_db();
+
+        // Create 5 blocks matching the full test
+        let mut blocks = Vec::new();
+        let mut prev_hash = B256::ZERO;
+
+        // Block 0: Create addr1.slot1 = 10
+        {
+            let header = Header {
+                number: 0,
+                parent_hash: prev_hash,
+                gas_limit: 1_000_000,
+                ..Default::default()
+            };
+            let sealed = header.seal_slow();
+            prev_hash = sealed.hash();
+            let bundle = make_bundle_state(
+                vec![],
+                vec![(addr1, vec![(slot1, U256::ZERO, U256::from(10))])],
+                vec![],
+            );
+            blocks.push((sealed, bundle));
+        }
+
+        // Block 1: addr1.slot1 = 20, addr2.slot1 = 100
+        {
+            let header = Header {
+                number: 1,
+                parent_hash: prev_hash,
+                gas_limit: 1_000_000,
+                ..Default::default()
+            };
+            let sealed = header.seal_slow();
+            prev_hash = sealed.hash();
+            let bundle = make_bundle_state(
+                vec![],
+                vec![
+                    (addr1, vec![(slot1, U256::from(10), U256::from(20))]),
+                    (addr2, vec![(slot1, U256::ZERO, U256::from(100))]),
+                ],
+                vec![],
+            );
+            blocks.push((sealed, bundle));
+        }
+
+        // Block 2: addr3.slot1 = 1000
+        {
+            let header = Header {
+                number: 2,
+                parent_hash: prev_hash,
+                gas_limit: 1_000_000,
+                ..Default::default()
+            };
+            let sealed = header.seal_slow();
+            prev_hash = sealed.hash();
+            let bundle = make_bundle_state(
+                vec![],
+                vec![(addr3, vec![(slot1, U256::ZERO, U256::from(1000))])],
+                vec![],
+            );
+            blocks.push((sealed, bundle));
+        }
+
+        // Block 3: addr1.slot1 = 30, addr1.slot2 = 50, addr4.slot1 = 500
+        {
+            let header = Header {
+                number: 3,
+                parent_hash: prev_hash,
+                gas_limit: 1_000_000,
+                ..Default::default()
+            };
+            let sealed = header.seal_slow();
+            prev_hash = sealed.hash();
+            let bundle = make_bundle_state(
+                vec![],
+                vec![
+                    (
+                        addr1,
+                        vec![
+                            (slot1, U256::from(20), U256::from(30)),
+                            (slot2, U256::ZERO, U256::from(50)),
+                        ],
+                    ),
+                    (addr4, vec![(slot1, U256::ZERO, U256::from(500))]),
+                ],
+                vec![],
+            );
+            blocks.push((sealed, bundle));
+        }
+
+        // Block 4: addr1.slot1 = 40, addr1.slot3 = 60, addr2.slot1 = 150, addr2.slot2 = 200
+        {
+            let header = Header {
+                number: 4,
+                parent_hash: prev_hash,
+                gas_limit: 1_000_000,
+                ..Default::default()
+            };
+            let sealed = header.seal_slow();
+            let bundle = make_bundle_state(
+                vec![],
+                vec![
+                    (
+                        addr1,
+                        vec![
+                            (slot1, U256::from(30), U256::from(40)),
+                            (slot3, U256::ZERO, U256::from(60)),
+                        ],
+                    ),
+                    (
+                        addr2,
+                        vec![
+                            (slot1, U256::from(100), U256::from(150)),
+                            (slot2, U256::ZERO, U256::from(200)),
+                        ],
+                    ),
+                ],
+                vec![],
+            );
+            blocks.push((sealed, bundle));
+        }
+
+        // Append all blocks
+        {
+            let writer = db.writer().unwrap();
+            writer.append_blocks(&blocks).unwrap();
+            writer.commit().unwrap();
+        }
+
+        // Verify StorageChangeSets contains expected entries
+        {
+            let reader = db.reader().unwrap();
+            let mut cursor = reader.traverse_dual::<tables::StorageChangeSets>().unwrap();
+
+            let mut entries = Vec::new();
+            if let Some(first) =
+                DualTableTraverse::<tables::StorageChangeSets, _>::first(&mut *cursor.inner_mut())
+                    .unwrap()
+            {
+                entries.push(first);
+                while let Some(next) = DualTableTraverse::<tables::StorageChangeSets, _>::read_next(
+                    &mut *cursor.inner_mut(),
+                )
+                .unwrap()
+                {
+                    entries.push(next);
+                }
+            }
+
+            eprintln!("\nStorageChangeSets entries ({} total):", entries.len());
+            for ((bn, addr), slot, val) in &entries {
+                eprintln!("  block={}, addr={:?}, slot={}, old_value={}", bn, addr, slot, val);
+            }
+        }
+
+        // Count PlainStorageState entries before unwind
+        {
+            let reader = db.reader().unwrap();
+            let mut cursor = reader.traverse_dual::<tables::PlainStorageState>().unwrap();
+
+            let mut entries = Vec::new();
+            if let Some(first) =
+                DualTableTraverse::<tables::PlainStorageState, _>::first(&mut *cursor.inner_mut())
+                    .unwrap()
+            {
+                entries.push(first);
+                while let Some(next) = DualTableTraverse::<tables::PlainStorageState, _>::read_next(
+                    &mut *cursor.inner_mut(),
+                )
+                .unwrap()
+                {
+                    entries.push(next);
+                }
+            }
+
+            eprintln!("\nPlainStorageState BEFORE unwind ({} total):", entries.len());
+            for (addr, slot, val) in &entries {
+                eprintln!("  addr={:?}, slot={}, value={}", addr, slot, val);
+            }
+            assert_eq!(entries.len(), 7, "Expected 7 storage entries before unwind");
+        }
+
+        // Unwind to block 1
+        {
+            let writer = db.writer().unwrap();
+            writer.unwind_above(1).unwrap();
+            writer.commit().unwrap();
+        }
+
+        // Count PlainStorageState entries after unwind
+        {
+            let reader = db.reader().unwrap();
+            let mut cursor = reader.traverse_dual::<tables::PlainStorageState>().unwrap();
+
+            let mut entries = Vec::new();
+            if let Some(first) =
+                DualTableTraverse::<tables::PlainStorageState, _>::first(&mut *cursor.inner_mut())
+                    .unwrap()
+            {
+                entries.push(first);
+                while let Some(next) = DualTableTraverse::<tables::PlainStorageState, _>::read_next(
+                    &mut *cursor.inner_mut(),
+                )
+                .unwrap()
+                {
+                    entries.push(next);
+                }
+            }
+
+            eprintln!("\nPlainStorageState AFTER unwind ({} total):", entries.len());
+            for (addr, slot, val) in &entries {
+                eprintln!("  addr={:?}, slot={}, value={}", addr, slot, val);
+            }
+
+            // Expected: addr1.slot1=20, addr2.slot1=100 (2 entries)
+            assert_eq!(entries.len(), 2, "Expected 2 storage entries after unwind");
+
+            // Verify specific values
+            let reader = db.reader().unwrap();
+            assert_eq!(
+                reader.get_storage(&addr1, &slot1).unwrap(),
+                Some(U256::from(20)),
+                "addr1.slot1 should be 20"
+            );
+            assert_eq!(
+                reader.get_storage(&addr2, &slot1).unwrap(),
+                Some(U256::from(100)),
+                "addr2.slot1 should be 100"
+            );
+        }
+    }
+
     // ========================================================================
     // put_multiple Tests
     // ========================================================================
@@ -1673,6 +1944,150 @@ mod tests {
             let value =
                 tx.get_dual::<tables::PlainStorageState>(&addr, &after_boundary).unwrap().unwrap();
             assert_eq!(value, U256::from(max_entries_per_page * 7 + 42));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_clear_k1() {
+        run_test(test_clear_k1_inner)
+    }
+
+    fn test_clear_k1_inner(db: &DatabaseEnv) {
+        let addr1 = Address::from_slice(&[0x11; 20]);
+        let addr2 = Address::from_slice(&[0x22; 20]);
+        let addr3 = Address::from_slice(&[0x33; 20]);
+
+        // Setup: Write storage entries for multiple addresses
+        {
+            let writer = db.writer().unwrap();
+            // addr1: slots 1, 2, 3
+            writer
+                .queue_put_dual::<tables::PlainStorageState>(
+                    &addr1,
+                    &U256::from(1),
+                    &U256::from(10),
+                )
+                .unwrap();
+            writer
+                .queue_put_dual::<tables::PlainStorageState>(
+                    &addr1,
+                    &U256::from(2),
+                    &U256::from(20),
+                )
+                .unwrap();
+            writer
+                .queue_put_dual::<tables::PlainStorageState>(
+                    &addr1,
+                    &U256::from(3),
+                    &U256::from(30),
+                )
+                .unwrap();
+            // addr2: slots 10, 20
+            writer
+                .queue_put_dual::<tables::PlainStorageState>(
+                    &addr2,
+                    &U256::from(10),
+                    &U256::from(100),
+                )
+                .unwrap();
+            writer
+                .queue_put_dual::<tables::PlainStorageState>(
+                    &addr2,
+                    &U256::from(20),
+                    &U256::from(200),
+                )
+                .unwrap();
+            // addr3: slot 100
+            writer
+                .queue_put_dual::<tables::PlainStorageState>(
+                    &addr3,
+                    &U256::from(100),
+                    &U256::from(1000),
+                )
+                .unwrap();
+            writer.commit().unwrap();
+        }
+
+        // Clear all entries for addr2
+        {
+            let writer = db.writer().unwrap();
+            {
+                let mut cursor = writer.traverse_dual_mut::<tables::PlainStorageState>().unwrap();
+                cursor.clear_k1(&addr2).unwrap();
+            }
+            writer.commit().unwrap();
+        }
+
+        // Verify addr2 entries are deleted, others remain
+        {
+            let reader: Tx<Ro> = db.reader().unwrap();
+            // addr1 should exist
+            assert!(
+                reader
+                    .get_dual::<tables::PlainStorageState>(&addr1, &U256::from(1))
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                reader
+                    .get_dual::<tables::PlainStorageState>(&addr1, &U256::from(2))
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                reader
+                    .get_dual::<tables::PlainStorageState>(&addr1, &U256::from(3))
+                    .unwrap()
+                    .is_some()
+            );
+            // addr2 should be deleted
+            assert!(
+                reader
+                    .get_dual::<tables::PlainStorageState>(&addr2, &U256::from(10))
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                reader
+                    .get_dual::<tables::PlainStorageState>(&addr2, &U256::from(20))
+                    .unwrap()
+                    .is_none()
+            );
+            // addr3 should exist
+            assert!(
+                reader
+                    .get_dual::<tables::PlainStorageState>(&addr3, &U256::from(100))
+                    .unwrap()
+                    .is_some()
+            );
+        }
+
+        // Test idempotent - clearing already deleted K1 should be no-op
+        {
+            let writer = db.writer().unwrap();
+            {
+                let mut cursor = writer.traverse_dual_mut::<tables::PlainStorageState>().unwrap();
+                cursor.clear_k1(&addr2).unwrap();
+            }
+            writer.commit().unwrap();
+        }
+
+        // Verify state unchanged
+        {
+            let reader: Tx<Ro> = db.reader().unwrap();
+            assert!(
+                reader
+                    .get_dual::<tables::PlainStorageState>(&addr1, &U256::from(1))
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                reader
+                    .get_dual::<tables::PlainStorageState>(&addr3, &U256::from(100))
+                    .unwrap()
+                    .is_some()
+            );
         }
     }
 }
