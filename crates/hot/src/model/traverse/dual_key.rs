@@ -205,47 +205,4 @@ pub trait DualKeyTraverseMut<E: HotKvReadError>: DualKeyTraverse<E> {
 
         Ok(())
     }
-
-    /// Write multiple (k2, value) pairs for a single k1.
-    ///
-    /// Entries must be a contiguous buffer of `(k2 || value)` pairs, each
-    /// `entry_size` bytes. Entries must be sorted by k2.
-    ///
-    /// Returns the number of entries written.
-    fn put_batch(
-        &mut self,
-        k1: &[u8],
-        entries: &[u8],
-        k2_size: usize,
-        entry_size: usize,
-    ) -> Result<usize, E> {
-        if entries.is_empty() {
-            return Ok(0);
-        }
-        let count = entries.len() / entry_size;
-        for i in 0..count {
-            let offset = i * entry_size;
-            let k2 = &entries[offset..offset + k2_size];
-            let value = &entries[offset + k2_size..offset + entry_size];
-            self.append_dual(k1, k2, value)?;
-        }
-        Ok(count)
-    }
-
-    /// Replace all k2 entries for k1 with the provided entries.
-    ///
-    /// Entries must be a contiguous buffer of `(k2 || value)` pairs, each
-    /// `entry_size` bytes. Entries must be sorted by k2.
-    ///
-    /// Returns the number of entries written.
-    fn overwrite_batch(
-        &mut self,
-        k1: &[u8],
-        entries: &[u8],
-        k2_size: usize,
-        entry_size: usize,
-    ) -> Result<usize, E> {
-        self.clear_k1(k1)?;
-        self.put_batch(k1, entries, k2_size, entry_size)
-    }
 }

@@ -6,7 +6,7 @@ use super::{
     iter::DualTableK2Iter,
     types::K2Value,
 };
-use crate::{ValSer, ser::KeySer, ser::MAX_KEY_SIZE, tables::DualKey};
+use crate::{ser::KeySer, ser::MAX_KEY_SIZE, tables::DualKey};
 use core::marker::PhantomData;
 use std::ops::RangeInclusive;
 
@@ -272,42 +272,6 @@ pub trait DualTableTraverseMut<T: DualKey, E: HotKvReadError>: DualKeyTraverseMu
 
         Ok(result)
     }
-
-    /// Write multiple typed (k2, value) pairs for k1.
-    ///
-    /// Entries must be sorted by k2.
-    ///
-    /// Returns the number of entries written.
-    fn put_batch_typed<'a, I>(&mut self, k1: &T::Key, entries: I) -> Result<usize, E>
-    where
-        I: IntoIterator<Item = (&'a T::Key2, &'a T::Value)>,
-        T::Key2: 'a,
-        T::Value: 'a,
-    {
-        let mut key1_buf = [0u8; MAX_KEY_SIZE];
-        let key1_bytes = k1.encode_key(&mut key1_buf);
-
-        let (buf, k2_size, entry_size) = serialize_batch::<T, _>(entries);
-        DualKeyTraverseMut::put_batch(self, key1_bytes, &buf, k2_size, entry_size)
-    }
-
-    /// Replace all k2 entries for k1 with typed entries.
-    ///
-    /// Entries must be sorted by k2.
-    ///
-    /// Returns the number of entries written.
-    fn overwrite_batch_typed<'a, I>(&mut self, k1: &T::Key, entries: I) -> Result<usize, E>
-    where
-        I: IntoIterator<Item = (&'a T::Key2, &'a T::Value)>,
-        T::Key2: 'a,
-        T::Value: 'a,
-    {
-        let mut key1_buf = [0u8; MAX_KEY_SIZE];
-        let key1_bytes = k1.encode_key(&mut key1_buf);
-
-        let (buf, k2_size, entry_size) = serialize_batch::<T, _>(entries);
-        DualKeyTraverseMut::overwrite_batch(self, key1_bytes, &buf, k2_size, entry_size)
-    }
 }
 
 /// Blanket implementation of `DualTableTraverseMut`.
@@ -317,44 +281,4 @@ where
     T: DualKey,
     E: HotKvReadError,
 {
-}
-
-/// Serialize a batch of (k2, value) pairs into a contiguous buffer.
-///
-/// Returns the buffer, k2 size, and entry size.
-///
-/// # Panics
-///
-/// Panics if entries have variable sizes (all entries must be the same size).
-fn serialize_batch<'a, T, I>(entries: I) -> (Vec<u8>, usize, usize)
-where
-    T: DualKey,
-    I: IntoIterator<Item = (&'a T::Key2, &'a T::Value)>,
-    T::Key2: 'a,
-    T::Value: 'a,
-{
-    let k2_size = T::Key2::SIZE;
-
-    let mut buf = Vec::new();
-    let mut key2_buf = [0u8; MAX_KEY_SIZE];
-    let mut entry_size: Option<usize> = None;
-    let mut count = 0usize;
-
-    for (k2, v) in entries {
-        let start = buf.len();
-        let k2_bytes = k2.encode_key(&mut key2_buf);
-        buf.extend_from_slice(k2_bytes);
-        v.encode_value_to(&mut buf);
-        let this_entry_size = buf.len() - start;
-
-        match entry_size {
-            None => entry_size = Some(this_entry_size),
-            Some(sz) => assert_eq!(sz, this_entry_size, "batch entries must have uniform size"),
-        }
-        count += 1;
-    }
-
-    let entry_size = entry_size.unwrap_or(k2_size);
-    debug_assert!(count == 0 || buf.len() == count * entry_size);
-    (buf, k2_size, entry_size)
 }
