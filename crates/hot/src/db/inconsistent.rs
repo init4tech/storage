@@ -3,13 +3,14 @@ use crate::{
     model::HotKvWrite,
     tables,
 };
+use ahash::AHashMap;
 use alloy::{
     consensus::Header,
     primitives::{Address, B256, BlockNumber, U256},
 };
 use itertools::Itertools;
 use signet_storage_types::{Account, BlockNumberList, SealedHeader, ShardedKey};
-use std::{collections::HashMap, ops::RangeInclusive};
+use std::ops::RangeInclusive;
 use trevm::revm::{
     bytecode::Bytecode,
     database::{
@@ -23,7 +24,7 @@ use trevm::revm::{
 /// Maps address -> (old_account, new_account, storage_changes)
 /// where storage_changes maps slot (B256) -> (old_value, new_value)
 pub type BundleInit =
-    HashMap<Address, (Option<Account>, Option<Account>, HashMap<B256, (U256, U256)>)>;
+    AHashMap<Address, (Option<Account>, Option<Account>, AHashMap<B256, (U256, U256)>)>;
 
 /// Trait for database write operations on standard hot tables.
 ///
@@ -264,16 +265,20 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
     ///
     /// Iterates over entries starting from the first block in the range,
     /// collecting changes while the block number remains in range.
+    // TODO: estimate capacity from block range size for better allocation
     fn changed_accounts_with_range(
         &self,
         range: RangeInclusive<BlockNumber>,
-    ) -> Result<HashMap<Address, Vec<u64>>, Self::Error> {
+    ) -> Result<AHashMap<Address, Vec<u64>>, Self::Error> {
         self.traverse_dual::<tables::AccountChangeSets>()?
             .iter_from(range.start(), &Address::ZERO)?
             .process_results(|iter| {
                 iter.take_while(|(num, _, _)| range.contains(num))
                     .map(|(num, addr, _)| (addr, num))
-                    .into_group_map()
+                    .into_group_map_by(|(addr, _)| *addr)
+                    .into_iter()
+                    .map(|(addr, pairs)| (addr, pairs.into_iter().map(|(_, num)| num).collect()))
+                    .collect()
             })
     }
 
@@ -299,17 +304,21 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
     ///
     /// Iterates over entries starting from the first block in the range,
     /// collecting changes while the block number remains in range.
+    // TODO: estimate capacity from block range size for better allocation
     #[allow(clippy::type_complexity)]
     fn changed_storages_with_range(
         &self,
         range: RangeInclusive<BlockNumber>,
-    ) -> Result<HashMap<(Address, U256), Vec<u64>>, Self::Error> {
+    ) -> Result<AHashMap<(Address, U256), Vec<u64>>, Self::Error> {
         self.traverse_dual::<tables::StorageChangeSets>()?
             .iter_from(&(*range.start(), Address::ZERO), &U256::ZERO)?
             .process_results(|iter| {
                 iter.take_while(|(num_addr, _, _)| range.contains(&num_addr.0))
                     .map(|(num_addr, slot, _)| ((num_addr.1, slot), num_addr.0))
-                    .into_group_map()
+                    .into_group_map_by(|(key, _)| *key)
+                    .into_iter()
+                    .map(|(key, pairs)| (key, pairs.into_iter().map(|(_, num)| num).collect()))
+                    .collect()
             })
     }
 

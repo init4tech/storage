@@ -2,9 +2,9 @@ use crate::{
     db::{HistoryError, UnsafeDbWrite, UnsafeHistoryWrite},
     tables,
 };
+use ahash::AHashSet;
 use alloy::primitives::{Address, BlockNumber, U256, address};
 use signet_storage_types::{BlockNumberList, SealedHeader};
-use std::collections::HashSet;
 use trevm::revm::database::BundleState;
 
 /// Maximum address value (all bits set to 1).
@@ -24,13 +24,10 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
     where
         I: IntoIterator<Item = &'a SealedHeader>,
     {
-        let headers: Vec<_> = headers.into_iter().collect();
-        if headers.is_empty() {
-            return Err(HistoryError::EmptyRange);
-        }
+        let mut iter = headers.into_iter();
+        let first = iter.next().ok_or(HistoryError::EmptyRange)?;
 
         // Validate first header against current DB tip
-        let first = headers[0];
         match self.get_chain_tip().map_err(HistoryError::Db)? {
             None => {
                 // Empty DB - first block is valid as genesis
@@ -52,11 +49,8 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
             }
         }
 
-        // Validate each subsequent header extends the previous
-        for window in headers.windows(2) {
-            let prev = window[0];
-            let curr = window[1];
-
+        // Validate each subsequent header extends the previous using fold
+        iter.try_fold(first, |prev, curr| {
             let expected_number = prev.number + 1;
             if curr.number != expected_number {
                 return Err(HistoryError::NonContiguousBlock {
@@ -72,7 +66,9 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
                     got: curr.parent_hash,
                 });
             }
-        }
+
+            Ok(curr)
+        })?;
 
         Ok(())
     }
@@ -113,7 +109,8 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
         // ═══════════════════════════════════════════════════════════════════
         // 1. STREAM AccountChangeSets → restore + filter history in one pass
         // ═══════════════════════════════════════════════════════════════════
-        let mut seen_accounts: HashSet<Address> = HashSet::new();
+        // TODO: estimate capacity from block range size for better allocation
+        let mut seen_accounts: AHashSet<Address> = AHashSet::new();
         let mut account_cursor = self.traverse_dual::<tables::AccountChangeSets>()?;
 
         // Position at first entry
@@ -136,8 +133,8 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
                 // Filter history index
                 if let Some((shard_key, list)) = self.last_account_history(address)? {
                     self.queue_delete_dual::<tables::AccountsHistory>(&address, &shard_key)?;
-                    let filtered: Vec<u64> = list.iter().filter(|&bn| bn <= block).collect();
-                    if !filtered.is_empty() {
+                    let mut filtered = list.iter().take_while(|&bn| bn <= block).peekable();
+                    if filtered.peek().is_some() {
                         self.write_account_history(
                             &address,
                             u64::MAX,
@@ -153,7 +150,8 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
         // ═══════════════════════════════════════════════════════════════════
         // 2. STREAM StorageChangeSets → restore + filter history in one pass
         // ═══════════════════════════════════════════════════════════════════
-        let mut seen_storage: HashSet<(Address, U256)> = HashSet::new();
+        // TODO: estimate capacity from block range size for better allocation
+        let mut seen_storage: AHashSet<(Address, U256)> = AHashSet::new();
         let mut storage_cursor = self.traverse_dual::<tables::StorageChangeSets>()?;
 
         // Position at first entry
@@ -176,8 +174,8 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
                 // Filter history index
                 if let Some((shard_key, list)) = self.last_storage_history(&address, &slot)? {
                     self.queue_delete_dual::<tables::StorageHistory>(&address, &shard_key)?;
-                    let filtered: Vec<u64> = list.iter().filter(|&bn| bn <= block).collect();
-                    if !filtered.is_empty() {
+                    let mut filtered = list.iter().take_while(|&bn| bn <= block).peekable();
+                    if filtered.peek().is_some() {
                         self.write_storage_history(
                             &address,
                             slot,

@@ -44,9 +44,8 @@ impl<K: TransactionKind> Tx<K> {
         key[..to_copy].copy_from_slice(&name.as_bytes()[..to_copy]);
 
         let db = self.inner.open_db(None)?;
-        // Note: We request Vec<u8> (owned) since we only need it briefly for decoding
-        // and don't need zero-copy for this small metadata read.
-        let data: Vec<u8> = self
+
+        let data: [u8; 8] = self
             .inner
             .get(db.dbi(), key.as_slice())
             .map_err(MdbxError::from)?
