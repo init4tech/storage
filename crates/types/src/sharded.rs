@@ -4,7 +4,7 @@
 /// `Address | 200` -> data is from block 0 to 200.
 ///
 /// `Address | 300` -> data is from block 201 to 300.
-#[derive(Debug, Default, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ShardedKey<T> {
     /// The key for this type.
     pub key: T,

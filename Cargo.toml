@@ -42,7 +42,7 @@ signet-storage = { version = "0.0.1", path = "./crates/storage" }
 signet-storage-types = { version = "0.0.1", path = "./crates/types" }
 
 # External, in-house
-signet-libmdbx = { version = "0.7.0" }
+signet-libmdbx = { version = "0.8.0" }
 
 signet-zenith = "0.16.0-rc.5"
 

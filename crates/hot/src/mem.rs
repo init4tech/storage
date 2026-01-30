@@ -5,8 +5,9 @@
 
 use crate::{
     model::{
-        DualKeyTraverse, DualKeyTraverseMut, HotKv, HotKvError, HotKvRead, HotKvReadError,
-        HotKvWrite, KvTraverse, KvTraverseMut, RawDualKeyValue, RawKeyValue, RawValue,
+        DualKeyItem, DualKeyTraverse, DualKeyTraverseMut, HotKv, HotKvError, HotKvRead,
+        HotKvReadError, HotKvWrite, KvTraverse, KvTraverseMut, RawDualKeyItem, RawDualKeyValue,
+        RawKeyValue, RawValue,
     },
     ser::{DeserError, MAX_KEY_SIZE},
 };
@@ -513,6 +514,47 @@ impl<'a> DualKeyTraverse<MemKvError> for MemKvCursor<'a> {
         }
         self.set_current_key(*found_key);
         Ok(Some((found_k1, found_k2, Cow::Borrowed(value.as_ref()))))
+    }
+
+    fn iter_items(
+        &mut self,
+    ) -> Result<impl Iterator<Item = Result<RawDualKeyItem<'_>, MemKvError>> + '_, MemKvError> {
+        DualKeyTraverse::first(self)?;
+        Ok(MemDualKeyItemIter { cursor: self, prev_k1: None })
+    }
+}
+
+/// Iterator that yields [`DualKeyItem`] for read-only memory cursors.
+struct MemDualKeyItemIter<'a, 'b> {
+    cursor: &'a mut MemKvCursor<'b>,
+    prev_k1: Option<Vec<u8>>,
+}
+
+impl<'a> Iterator for MemDualKeyItemIter<'a, '_> {
+    type Item = Result<RawDualKeyItem<'a>, MemKvError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let result = DualKeyTraverse::read_next(self.cursor);
+        match result {
+            Ok(Some((k1, k2, v))) => {
+                let k1_vec = k1.as_ref().to_vec();
+                let is_new_k1 = self.prev_k1.as_ref() != Some(&k1_vec);
+                self.prev_k1 = Some(k1_vec);
+
+                let item = if is_new_k1 {
+                    DualKeyItem::NewK1(
+                        Cow::Owned(k1.into_owned()),
+                        Cow::Owned(k2.into_owned()),
+                        Cow::Owned(v.into_owned()),
+                    )
+                } else {
+                    DualKeyItem::SameK1(Cow::Owned(k2.into_owned()), Cow::Owned(v.into_owned()))
+                };
+                Some(Ok(item))
+            }
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        }
     }
 }
 
@@ -1036,6 +1078,47 @@ impl<'a> DualKeyTraverse<MemKvError> for MemKvCursorMut<'a> {
             Cow::Owned(found_k2.to_vec()),
             Cow::Owned(value.to_vec()),
         )))
+    }
+
+    fn iter_items(
+        &mut self,
+    ) -> Result<impl Iterator<Item = Result<RawDualKeyItem<'_>, MemKvError>> + '_, MemKvError> {
+        DualKeyTraverse::first(self)?;
+        Ok(MemDualKeyItemIterMut { cursor: self, prev_k1: None })
+    }
+}
+
+/// Iterator that yields [`DualKeyItem`] for read-write memory cursors.
+struct MemDualKeyItemIterMut<'a, 'b> {
+    cursor: &'a mut MemKvCursorMut<'b>,
+    prev_k1: Option<Vec<u8>>,
+}
+
+impl<'a> Iterator for MemDualKeyItemIterMut<'a, '_> {
+    type Item = Result<RawDualKeyItem<'a>, MemKvError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let result = DualKeyTraverse::read_next(self.cursor);
+        match result {
+            Ok(Some((k1, k2, v))) => {
+                let k1_vec = k1.as_ref().to_vec();
+                let is_new_k1 = self.prev_k1.as_ref() != Some(&k1_vec);
+                self.prev_k1 = Some(k1_vec);
+
+                let item = if is_new_k1 {
+                    DualKeyItem::NewK1(
+                        Cow::Owned(k1.into_owned()),
+                        Cow::Owned(k2.into_owned()),
+                        Cow::Owned(v.into_owned()),
+                    )
+                } else {
+                    DualKeyItem::SameK1(Cow::Owned(k2.into_owned()), Cow::Owned(v.into_owned()))
+                };
+                Some(Ok(item))
+            }
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        }
     }
 }
 

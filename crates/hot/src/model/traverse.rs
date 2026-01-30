@@ -18,6 +18,72 @@ pub type RawK2Value<'a> = (Cow<'a, [u8]>, RawValue<'a>);
 /// Typed k2-value pair for a dual-keyed table.
 pub type K2Value<T> = (<T as DualKey>::Key2, <T as crate::tables::Table>::Value);
 
+/// An item from a dual-key iterator.
+///
+/// This enum avoids cloning k1 for every value when iterating
+/// over dual-keyed tables. K1 is only provided when it changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DualKeyItem<K1, K2, V> {
+    /// First entry for a new k1.
+    NewK1(K1, K2, V),
+    /// Additional k2/value for the current k1.
+    SameK1(K2, V),
+}
+
+impl<K1, K2, V> DualKeyItem<K1, K2, V> {
+    /// Returns the value, consuming self.
+    pub fn into_value(self) -> V {
+        match self {
+            Self::NewK1(_, _, v) | Self::SameK1(_, v) => v,
+        }
+    }
+
+    /// Returns a reference to the value.
+    pub const fn value(&self) -> &V {
+        match self {
+            Self::NewK1(_, _, v) | Self::SameK1(_, v) => v,
+        }
+    }
+
+    /// Returns the k2, consuming self.
+    pub fn into_k2(self) -> K2 {
+        match self {
+            Self::NewK1(_, k2, _) | Self::SameK1(k2, _) => k2,
+        }
+    }
+
+    /// Returns a reference to k2.
+    pub const fn k2(&self) -> &K2 {
+        match self {
+            Self::NewK1(_, k2, _) | Self::SameK1(k2, _) => k2,
+        }
+    }
+
+    /// Returns k1 if this is a NewK1 entry.
+    pub const fn k1(&self) -> Option<&K1> {
+        match self {
+            Self::NewK1(k1, _, _) => Some(k1),
+            Self::SameK1(_, _) => None,
+        }
+    }
+
+    /// Returns true if this item represents a new k1.
+    pub const fn is_new_k1(&self) -> bool {
+        matches!(self, Self::NewK1(..))
+    }
+
+    /// Convert to a tuple, requiring k1 to be provided for SameK1 variants.
+    pub fn into_tuple(self, current_k1: K1) -> (K1, K2, V) {
+        match self {
+            Self::NewK1(k1, k2, v) => (k1, k2, v),
+            Self::SameK1(k2, v) => (current_k1, k2, v),
+        }
+    }
+}
+
+/// Raw dual-key item: (k1?, k2, value) where k1 is only present on NewK1.
+pub type RawDualKeyItem<'a> = DualKeyItem<Cow<'a, [u8]>, Cow<'a, [u8]>, Cow<'a, [u8]>>;
+
 /// Trait for traversing key-value pairs in the database.
 pub trait KvTraverse<E: HotKvReadError> {
     /// Set position to the first key-value pair in the database, and return
@@ -246,6 +312,19 @@ pub trait DualKeyTraverse<E: HotKvReadError> {
         let done = found_k1.as_ref() != k1;
         Ok(RawDualKeyK2Iter { cursor: self, done, _marker: PhantomData })
     }
+
+    /// Position at first entry and return iterator yielding [`DualKeyItem`].
+    ///
+    /// This is more efficient than [`Self::iter()`] as it avoids cloning k1 for
+    /// every entry within the same k1 group. The iterator yields
+    /// [`DualKeyItem::NewK1`] when k1 changes and [`DualKeyItem::SameK1`] for
+    /// subsequent entries with the same k1.
+    ///
+    /// Backends implement this natively to leverage efficient "new key"
+    /// notifications from the underlying database.
+    fn iter_items(&mut self) -> Result<impl Iterator<Item = Result<RawDualKeyItem<'_>, E>> + '_, E>
+    where
+        Self: Sized;
 }
 
 /// Trait for traversing dual-keyed key-value pairs with mutation capabilities.

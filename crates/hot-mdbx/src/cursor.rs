@@ -4,11 +4,11 @@ use crate::{FixedSizeInfo, MdbxError};
 use signet_hot::{
     MAX_FIXED_VAL_SIZE, MAX_KEY_SIZE,
     model::{
-        DualKeyTraverse, DualKeyTraverseMut, KvTraverse, KvTraverseMut, RawDualKeyValue,
-        RawKeyValue, RawValue,
+        DualKeyItem, DualKeyTraverse, DualKeyTraverseMut, KvTraverse, KvTraverseMut,
+        RawDualKeyItem, RawDualKeyValue, RawKeyValue, RawValue,
     },
 };
-use signet_libmdbx::{Ro, Rw, RwSync, TransactionKind, tx::WriteMarker};
+use signet_libmdbx::{DupItem, Ro, Rw, RwSync, TransactionKind, tx::WriteMarker};
 use std::{
     borrow::Cow,
     ops::{Deref, DerefMut},
@@ -504,6 +504,61 @@ where
             None => Ok(None),
         }
     }
+
+    fn iter_items(
+        &mut self,
+    ) -> Result<impl Iterator<Item = Result<RawDualKeyItem<'_>, MdbxError>> + '_, MdbxError> {
+        if !self.fsi.is_dupsort() {
+            return Err(MdbxError::NotDupSort);
+        }
+
+        let key2_size = self.fsi.key2_size().ok_or(MdbxError::UnknownFixedSize)?;
+
+        // Use iter_dup_start which yields DupItem::NewKey/SameKey
+        let iter_dup = self.inner.iter_dup_start::<Cow<'_, [u8]>, Cow<'_, [u8]>>()?;
+        Ok(MdbxDualKeyItemIter { iter_dup, key2_size })
+    }
+}
+
+/// Iterator adapter that converts mdbx's [`DupItem`] to [`DualKeyItem`].
+///
+/// This iterator returns owned data to avoid lifetime complexities between
+/// the transaction lifetime and the iterator borrow lifetime.
+struct MdbxDualKeyItemIter<'tx, 'cur, K: TransactionKind> {
+    iter_dup: signet_libmdbx::tx::iter::IterDup<'tx, 'cur, K, Cow<'tx, [u8]>, Cow<'tx, [u8]>>,
+    key2_size: usize,
+}
+
+impl<'a, K: TransactionKind> Iterator for MdbxDualKeyItemIter<'_, 'a, K> {
+    type Item = Result<RawDualKeyItem<'a>, MdbxError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.iter_dup.borrow_next() {
+            Ok(Some(item)) => {
+                let result = match item {
+                    DupItem::NewKey(k1, v) => {
+                        let (k2, val) = split_cow_at_owned(v, self.key2_size);
+                        DualKeyItem::NewK1(Cow::Owned(k1.into_owned()), k2, val)
+                    }
+                    DupItem::SameKey(v) => {
+                        let (k2, val) = split_cow_at_owned(v, self.key2_size);
+                        DualKeyItem::SameK1(k2, val)
+                    }
+                };
+                Some(Ok(result))
+            }
+            Ok(None) => None,
+            Err(e) => Some(Err(MdbxError::from(e))),
+        }
+    }
+}
+
+/// Splits a [`Cow`] at the given index and returns owned [`Cow`]s.
+#[inline]
+fn split_cow_at_owned(cow: Cow<'_, [u8]>, at: usize) -> (Cow<'static, [u8]>, Cow<'static, [u8]>) {
+    let vec = cow.into_owned();
+    let (left, right) = vec.split_at(at);
+    (Cow::Owned(left.to_vec()), Cow::Owned(right.to_vec()))
 }
 
 impl<K: TransactionKind + WriteMarker> DualKeyTraverseMut<MdbxError> for Cursor<'_, K> {
