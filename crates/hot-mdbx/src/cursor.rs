@@ -116,99 +116,12 @@ impl<K: TransactionKind + WriteMarker> KvTraverseMut<MdbxError> for Cursor<'_, K
 }
 
 impl<K: TransactionKind + WriteMarker> Cursor<'_, K> {
-    /// Stores multiple contiguous fixed-size data elements in a single request.
-    ///
-    /// This directly calls MDBX FFI, bypassing the transaction execution wrapper
-    /// in `signet_libmdbx`. The cursor must be in a valid state with an active
-    /// transaction.
-    ///
-    /// # Safety
-    ///
-    /// - The table MUST have been opened with `DUP_FIXED` flag.
-    /// - The `data` slice MUST contain exactly `count` contiguous elements of
-    ///   `data_size` bytes each.
-    /// - The caller MUST ensure `data.len() == data_size * count`.
-    /// - The cursor's transaction MUST be active and valid.
-    /// - No concurrent operations may be performed on the same transaction.
-    ///
-    /// # Arguments
-    ///
-    /// - `key`: The key under which to store the duplicates.
-    /// - `data`: Contiguous buffer containing all elements.
-    /// - `data_size`: Size of each individual element in bytes.
-    /// - `count`: Number of elements to store.
-    /// - `all_dups`: If true, replaces all existing duplicates for this key.
-    ///
-    /// # Returns
-    ///
-    /// The number of elements actually written.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `data.len() != data_size * count`.
-    pub unsafe fn put_multiple(
-        &mut self,
-        key: &[u8],
-        data: &[u8],
-        data_size: usize,
-        count: usize,
-        all_dups: bool,
-    ) -> Result<usize, MdbxError> {
-        assert_eq!(
-            data.len(),
-            data_size * count,
-            "data length {} must equal data_size {} * count {}",
-            data.len(),
-            data_size,
-            count
-        );
-
-        use signet_libmdbx::{WriteFlags, ffi};
-        use std::ffi::c_void;
-
-        let key_val = ffi::MDBX_val { iov_len: key.len(), iov_base: key.as_ptr() as *mut c_void };
-
-        // First MDBX_val: size of one element, pointer to data array
-        let data_val = ffi::MDBX_val { iov_len: data_size, iov_base: data.as_ptr() as *mut c_void };
-
-        // Second MDBX_val: count of elements (will be updated with actual count written)
-        let count_val = ffi::MDBX_val { iov_len: count, iov_base: std::ptr::null_mut() };
-
-        let mut flags = WriteFlags::MULTIPLE;
-        if all_dups {
-            flags |= WriteFlags::ALLDUPS;
-        }
-
-        // Create a 2-element array as required by MDBX_MULTIPLE
-        let mut vals = [data_val, count_val];
-
-        // SAFETY: The caller guarantees that:
-        // - The cursor is valid and belongs to an active transaction
-        // - The data buffer contains exactly `count` contiguous elements of `data_size` bytes
-        // - The table was opened with DUP_FIXED flag
-        // - No concurrent operations are being performed on this transaction
-        let result = unsafe {
-            ffi::mdbx_cursor_put(self.inner.cursor(), &key_val, vals.as_mut_ptr(), flags.bits())
-        };
-
-        if result == ffi::MDBX_SUCCESS {
-            // The second val's iov_len now contains the count of items written
-            Ok(vals[1].iov_len)
-        } else {
-            Err(MdbxError::Mdbx(signet_libmdbx::MdbxError::from_err_code(result)))
-        }
-    }
-
-    /// Stores multiple fixed-size entries for a single key (safe wrapper).
-    ///
-    /// Validates that the table is DUP_FIXED before calling the unsafe FFI.
+    /// Stores multiple fixed-size entries for a single key.
     ///
     /// # Arguments
     ///
     /// - `key`: The key under which to store the duplicates.
     /// - `entries`: Contiguous buffer containing all elements.
-    /// - `entry_count`: Number of elements to store.
-    /// - `replace_all`: If true, replaces all existing duplicates for this key.
     ///
     /// # Returns
     ///
@@ -217,19 +130,35 @@ impl<K: TransactionKind + WriteMarker> Cursor<'_, K> {
     /// # Errors
     ///
     /// Returns [`MdbxError::NotDupFixed`] if the table is not DUP_FIXED.
-    pub fn put_multiple_fixed(
-        &mut self,
-        key: &[u8],
-        entries: &[u8],
-        entry_count: usize,
-        replace_all: bool,
-    ) -> Result<usize, MdbxError> {
+    pub fn put_multiple(&mut self, key: &[u8], entries: &[u8]) -> Result<usize, MdbxError> {
         let Some(total_size) = self.fsi.total_size() else {
             return Err(MdbxError::NotDupFixed);
         };
 
-        // SAFETY: We verified the table is DUP_FIXED via fsi
-        unsafe { self.put_multiple(key, entries, total_size, entry_count, replace_all) }
+        self.inner.put_multiple(key, entries, total_size).map_err(MdbxError::from)
+    }
+
+    /// Stores multiple fixed-size entries for a single key. Overwrites
+    /// all existing duplicates.
+    ///
+    /// # Arguments
+    ///
+    /// - `key`: The key under which to store the duplicates.
+    /// - `entries`: Contiguous buffer containing all elements.
+    ///
+    /// # Returns
+    ///
+    /// The number of elements actually written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MdbxError::NotDupFixed`] if the table is not DUP_FIXED.
+    pub fn overwrite_multiple(&mut self, key: &[u8], entries: &[u8]) -> Result<usize, MdbxError> {
+        let Some(total_size) = self.fsi.total_size() else {
+            return Err(MdbxError::NotDupFixed);
+        };
+
+        self.inner.put_multiple_overwrite(key, entries, total_size).map_err(MdbxError::from)
     }
 }
 
@@ -560,9 +489,9 @@ impl<'a, K: TransactionKind> Iterator for MdbxDualKeyItemIter<'_, 'a, K> {
 /// Splits a [`Cow`] at the given index and returns owned [`Cow`]s.
 #[inline]
 fn split_cow_at_owned(cow: Cow<'_, [u8]>, at: usize) -> (Cow<'static, [u8]>, Cow<'static, [u8]>) {
-    let vec = cow.into_owned();
-    let (left, right) = vec.split_at(at);
-    (Cow::Owned(left.to_vec()), Cow::Owned(right.to_vec()))
+    let mut vec = cow.into_owned();
+    let right = vec.split_off(at);
+    (Cow::Owned(vec), Cow::Owned(right))
 }
 
 impl<K: TransactionKind + WriteMarker> DualKeyTraverseMut<MdbxError> for Cursor<'_, K> {
@@ -586,10 +515,74 @@ impl<K: TransactionKind + WriteMarker> DualKeyTraverseMut<MdbxError> for Cursor<
     }
 
     fn append_dual(&mut self, k1: &[u8], k2: &[u8], value: &[u8]) -> Result<(), MdbxError> {
-        // Concatenate k2 || value for DUPSORT
-        let mut k2_value = Vec::with_capacity(k2.len() + value.len());
-        k2_value.extend_from_slice(k2);
-        k2_value.extend_from_slice(value);
-        self.inner.append_dup(k1, &k2_value).map_err(MdbxError::from)
+        // Concatenate k2 || value for DUPSORT using scratch buffer
+        let total = k2.len() + value.len();
+        self.buf[..k2.len()].copy_from_slice(k2);
+        self.buf[k2.len()..total].copy_from_slice(value);
+        self.inner.append_dup(k1, &self.buf[..total]).map_err(MdbxError::from)
+    }
+
+    fn put_batch(
+        &mut self,
+        k1: &[u8],
+        entries: &[u8],
+        k2_size: usize,
+        entry_size: usize,
+    ) -> Result<usize, MdbxError> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+
+        // Check if we can use efficient MDBX_MULTIPLE for DUP_FIXED tables
+        match self.fsi.total_size() {
+            Some(total_size) if total_size == entry_size => {
+                // DUP_FIXED with matching entry size: use efficient batch insert
+                self.inner.put_multiple(k1, entries, total_size).map_err(MdbxError::from)
+            }
+            _ => {
+                // Fall back to individual appends
+                let count = entries.len() / entry_size;
+                for i in 0..count {
+                    let offset = i * entry_size;
+                    let k2 = &entries[offset..offset + k2_size];
+                    let value = &entries[offset + k2_size..offset + entry_size];
+                    self.append_dual(k1, k2, value)?;
+                }
+                Ok(count)
+            }
+        }
+    }
+
+    fn overwrite_batch(
+        &mut self,
+        k1: &[u8],
+        entries: &[u8],
+        k2_size: usize,
+        entry_size: usize,
+    ) -> Result<usize, MdbxError> {
+        if entries.is_empty() {
+            self.clear_k1(k1)?;
+            return Ok(0);
+        }
+
+        // Check if we can use efficient MDBX_MULTIPLE for DUP_FIXED tables
+        match self.fsi.total_size() {
+            Some(total_size) if total_size == entry_size => {
+                // DUP_FIXED with matching entry size: use efficient batch overwrite
+                self.inner.put_multiple_overwrite(k1, entries, total_size).map_err(MdbxError::from)
+            }
+            _ => {
+                // Fall back to clear + individual appends
+                self.clear_k1(k1)?;
+                let count = entries.len() / entry_size;
+                for i in 0..count {
+                    let offset = i * entry_size;
+                    let k2 = &entries[offset..offset + k2_size];
+                    let value = &entries[offset + k2_size..offset + entry_size];
+                    self.append_dual(k1, k2, value)?;
+                }
+                Ok(count)
+            }
+        }
     }
 }

@@ -1414,8 +1414,7 @@ mod tests {
             let tx: Tx<Rw> = db.writer().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
-            let written =
-                unsafe { cursor.put_multiple(&key, &data, data_size, count, false) }.unwrap();
+            let written = cursor.put_multiple(&key, &data).unwrap();
 
             assert_eq!(written, count);
 
@@ -1461,7 +1460,7 @@ mod tests {
             initial_data[16..24].copy_from_slice(&[0xCCu8; 8]);
             initial_data[24..32].copy_from_slice(&[0xDDu8; 8]);
 
-            unsafe { cursor.put_multiple(&key, &initial_data, data_size, 2, false) }.unwrap();
+            cursor.put_multiple(&key, &initial_data).unwrap();
 
             drop(cursor);
             tx.raw_commit().unwrap();
@@ -1479,8 +1478,7 @@ mod tests {
                 new_data[offset + 8..offset + 16].copy_from_slice(&[(i as u8) + 200; 8]);
             }
 
-            let written =
-                unsafe { cursor.put_multiple(&key, &new_data, data_size, 3, true) }.unwrap();
+            let written = cursor.overwrite_multiple(&key, &new_data).unwrap();
 
             assert_eq!(written, 3);
 
@@ -1515,7 +1513,6 @@ mod tests {
     fn test_put_multiple_single_element_inner(db: &DatabaseEnv) {
         let key = [0x03u8; 8];
         let data_size = 16;
-        let count = 1;
 
         let mut data = vec![0u8; data_size];
         data[0..8].copy_from_slice(&[0x11u8; 8]);
@@ -1525,8 +1522,7 @@ mod tests {
             let tx: Tx<Rw> = db.writer().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
-            let written =
-                unsafe { cursor.put_multiple(&key, &data, data_size, count, false) }.unwrap();
+            let written = cursor.put_multiple(&key, &data).unwrap();
 
             assert_eq!(written, 1);
 
@@ -1542,20 +1538,16 @@ mod tests {
 
     fn test_put_multiple_mismatched_length_panics_inner(db: &DatabaseEnv) {
         let key = [0x05u8; 8];
-        let data_size = 16;
-        let count = 3;
 
-        // Intentionally wrong size: 32 bytes instead of 48 (16 * 3)
-        let data = vec![0u8; 32];
+        // Intentionally wrong size: 17 bytes is not a multiple of value_size (16)
+        let data = vec![0u8; 17];
 
         let tx: Tx<Rw> = db.writer().unwrap();
         let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            cursor.put_multiple(&key, &data, data_size, count, false)
-        }));
-
-        assert!(result.is_err(), "Should panic when data.len() != data_size * count");
+        // The underlying library should return an error or panic for misaligned data
+        let result = cursor.put_multiple(&key, &data);
+        assert!(result.is_err(), "Should error when data.len() is not a multiple of value_size");
     }
 
     #[test]
@@ -1565,20 +1557,16 @@ mod tests {
 
     fn test_put_multiple_oversized_data_panics_inner(db: &DatabaseEnv) {
         let key = [0x06u8; 8];
-        let data_size = 16;
-        let count = 2;
 
-        // Intentionally oversized: 64 bytes instead of 32 (16 * 2)
-        let data = vec![0u8; 64];
+        // Intentionally wrong size: 33 bytes is not a multiple of value_size (16)
+        let data = vec![0u8; 33];
 
         let tx: Tx<Rw> = db.writer().unwrap();
         let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            cursor.put_multiple(&key, &data, data_size, count, false)
-        }));
-
-        assert!(result.is_err(), "Should panic when data.len() > data_size * count");
+        // The underlying library should return an error or panic for misaligned data
+        let result = cursor.put_multiple(&key, &data);
+        assert!(result.is_err(), "Should error when data.len() is not a multiple of value_size");
     }
 
     #[test]
@@ -1603,8 +1591,7 @@ mod tests {
             let tx: Tx<Rw> = db.writer().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
-            let written =
-                unsafe { cursor.put_multiple(&key, &data, data_size, count, false) }.unwrap();
+            let written = cursor.put_multiple(&key, &data).unwrap();
 
             assert_eq!(written, count);
 
@@ -1659,8 +1646,7 @@ mod tests {
             let tx: Tx<Rw> = db.writer().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
-            let written =
-                unsafe { cursor.put_multiple(&key, &data, data_size, count, false) }.unwrap();
+            let written = cursor.put_multiple(&key, &data).unwrap();
 
             // MDBX may write fewer than requested if it spans pages
             // The return value indicates how many were actually written
@@ -1716,7 +1702,7 @@ mod tests {
             let tx: Tx<Rw> = db.writer().unwrap();
             let mut cursor = tx.new_cursor_raw("put_multiple_test").unwrap();
 
-            let written = cursor.put_multiple_fixed(&key, &data, count, false).unwrap();
+            let written = cursor.put_multiple(&key, &data).unwrap();
 
             assert_eq!(written, count);
 
@@ -1756,7 +1742,7 @@ mod tests {
         let tx: Tx<Rw> = db.writer().unwrap();
         let mut cursor = tx.new_cursor::<TestTable>().unwrap();
 
-        let result = cursor.put_multiple_fixed(&key, &data, 1, false);
+        let result = cursor.put_multiple(&key, &data);
 
         assert!(matches!(result, Err(MdbxError::NotDupFixed)));
     }
