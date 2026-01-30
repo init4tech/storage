@@ -71,6 +71,15 @@ pub trait KvTraverseMut<E: HotKvReadError>: KvTraverse<E> {
     /// Delete the current key-value pair in the database.
     fn delete_current(&mut self) -> Result<(), E>;
 
+    /// Append a key-value pair to the end of the table.
+    ///
+    /// Key must be greater than all existing keys. If the key is not greater
+    /// than the current maximum key, behavior is backend-specific. The backend
+    /// may choose to return an error, or silently fall back to a regular put.
+    ///
+    /// For some backends, this may be more efficient than a regular put.
+    fn append(&mut self, key: &[u8], value: &[u8]) -> Result<(), E>;
+
     /// Delete a range of key-value pairs in the database (exclusive end).
     fn delete_range(&mut self, range: Range<&[u8]>) -> Result<(), E> {
         let Some((key, _)) = self.lower_bound(range.start)? else {

@@ -159,6 +159,20 @@ pub trait DualKeyTraverseMut<E: HotKvReadError>: DualKeyTraverse<E> {
     /// Delete the current dual-keyed entry.
     fn delete_current(&mut self) -> Result<(), E>;
 
+    /// Append a duplicate entry to a DUPSORT table.
+    ///
+    /// For some backends, this may be more efficient than a regular put.
+    ///
+    /// The k2 must be greater than all existing k2s for the given k1.
+    ///
+    /// If the ordering constraint is violated, behavior is backend-specific.
+    /// The backend may choose to return an error, or silently fall back to a
+    /// regular put_dual.
+    ///
+    /// This is more efficient than `put` when inserting duplicates in sorted
+    /// order, as optimized backends can skip sub-tree traversal.
+    fn append_dual(&mut self, k1: &[u8], k2: &[u8], value: &[u8]) -> Result<(), E>;
+
     /// Delete a range of dual-keyed entries (inclusive).
     ///
     /// Deletes all entries where `(k1, k2) >= (start_k1, start_k2)` and

@@ -27,6 +27,7 @@ use std::borrow::Cow;
 pub trait HotKv {
     /// The read-only transaction type.
     type RoTx: HotKvRead;
+
     /// The read-write transaction type.
     type RwTx: HotKvWrite;
 
@@ -285,6 +286,18 @@ pub trait HotKvWrite: HotKvRead {
         self.queue_raw_put(T::NAME, key_bytes, &value_bytes)
     }
 
+    /// Append a key-value pair. Key must be > all existing keys.
+    ///
+    /// Default implementation falls back to `queue_put`. Backends that support
+    /// optimized append (like MDBX) should override via cursor.append().
+    fn queue_append<T: SingleKey>(
+        &self,
+        key: &T::Key,
+        value: &T::Value,
+    ) -> Result<(), Self::Error> {
+        self.queue_put::<T>(key, value)
+    }
+
     /// Queue a put operation for a specific dual-keyed table.
     fn queue_put_dual<T: DualKey>(
         &self,
@@ -301,32 +314,17 @@ pub trait HotKvWrite: HotKvRead {
         self.queue_raw_put_dual(T::NAME, key1_bytes, key2_bytes, &value_bytes)
     }
 
-    /// Queue many put operations for a dual-keyed table.
+    /// Append a dual-key entry. k2 must be > all existing k2s for k1.
     ///
-    /// Takes entries grouped by key1. For each key1, an iterator of (key2, value)
-    /// pairs is provided. This structure enables efficient bulk writes for backends
-    /// that support it (e.g., MDBX's `put_multiple`).
-    ///
-    /// **Recommendation**: For best performance, ensure entries within each key1
-    /// group are sorted by key2.
-    ///
-    /// The default implementation calls `queue_put_dual` in a loop.
-    /// Implementations MAY override this to apply optimizations.
-    fn queue_put_many_dual<'a, 'b, 'c, T, I, J>(&self, groups: I) -> Result<(), Self::Error>
-    where
-        T: DualKey,
-        T::Key: 'a,
-        T::Key2: 'b,
-        T::Value: 'c,
-        I: IntoIterator<Item = (&'a T::Key, J)>,
-        J: IntoIterator<Item = (&'b T::Key2, &'c T::Value)>,
-    {
-        for (key1, entries) in groups {
-            for (key2, value) in entries {
-                self.queue_put_dual::<T>(key1, key2, value)?;
-            }
-        }
-        Ok(())
+    /// Default implementation falls back to `queue_put_dual`. Backends that support
+    /// optimized append (like MDBX) should override via cursor.append_dual().
+    fn queue_append_dual<T: DualKey>(
+        &self,
+        k1: &T::Key,
+        k2: &T::Key2,
+        value: &T::Value,
+    ) -> Result<(), Self::Error> {
+        self.queue_put_dual::<T>(k1, k2, value)
     }
 
     /// Queue a delete operation for a specific table.
@@ -349,26 +347,6 @@ pub trait HotKvWrite: HotKvRead {
         let key2_bytes = key2.encode_key(&mut key2_buf);
 
         self.queue_raw_delete_dual(T::NAME, key1_bytes, key2_bytes)
-    }
-
-    /// Queue many put operations for a specific table.
-    fn queue_put_many<'a, 'b, T, I>(&self, entries: I) -> Result<(), Self::Error>
-    where
-        T: SingleKey,
-        T::Key: 'a,
-        T::Value: 'b,
-        I: IntoIterator<Item = (&'a T::Key, &'b T::Value)>,
-    {
-        let mut key_buf = [0u8; MAX_KEY_SIZE];
-
-        for (key, value) in entries {
-            let key_bytes = key.encode_key(&mut key_buf);
-            let value_bytes = value.encoded();
-
-            self.queue_raw_put(T::NAME, key_bytes, &value_bytes)?;
-        }
-
-        Ok(())
     }
 
     /// Queue creation of a specific table.

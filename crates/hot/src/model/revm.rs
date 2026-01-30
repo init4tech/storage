@@ -225,16 +225,6 @@ impl<U: HotKvWrite> HotKvWrite for RevmWrite<U> {
         self.writer.queue_delete::<T>(key)
     }
 
-    fn queue_put_many<'a, 'b, T, I>(&self, entries: I) -> Result<(), Self::Error>
-    where
-        T: SingleKey,
-        T::Key: 'a,
-        T::Value: 'b,
-        I: IntoIterator<Item = (&'a T::Key, &'b T::Value)>,
-    {
-        self.writer.queue_put_many::<T, I>(entries)
-    }
-
     fn queue_create<T>(&self) -> Result<(), Self::Error>
     where
         T: Table,

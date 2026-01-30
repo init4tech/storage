@@ -137,31 +137,6 @@ pub fn test_get_many<T: HotKv>(hot_kv: &T) {
     }
 }
 
-/// Test queue_put_many batch writes.
-pub fn test_queue_put_many<T: HotKv>(hot_kv: &T) {
-    let entries: Vec<(u64, Header)> = (200u64..210)
-        .map(|i| (i, Header { number: i, gas_limit: 1_000_000, ..Default::default() }))
-        .collect();
-
-    // Batch write using queue_put_many
-    {
-        let writer = hot_kv.writer().unwrap();
-        let refs: Vec<(&u64, &Header)> = entries.iter().map(|(k, v)| (k, v)).collect();
-        writer.queue_put_many::<tables::Headers, _>(refs).unwrap();
-        writer.commit().unwrap();
-    }
-
-    // Verify all entries exist
-    {
-        let reader = hot_kv.reader().unwrap();
-        for i in 200u64..210 {
-            let header = reader.get_header(i).unwrap();
-            assert!(header.is_some(), "Header {} should exist after batch write", i);
-            assert_eq!(header.unwrap().number, i);
-        }
-    }
-}
-
 /// Test queue_clear clears all entries in a table.
 pub fn test_queue_clear<T: HotKv>(hot_kv: &T) {
     // Write some headers

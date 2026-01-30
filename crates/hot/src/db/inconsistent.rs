@@ -41,6 +41,15 @@ pub trait UnsafeDbWrite: HotKvWrite + super::sealed::Sealed {
         self.queue_put::<tables::Headers>(&header.number, header)
     }
 
+    /// Append a block header. Block number must be > all existing block numbers.
+    ///
+    /// This will leave the DB in an inconsistent state until the corresponding
+    /// header number is also written. Users should prefer [`Self::put_header`]
+    /// instead.
+    fn append_header(&self, header: &Header) -> Result<(), Self::Error> {
+        self.queue_append::<tables::Headers>(&header.number, header)
+    }
+
     /// Write a block number by its hash. This will leave the DB in an
     /// inconsistent state until the corresponding header is also written.
     /// Users should prefer [`Self::put_header`] instead.
@@ -108,8 +117,7 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
         self.queue_put_dual::<tables::AccountsHistory>(address, &latest_height, touched)
     }
 
-    /// Write an account change (pre-state) for an account at a specific
-    /// block.
+    /// Write an account change (pre-state) for an account at a specific block.
     fn write_account_prestate(
         &self,
         block_number: u64,
@@ -117,6 +125,19 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
         pre_state: &Account,
     ) -> Result<(), Self::Error> {
         self.queue_put_dual::<tables::AccountChangeSets>(&block_number, &address, pre_state)
+    }
+
+    /// Append an account prestate entry.
+    ///
+    /// Entries must be appended in sorted order by (block_number, address).
+    /// Within a single block, addresses must be sorted.
+    fn append_account_prestate(
+        &self,
+        block_number: u64,
+        address: Address,
+        pre_state: &Account,
+    ) -> Result<(), Self::Error> {
+        self.queue_append_dual::<tables::AccountChangeSets>(&block_number, &address, pre_state)
     }
 
     /// Write storage history, by highest block number and touched block
@@ -132,8 +153,7 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
         self.queue_put_dual::<tables::StorageHistory>(address, &sharded_key, touched)
     }
 
-    /// Write a storage change (before state) for an account at a specific
-    /// block.
+    /// Write a storage change (before state) for an account at a specific block.
     fn write_storage_prestate(
         &self,
         block_number: u64,
@@ -144,8 +164,30 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
         self.queue_put_dual::<tables::StorageChangeSets>(&(block_number, address), slot, prestate)
     }
 
+    /// Append a storage prestate entry.
+    ///
+    /// Entries must be appended in sorted order by ((block_number, address), slot).
+    /// Within a single (block, address), slots must be sorted.
+    fn append_storage_prestate(
+        &self,
+        block_number: u64,
+        address: Address,
+        slot: &U256,
+        prestate: &U256,
+    ) -> Result<(), Self::Error> {
+        self.queue_append_dual::<tables::StorageChangeSets>(
+            &(block_number, address),
+            slot,
+            prestate,
+        )
+    }
+
     /// Write a pre-state for every storage key that exists for an account at a
     /// specific block.
+    ///
+    /// Note: This uses `write_storage_prestate` (regular put) instead of
+    /// `append_storage_prestate` because the slots may interleave with other
+    /// writes to the same K1 from different code paths.
     fn write_wipe(&self, block_number: u64, address: &Address) -> Result<(), Self::Error> {
         let mut cursor = self.traverse_dual::<tables::PlainStorageState>()?;
 
@@ -156,13 +198,30 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
         Ok(())
     }
 
-    /// Write a block's plain state revert information.
-    fn write_plain_revert(
+    /// Write pre-sorted revert data for a single block.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `accounts` is not sorted by address or `storage` is not sorted
+    /// by address.
+    fn write_plain_revert_sorted(
         &self,
         block_number: u64,
-        accounts: &[(Address, Option<AccountInfo>)],
-        storage: &[PlainStorageRevert],
+        accounts: &[&(Address, Option<AccountInfo>)],
+        storage: &[&PlainStorageRevert],
     ) -> Result<(), Self::Error> {
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(
+                accounts.windows(2).all(|w| w[0].0 <= w[1].0),
+                "accounts must be sorted by address"
+            );
+            debug_assert!(
+                storage.windows(2).all(|w| w[0].address <= w[1].address),
+                "storage must be sorted by address"
+            );
+        }
+
         for (address, info) in accounts {
             let account = info.as_ref().map(Account::from).unwrap_or_default();
 
@@ -171,7 +230,7 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
                 self.put_bytecode(&code_hash, &bytecode)?;
             }
 
-            self.write_account_prestate(block_number, *address, &account)?;
+            self.append_account_prestate(block_number, *address, &account)?;
         }
 
         for entry in storage {
@@ -179,6 +238,8 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
                 self.write_wipe(block_number, &entry.address)?;
                 continue;
             }
+            // Use write (put) instead of append because storage_revert slots
+            // are not guaranteed to be sorted.
             for (key, old_value) in entry.storage_revert.iter() {
                 self.write_storage_prestate(
                     block_number,
@@ -193,14 +254,46 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
     }
 
     /// Write multiple blocks' plain state revert information.
+    ///
+    /// Sorts accounts and storage in parallel before writing to enable
+    /// efficient append operations.
     fn write_plain_reverts(
         &self,
         first_block_number: u64,
         PlainStateReverts { accounts, storage }: &PlainStateReverts,
     ) -> Result<(), Self::Error> {
-        accounts.iter().zip(storage.iter()).enumerate().try_for_each(|(idx, (acc, sto))| {
-            self.write_plain_revert(first_block_number + idx as u64, acc, sto)
-        })
+        use rayon::prelude::*;
+
+        // Sort accounts and storage in parallel using rayon::join
+        let (sorted_accounts, sorted_storage) = rayon::join(
+            || {
+                accounts
+                    .par_iter()
+                    .map(|block_accounts| {
+                        let mut sorted: Vec<_> = block_accounts.iter().collect();
+                        sorted.sort_by_key(|(addr, _)| *addr);
+                        sorted
+                    })
+                    .collect::<Vec<_>>()
+            },
+            || {
+                storage
+                    .par_iter()
+                    .map(|block_storage| {
+                        let mut sorted: Vec<_> = block_storage.iter().collect();
+                        sorted.sort_by_key(|entry| entry.address);
+                        sorted
+                    })
+                    .collect::<Vec<_>>()
+            },
+        );
+
+        // Write sequentially (DB writes must be ordered)
+        sorted_accounts.iter().zip(sorted_storage.iter()).enumerate().try_for_each(
+            |(idx, (acc, sto))| {
+                self.write_plain_revert_sorted(first_block_number + idx as u64, acc, sto)
+            },
+        )
     }
 
     /// Write changed accounts from a [`StateChangeset`].
@@ -374,7 +467,7 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
         header: &SealedHeader,
         state_changes: &BundleState,
     ) -> Result<(), Self::Error> {
-        self.put_header_inconsistent(header.as_ref())?;
+        self.append_header(header.as_ref())?;
         self.put_header_number_inconsistent(&header.hash(), header.number)?;
 
         let (state_changes, reverts) =

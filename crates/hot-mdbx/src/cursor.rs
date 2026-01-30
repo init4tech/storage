@@ -109,6 +109,10 @@ impl<K: TransactionKind + WriteMarker> KvTraverseMut<MdbxError> for Cursor<'_, K
     fn delete_current(&mut self) -> Result<(), MdbxError> {
         self.inner.del().map_err(MdbxError::Mdbx)
     }
+
+    fn append(&mut self, key: &[u8], value: &[u8]) -> Result<(), MdbxError> {
+        self.inner.append(key, value).map_err(MdbxError::from)
+    }
 }
 
 impl<K: TransactionKind + WriteMarker> Cursor<'_, K> {
@@ -579,5 +583,13 @@ impl<K: TransactionKind + WriteMarker> DualKeyTraverseMut<MdbxError> for Cursor<
         // Delete all K2 entries for this K1
         self.inner.del_all_dups()?;
         Ok(())
+    }
+
+    fn append_dual(&mut self, k1: &[u8], k2: &[u8], value: &[u8]) -> Result<(), MdbxError> {
+        // Concatenate k2 || value for DUPSORT
+        let mut k2_value = Vec::with_capacity(k2.len() + value.len());
+        k2_value.extend_from_slice(k2);
+        k2_value.extend_from_slice(value);
+        self.inner.append_dup(k1, &k2_value).map_err(MdbxError::from)
     }
 }

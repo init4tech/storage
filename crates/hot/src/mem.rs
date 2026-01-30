@@ -931,6 +931,16 @@ impl<'a> KvTraverseMut<MemKvError> for MemKvCursorMut<'a> {
             Err(MemKvError::HotKv(HotKvError::Inner("No current key to delete".into())))
         }
     }
+
+    fn append(&mut self, key: &[u8], value: &[u8]) -> Result<(), MemKvError> {
+        // In-memory backend: fall back to regular put (no ordering check)
+        let combined_key = MemKv::key(key);
+        self.queued_ops
+            .lock()
+            .unwrap()
+            .insert(combined_key, QueuedKvOp::Put { value: value.to_vec().into() });
+        Ok(())
+    }
 }
 
 impl<'a> DualKeyTraverse<MemKvError> for MemKvCursorMut<'a> {
@@ -1152,6 +1162,16 @@ impl DualKeyTraverseMut<MemKvError> for MemKvCursorMut<'_> {
             queued_ops.insert(key, QueuedKvOp::Delete);
         }
 
+        Ok(())
+    }
+
+    fn append_dual(&mut self, k1: &[u8], k2: &[u8], value: &[u8]) -> Result<(), MemKvError> {
+        // In-memory backend: fall back to regular put (no ordering check)
+        let combined_key = MemKv::dual_key(k1, k2);
+        self.queued_ops
+            .lock()
+            .unwrap()
+            .insert(combined_key, QueuedKvOp::Put { value: value.to_vec().into() });
         Ok(())
     }
 }
@@ -1616,25 +1636,6 @@ mod tests {
 
             assert_eq!(bal1, Some(balance1));
             assert_eq!(bal2, Some(balance2));
-        }
-    }
-
-    #[test]
-    fn test_batch_operations() {
-        let store = MemKv::new();
-
-        let entries = [
-            (1u64, Bytes::from_static(b"first")),
-            (2u64, Bytes::from_static(b"second")),
-            (3u64, Bytes::from_static(b"third")),
-        ];
-
-        // Write batch
-        {
-            let writer = store.writer().unwrap();
-            let entry_refs: Vec<_> = entries.iter().map(|(k, v)| (k, v)).collect();
-            writer.queue_put_many::<TestTable, _>(entry_refs).unwrap();
-            writer.raw_commit().unwrap();
         }
     }
 

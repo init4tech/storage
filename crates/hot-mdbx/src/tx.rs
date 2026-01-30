@@ -3,7 +3,7 @@ use crate::{Cursor, FixedSizeInfo, FsiCache, MdbxError};
 use alloy::primitives::B256;
 use signet_hot::{
     KeySer, MAX_FIXED_VAL_SIZE, MAX_KEY_SIZE, ValSer,
-    model::{DualTableTraverse, HotKvRead, HotKvWrite},
+    model::{DualKeyTraverseMut, DualTableTraverse, HotKvRead, HotKvWrite, KvTraverseMut},
     tables::{DualKey, SingleKey, Table},
 };
 use signet_libmdbx::{Rw, RwSync, TransactionKind, WriteFlags, tx::WriteMarker};
@@ -353,68 +353,30 @@ macro_rules! impl_hot_kv_write {
                     .map_err(MdbxError::from)
             }
 
-            fn queue_put_many_dual<'a, 'b, 'c, T, I, J>(&self, groups: I) -> Result<(), Self::Error>
-            where
-                T: DualKey,
-                T::Key: 'a,
-                T::Key2: 'b,
-                T::Value: 'c,
-                I: IntoIterator<Item = (&'a T::Key, J)>,
-                J: IntoIterator<Item = (&'b T::Key2, &'c T::Value)>,
-            {
-                // Compile-time check - optimizer eliminates dead branch per table type
-                if !(T::IS_FIXED_VAL && T::DUAL_KEY) {
-                    // Not a DUP_FIXED table - use default loop implementation
-                    for (key1, entries) in groups {
-                        for (key2, value) in entries {
-                            self.queue_put_dual::<T>(key1, key2, value)?;
-                        }
-                    }
-                    return Ok(());
-                }
-
-                // Sizes known at compile time (monomorphizes per table)
-                let dual_key_size = T::DUAL_KEY_SIZE.unwrap();
-                let fixed_val_size = T::FIXED_VAL_SIZE.unwrap();
-                let entry_size = dual_key_size + fixed_val_size;
-
+            fn queue_append<T: SingleKey>(
+                &self,
+                key: &T::Key,
+                value: &T::Value,
+            ) -> Result<(), Self::Error> {
                 let mut cursor = self.new_cursor::<T>()?;
-                let mut key1_buf = [0u8; MAX_KEY_SIZE];
-                let mut key2_buf = [0u8; MAX_KEY_SIZE];
+                let mut key_buf = [0u8; MAX_KEY_SIZE];
+                let key_bytes = key.encode_key(&mut key_buf);
+                cursor.append(key_bytes, &value.encoded()).map_err(MdbxError::from)
+            }
 
-                // Calculate max entries per page to bound buffer size
-                let page_size = self.inner.env().stat().map(|s| s.page_size() as usize)?;
-                let max_entries_per_page = page_size / entry_size;
-                let mut buffer = Vec::with_capacity(max_entries_per_page * entry_size);
-
-                // Process each key1 group
-                for (key1, entries) in groups {
-                    let key1_bytes = key1.encode_key(&mut key1_buf);
-                    buffer.clear();
-                    let mut entry_count = 0;
-
-                    for (key2, value) in entries {
-                        let key2_bytes = key2.encode_key(&mut key2_buf);
-                        let value_bytes = value.encoded();
-                        buffer.extend_from_slice(key2_bytes);
-                        buffer.extend_from_slice(&value_bytes);
-                        entry_count += 1;
-
-                        // Flush when buffer reaches page capacity
-                        if entry_count == max_entries_per_page {
-                            cursor.put_multiple_fixed(key1_bytes, &buffer, entry_count, false)?;
-                            buffer.clear();
-                            entry_count = 0;
-                        }
-                    }
-
-                    // Flush remaining entries for this key1
-                    if entry_count > 0 {
-                        cursor.put_multiple_fixed(key1_bytes, &buffer, entry_count, false)?;
-                    }
-                }
-
-                Ok(())
+            fn queue_append_dual<T: DualKey>(
+                &self,
+                k1: &T::Key,
+                k2: &T::Key2,
+                value: &T::Value,
+            ) -> Result<(), Self::Error> {
+                let mut cursor = self.new_cursor::<T>()?;
+                let mut k1_buf = [0u8; MAX_KEY_SIZE];
+                let mut k2_buf = [0u8; MAX_KEY_SIZE];
+                let k1_bytes = k1.encode_key(&mut k1_buf);
+                let k2_bytes = k2.encode_key(&mut k2_buf);
+                let value_bytes = value.encoded();
+                cursor.append_dual(k1_bytes, k2_bytes, &value_bytes).map_err(MdbxError::from)
             }
 
             fn raw_commit(self) -> Result<(), Self::Error> {

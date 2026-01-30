@@ -19,6 +19,7 @@ ahash.workspace = true
 auto_impl.workspace = true
 bytes.workspace = true
 itertools.workspace = true
+rayon.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
