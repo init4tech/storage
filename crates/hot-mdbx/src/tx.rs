@@ -33,7 +33,7 @@ impl<K: TransactionKind> std::fmt::Debug for Tx<K> {
 impl<K: TransactionKind> Tx<K> {
     /// Creates new `Tx` object with a `RO` or `RW` transaction and optionally enables metrics.
     #[inline]
-    pub(crate) fn new(inner: signet_libmdbx::tx::Tx<K>, fsi_cache: FsiCache) -> Self {
+    pub(crate) const fn new(inner: signet_libmdbx::tx::Tx<K>, fsi_cache: FsiCache) -> Self {
         Self { inner, fsi_cache }
     }
 

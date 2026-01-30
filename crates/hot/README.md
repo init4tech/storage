@@ -5,18 +5,46 @@ Hot storage abstractions for fast read/write access to frequently used data.
 Hot storage provides trait-based abstractions over key-value storage backends,
 with opinionated serialization and predefined tables for blockchain state.
 
-## Trait Model
+## Usage
 
-- `HotKv`: Creates read and write transactions
-- `HotKvRead`: Transactional read-only access
-- `HotKvWrite`: Transactional read-write access
-- `HistoryRead` / `HistoryWrite`: Higher-level abstractions for predefined
-  tables
+```rust,ignore
+use signet_hot::{HotKv, HistoryRead, HistoryWrite};
+
+fn example<D: HotKv>(db: &D) -> Result<(), signet_hot::db::HotKvError> {
+    // Read operations
+    let reader = db.reader()?;
+    let tip = reader.get_chain_tip()?;
+    let account = reader.get_account(&address)?;
+
+    // Write operations
+    let writer = db.writer()?;
+    writer.append_blocks(&blocks)?;
+    writer.commit()?;
+    Ok(())
+}
+```
+
+For a concrete implementation, see the `signet-hot-mdbx` crate.
+
+## Trait Hierarchy
+
+```text
+HotKv                        ← Transaction factory
+  ├─ reader() → HotKvRead        ← Read-only transactions
+  │              └─ HotDbRead         ← Typed accessors (blanket impl)
+  │                   └─ HistoryRead      ← History queries (blanket impl)
+  └─ writer() → HotKvWrite       ← Read-write transactions
+                 └─ UnsafeDbWrite        ← Low-level writes (blanket impl)
+                      └─ HistoryWrite     ← Safe chain operations (blanket impl)
+```
 
 ## Serialization
 
 Hot storage is opinionated about serialization. Each table defines key and
-value types that implement `KeySer` and `ValSer` traits.
+value types that implement `KeySer` and `ValSer` traits:
+
+- **Keys**: Fixed-size, lexicographically ordered (max 64 bytes)
+- **Values**: Variable-size, self-describing (optional fixed-size optimization)
 
 ## Tables
 

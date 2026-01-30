@@ -6,7 +6,7 @@ use roaring::RoaringTreemap;
 pub type BlockNumberList = IntegerList;
 
 /// Primitives error type.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum IntegerListError {
     /// The provided input is unsorted.
     #[error("the provided input is unsorted")]

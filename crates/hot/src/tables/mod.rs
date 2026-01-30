@@ -117,19 +117,37 @@ pub trait SingleKey: Table {
     };
 }
 
-/// Describes the semantics of a dual-keyed table.
+/// Describes the access pattern of a dual-keyed table.
 ///
+/// This hint allows backends to optimize storage layout based on expected
+/// usage patterns.
 ///
+/// ## Example Tables
+///
+/// - **`SubkeyAccess`**: `PlainStorageState<Address => U256 => U256>` where
+///   individual storage slots are read/written independently.
+/// - **`FullReplacements`**: `AccountChangeSets<BlockNumber => Address => Account>`
+///   where all changes for a block are written together and read as a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DualTableMode {
-    /// The table is updated via random access to subkeys.
+    /// The table is accessed via random reads/writes to individual subkeys.
     ///
-    /// This means that there will be random reads/writes to individual
-    /// subkeys within a parent key.
+    /// Use this mode when:
+    /// - Individual subkeys are queried or updated independently
+    /// - Point lookups by (key1, key2) are common
+    /// - The table acts like a nested map: `Map<K1, Map<K2, V>>`
+    ///
+    /// Backends may optimize for random access patterns (e.g., MDBX DUPSORT).
     SubkeyAccess,
-    /// The table is updated via full key-value replacements. This means that
-    /// subkeys within a parent key are not accessed individually, but rather
-    /// the entire value is read or replaced at once.
+    /// The table is accessed via full replacements of all subkeys under a key.
+    ///
+    /// Use this mode when:
+    /// - All subkeys under a parent key are written or read together
+    /// - Iteration over all (key2, value) pairs for a given key1 is the
+    ///   primary access pattern
+    /// - Data is append-only or batch-replaced
+    ///
+    /// Backends may optimize for sequential access and batch operations.
     FullReplacements,
 }
 

@@ -1,5 +1,6 @@
 [package]
 name = "signet-cold"
+description = "Append-only cold storage for historical blockchain data"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +8,8 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+keywords = ["blockchain", "storage", "cold-storage", "historical"]
+categories = ["database-implementations"]
 
 [dependencies]
 alloy.workspace = true

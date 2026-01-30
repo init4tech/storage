@@ -44,10 +44,10 @@ signet-storage-types = { version = "0.0.1", path = "./crates/types" }
 # External, in-house
 signet-libmdbx = { version = "0.8.0" }
 
-signet-zenith = "0.16.0-rc.5"
+signet-zenith = "0.16.0-rc.8"
 
 # trevm
-trevm = { version = "0.33.0", features = ["full_env_cfg"] }
+trevm = { version = "0.34.0", features = ["full_env_cfg"] }
 
 # alloy
 alloy = { version = "1.0.9", default-features = false, features = ["consensus", "rlp"] }

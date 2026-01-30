@@ -1,5 +1,6 @@
 [package]
 name = "signet-hot"
+description = "Trait-based hot storage abstractions for fast read/write access to blockchain state"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +8,8 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+keywords = ["storage", "key-value", "blockchain", "database"]
+categories = ["database-implementations"]
 
 [dependencies]
 signet-storage-types.workspace = true
@@ -28,7 +31,3 @@ thiserror.workspace = true
 default = []
 in-memory = []
 test-utils = ["in-memory"]
-
-[dependencies.tempfile]
-workspace = true
-optional = true

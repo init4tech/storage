@@ -18,7 +18,7 @@ use core::marker::PhantomData;
 ///
 /// This iterator wraps a cursor implementing `KvTraverse` and yields entries
 /// by calling `read_next` on each iteration.
-pub struct RawKvIter<'a, C, E> {
+pub(crate) struct RawKvIter<'a, C, E> {
     pub(super) cursor: &'a mut C,
     pub(super) done: bool,
     pub(super) _marker: PhantomData<fn() -> E>,
@@ -63,7 +63,7 @@ where
 ///
 /// This iterator wraps a cursor implementing `DualKeyTraverse` and yields
 /// entries by calling `read_next` on each iteration.
-pub struct RawDualKeyIter<'a, C, E> {
+pub(crate) struct RawDualKeyIter<'a, C, E> {
     pub(super) cursor: &'a mut C,
     pub(super) done: bool,
     pub(super) _marker: PhantomData<fn() -> E>,
@@ -107,7 +107,7 @@ where
 /// This iterator wraps a cursor implementing `DualKeyTraverse` and yields
 /// `(k2, value)` pairs while k1 remains unchanged. The iterator stops when k1
 /// changes or the table is exhausted.
-pub struct RawDualKeyK2Iter<'a, C, E> {
+pub(crate) struct RawDualKeyK2Iter<'a, C, E> {
     pub(super) cursor: &'a mut C,
     pub(super) done: bool,
     pub(super) _marker: PhantomData<fn() -> E>,
@@ -154,7 +154,7 @@ where
 /// This iterator wraps a cursor and yields `(k2, value)` pairs by calling
 /// `next_k2()` on each iteration. The iterator stops when there are no more
 /// k2 entries for the current k1 or when an error occurs.
-pub struct DualTableK2Iter<'a, C, T, E>
+pub(crate) struct DualTableK2Iter<'a, C, T, E>
 where
     T: DualKey,
 {

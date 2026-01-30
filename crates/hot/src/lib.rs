@@ -4,6 +4,39 @@
 //! data. It provides abstractions and implementations for key-value storage
 //! backends.
 //!
+//! # Quick Start
+//!
+//! ```ignore
+//! use signet_hot::{HotKv, HistoryRead, HistoryWrite};
+//!
+//! fn example<D: HotKv>(db: &D) -> Result<(), signet_hot::db::HotKvError> {
+//!     // Read operations
+//!     let reader = db.reader()?;
+//!     let tip = reader.get_chain_tip()?;
+//!     let account = reader.get_account(&address)?;
+//!
+//!     // Write operations
+//!     let writer = db.writer()?;
+//!     writer.append_blocks(&blocks)?;
+//!     writer.commit()?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! For a concrete implementation, see the `signet-hot-mdbx` crate.
+//!
+//! # Trait Hierarchy
+//!
+//! ```text
+//! HotKv                    ← Transaction factory
+//!   ├─ reader() → HotKvRead    ← Read-only transactions
+//!   │              └─ HotDbRead     ← Typed accessors (blanket impl)
+//!   │                   └─ HistoryRead  ← History queries (blanket impl)
+//!   └─ writer() → HotKvWrite   ← Read-write transactions
+//!                  └─ UnsafeDbWrite    ← Low-level writes (blanket impl)
+//!                       └─ HistoryWrite ← Safe chain operations (blanket impl)
+//! ```
+//!
 //! ## Serialization
 //!
 //! Hot storage is opinionated with respect to serialization. Each table defines
@@ -48,6 +81,18 @@
 //! [`DualKey`]: tables::DualKey
 //! [`SingleKey`]: tables::SingleKey
 //! [`Table`]: tables::Table
+
+#![warn(
+    missing_copy_implementations,
+    missing_debug_implementations,
+    missing_docs,
+    unreachable_pub,
+    clippy::missing_const_for_fn,
+    rustdoc::all
+)]
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
+#![deny(unused_must_use, rust_2018_idioms)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// Conformance tests for hot storage backends.
 #[cfg(any(test, feature = "test-utils"))]
