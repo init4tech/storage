@@ -205,7 +205,13 @@ pub fn make_bundle_state(
 
 /// Create a simple AccountInfo for testing.
 pub fn make_account_info(nonce: u64, balance: U256, code_hash: Option<B256>) -> AccountInfo {
-    AccountInfo { nonce, balance, code_hash: code_hash.unwrap_or(B256::ZERO), code: None }
+    AccountInfo {
+        nonce,
+        balance,
+        code_hash: code_hash.unwrap_or(B256::ZERO),
+        code: None,
+        account_id: None,
+    }
 }
 
 /// Test that unwinding produces the exact same state as never having appended.
