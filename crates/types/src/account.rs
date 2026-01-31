@@ -19,7 +19,7 @@ impl Account {
     }
 
     /// After `SpuriousDragon` empty account is defined as account with nonce == 0 && balance == 0
-    /// && bytecode = None (or hash is [`KECCAK_EMPTY`]).
+    /// && bytecode = None (or hash is [`KECCAK256_EMPTY`]).
     pub fn is_empty(&self) -> bool {
         self.nonce == 0
             && self.balance.is_zero()
@@ -27,12 +27,14 @@ impl Account {
     }
 
     /// Returns an account bytecode's hash.
-    /// In case of no bytecode, returns [`KECCAK_EMPTY`].
+    /// In case of no bytecode, returns [`KECCAK256_EMPTY`].
     pub fn get_bytecode_hash(&self) -> B256 {
         self.bytecode_hash.unwrap_or(KECCAK256_EMPTY)
     }
 
-    /// Extracts the account information from a [`revm_state::Account`]
+    /// Extracts the account information from a [`revm::state::Account`]
+    ///
+    /// [`revm::state::Account`]: trevm::revm::state::Account
     pub fn from_revm_account(revm_account: &trevm::revm::state::Account) -> Self {
         Self {
             balance: revm_account.info.balance,

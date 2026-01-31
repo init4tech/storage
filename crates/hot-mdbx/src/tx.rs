@@ -11,11 +11,13 @@ use std::borrow::Cow;
 
 const TX_BUFFER_SIZE: usize = MAX_KEY_SIZE + MAX_FIXED_VAL_SIZE;
 
-/// Wrapper for the libmdbx transaction.
+/// Wrapper around [`signet_libmdbx::tx::Tx`], with an additional cache
+/// to store [`FixedSizeInfo`] for tables.
 ///
-/// This wraps [`TxUnsync`] in a [`RefCell`] to provide interior mutability,
-/// allowing trait implementations that use `&self` to call methods that
-/// require `&mut self` on the underlying transaction.
+/// When a DUPSORT table is created, a [`FixedSizeInfo`] is stored in the
+/// default metadata table (dbi=0) under a key derived from the table name.
+/// This info is then cached in-memory for fast access during subsequent
+/// operations.
 pub struct Tx<K: TransactionKind> {
     /// Libmdbx-sys transaction wrapped in RefCell for interior mutability.
     inner: signet_libmdbx::tx::Tx<K>,

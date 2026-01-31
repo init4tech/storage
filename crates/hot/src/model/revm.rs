@@ -261,7 +261,13 @@ where
             None
         };
 
-        Ok(Some(AccountInfo { balance: account.balance, nonce: account.nonce, code_hash, code }))
+        Ok(Some(AccountInfo {
+            balance: account.balance,
+            nonce: account.nonce,
+            code_hash,
+            code,
+            account_id: None,
+        }))
     }
 
     fn code_by_hash_ref(&self, code_hash: B256) -> Result<RevmBytecode, Self::Error> {
@@ -332,7 +338,13 @@ where
             None
         };
 
-        Ok(Some(AccountInfo { balance: account.balance, nonce: account.nonce, code_hash, code }))
+        Ok(Some(AccountInfo {
+            balance: account.balance,
+            nonce: account.nonce,
+            code_hash,
+            code,
+            account_id: None,
+        }))
     }
 
     fn code_by_hash_ref(&self, code_hash: B256) -> Result<RevmBytecode, Self::Error> {
@@ -587,6 +599,7 @@ mod tests {
                 balance: U256::from(2000u64),
                 code_hash: KECCAK256_EMPTY,
                 code: None,
+                account_id: None,
             };
 
             let mut storage = HashMap::default();
@@ -600,6 +613,7 @@ mod tests {
                 storage,
                 status: trevm::revm::state::AccountStatus::Touched,
                 transaction_id: 0,
+                original_info: Box::new(Default::default()),
             };
 
             changes.insert(address, revm_account);
@@ -654,10 +668,12 @@ mod tests {
                     balance: U256::from(1500u64),
                     code_hash: KECCAK256_EMPTY,
                     code: None,
+                    account_id: None,
                 },
                 storage: HashMap::default(),
                 status: trevm::revm::state::AccountStatus::Touched,
                 transaction_id: 0,
+                original_info: Box::default(),
             };
             changes.insert(address2, revm_account);
             writer.try_commit(changes)?;

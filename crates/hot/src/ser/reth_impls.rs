@@ -615,11 +615,11 @@ impl ValSer for Bytecode {
         match ty {
             0 => {
                 let analyzed = LegacyAnalyzedBytecode::decode_value(data)?;
-                Ok(Bytecode::LegacyAnalyzed(analyzed))
+                Ok(Bytecode::LegacyAnalyzed(analyzed.into()))
             }
             1 => {
                 let eip7702 = Eip7702Bytecode::decode_value(data)?;
-                Ok(Bytecode::Eip7702(eip7702))
+                Ok(Bytecode::Eip7702(eip7702.into()))
             }
             _ => Err(DeserError::String(format!("Invalid Bytecode type value: {}. Max is 1.", ty))),
         }

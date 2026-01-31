@@ -134,11 +134,8 @@ pub trait DualKeyTraverse<E: HotKvReadError> {
     ///
     /// This is more efficient than [`Self::iter()`] as it avoids cloning k1 for
     /// every entry within the same k1 group. The iterator yields
-    /// [`DualKeyItem::NewK1`] when k1 changes and [`DualKeyItem::SameK1`] for
+    /// `DualKeyItem::NewK1` when k1 changes and `DualKeyItem::SameK1` for
     /// subsequent entries with the same k1.
-    ///
-    /// Backends implement this natively to leverage efficient "new key"
-    /// notifications from the underlying database.
     ///
     /// [`DualKeyItem`]: super::DualKeyItem
     fn iter_items(&mut self) -> Result<impl Iterator<Item = Result<RawDualKeyItem<'_>, E>> + '_, E>

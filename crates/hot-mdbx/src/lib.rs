@@ -91,7 +91,7 @@ pub const TERABYTE: usize = GIGABYTE * 1024;
 const DEFAULT_MAX_READERS: u64 = 32_000;
 
 /// Space that a read-only transaction can occupy until the warning is emitted.
-/// See [`signet_mdbx::EnvironmentBuilder::set_handle_slow_readers`] for more
+/// See [`signet_libmdbx::EnvironmentBuilder::set_handle_slow_readers`] for more
 /// information.
 const MAX_SAFE_READER_SPACE: usize = 10 * GIGABYTE;
 
