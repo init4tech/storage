@@ -28,7 +28,12 @@ pub enum HistoryError<E: std::error::Error> {
         got: B256,
     },
 
-    /// Empty header range provided to a method that requires at least one header.
+    /// Invoked `load_genesis` on a non-empty database.
+    #[error("cannot initialize genesis on a non-empty database")]
+    DbNotEmpty,
+
+    /// Empty header range provided to a method that requires at least one
+    /// header.
     #[error("empty header range provided")]
     EmptyRange,
 
@@ -36,7 +41,7 @@ pub enum HistoryError<E: std::error::Error> {
     #[error("{0}")]
     Db(#[from] E),
 
-    /// Integer List
+    /// Integer List error.
     #[error(transparent)]
     IntList(IntegerListError),
 }

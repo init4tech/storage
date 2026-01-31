@@ -3,9 +3,13 @@ use crate::{
     tables,
 };
 use ahash::AHashSet;
-use alloy::primitives::{Address, BlockNumber, U256, address};
-use signet_storage_types::{BlockNumberList, SealedHeader};
-use trevm::revm::database::BundleState;
+use alloy::{
+    consensus::Sealable,
+    genesis::{Genesis, GenesisAccount},
+    primitives::{Address, BlockNumber, U256, address},
+};
+use signet_storage_types::{Account, BlockNumberList, EthereumHardfork, SealedHeader};
+use trevm::revm::{database::BundleState, state::Bytecode};
 
 /// Maximum address value (all bits set to 1).
 const ADDRESS_MAX: Address = address!("0xffffffffffffffffffffffffffffffffffffffff");
@@ -220,6 +224,53 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
         }
         self.traverse_mut::<tables::Headers>()?.delete_range_inclusive(first_block..=last_block)?;
 
+        Ok(())
+    }
+
+    /// Load genesis data into the database.
+    ///
+    /// This operation is only valid on an empty database.
+    fn laod_genesis(
+        &self,
+        genesis: &Genesis,
+        genesis_hardforks: &EthereumHardfork,
+    ) -> Result<(), HistoryError<Self::Error>> {
+        // Check that the database is empty
+        if self.get_chain_tip().map_err(HistoryError::Db)?.is_some() {
+            return Err(HistoryError::DbNotEmpty);
+        }
+        let header = signet_storage_types::genesis_header(genesis, genesis_hardforks).seal_slow();
+        self.append_blocks(&[(header, BundleState::default())])?;
+
+        // For each account in the genesis allocation, insert account and
+        // storage state
+        for (address, account) in genesis.alloc.iter() {
+            let GenesisAccount { nonce, balance, code, storage, .. } = account;
+
+            // Insert bytecode if present
+            let bytecode_hash = if let Some(code_bytes) = code {
+                let hash = alloy::primitives::keccak256(code_bytes);
+                self.put_bytecode(&hash, &Bytecode::new_raw(code_bytes.clone()))?;
+                Some(hash)
+            } else {
+                None
+            };
+
+            // Insert account state
+            self.put_account(
+                &address,
+                &Account { nonce: nonce.unwrap_or_default(), balance: *balance, bytecode_hash },
+            )?;
+
+            // Insert storage entries
+            for (slot, value) in storage.iter().flatten() {
+                self.put_storage(
+                    address,
+                    &U256::from_be_bytes(**slot),
+                    &U256::from_be_bytes(**value),
+                )?;
+            }
+        }
         Ok(())
     }
 }

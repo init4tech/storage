@@ -30,6 +30,9 @@ pub use int_list::{BlockNumberList, IntegerList, IntegerListError};
 mod sharded;
 pub use sharded::ShardedKey;
 
+mod util;
+pub use util::{EthereumHardfork, genesis_header};
+
 use ::alloy::consensus::{Header, Sealed};
 
 /// A sealed header type.
