@@ -613,7 +613,7 @@ mod tests {
                 storage,
                 status: trevm::revm::state::AccountStatus::Touched,
                 transaction_id: 0,
-                original_info: Box::new(Default::default()),
+                original_info: Box::default(),
             };
 
             changes.insert(address, revm_account);
