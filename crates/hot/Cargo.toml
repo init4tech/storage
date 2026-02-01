@@ -26,6 +26,8 @@ rayon.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+signet-hot = { path = ".", features = ["test-utils"] }
+serde_json = "1.0"
 
 [features]
 default = []

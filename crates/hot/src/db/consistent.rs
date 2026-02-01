@@ -6,7 +6,7 @@ use ahash::AHashSet;
 use alloy::{
     consensus::Sealable,
     genesis::{Genesis, GenesisAccount},
-    primitives::{Address, BlockNumber, U256, address},
+    primitives::{Address, B256, BlockNumber, U256, address},
 };
 use signet_storage_types::{Account, BlockNumberList, EthereumHardfork, SealedHeader};
 use trevm::revm::{database::BundleState, state::Bytecode};
@@ -230,7 +230,7 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
     /// Load genesis data into the database.
     ///
     /// This operation is only valid on an empty database.
-    fn laod_genesis(
+    fn load_genesis(
         &self,
         genesis: &Genesis,
         genesis_hardforks: &EthereumHardfork,
@@ -239,39 +239,60 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
         if self.get_chain_tip().map_err(HistoryError::Db)?.is_some() {
             return Err(HistoryError::DbNotEmpty);
         }
+
+        // Seal the genesis header, record its number, and create a blocknumber
+        // list.
         let header = signet_storage_types::genesis_header(genesis, genesis_hardforks).seal_slow();
+        let genesis_number = header.number;
+        let genesis_history = BlockNumberList::new_pre_sorted([genesis_number]);
+
+        // Append the header, with empty state
         self.append_blocks(&[(header, BundleState::default())])?;
 
-        // For each account in the genesis allocation, insert account and
-        // storage state
-        for (address, account) in genesis.alloc.iter() {
+        // Keep track of written bytecode hashes to avoid duplicates.
+        let mut written_bytecode_hashes: AHashSet<B256> = AHashSet::new();
+
+        // For each account in the genesis allocation, append account.
+        // The accounts are pre-sorted by the BTreeMap in Genesis.
+        genesis.alloc.iter().try_for_each(|(address, account)| {
             let GenesisAccount { nonce, balance, code, storage, .. } = account;
 
-            // Insert bytecode if present
-            let bytecode_hash = if let Some(code_bytes) = code {
-                let hash = alloy::primitives::keccak256(code_bytes);
-                self.put_bytecode(&hash, &Bytecode::new_raw(code_bytes.clone()))?;
-                Some(hash)
-            } else {
-                None
-            };
+            // Insert bytecode if present. Check against the set to avoid
+            // duplicate writes. We still have to compute the hash though.
+            let bytecode_hash = code
+                .as_ref()
+                .map(|code_bytes| -> Result<_, HistoryError<Self::Error>> {
+                    let hash = alloy::primitives::keccak256(code_bytes);
+                    // Short-circuit if already written
+                    if !written_bytecode_hashes.insert(hash) {
+                        return Ok(hash);
+                    }
+                    self.put_bytecode(&hash, &Bytecode::new_raw(code_bytes.clone()))?;
+                    Ok(hash)
+                })
+                .transpose()?;
 
-            // Insert account state
-            self.put_account(
-                &address,
+            // Append the account.
+            self.append_account(
+                address,
                 &Account { nonce: nonce.unwrap_or_default(), balance: *balance, bytecode_hash },
             )?;
 
-            // Insert storage entries
-            for (slot, value) in storage.iter().flatten() {
-                self.put_storage(
-                    address,
-                    &U256::from_be_bytes(**slot),
-                    &U256::from_be_bytes(**value),
-                )?;
-            }
-        }
-        Ok(())
+            // Record account history at genesis
+            self.write_account_history(address, u64::MAX, &genesis_history)?;
+
+            // Insert storage entries and history
+            storage.iter().flatten().try_for_each(|(slot, value)| {
+                let slot = U256::from_be_bytes(**slot);
+                // We can append directly since the slots are sorted and the
+                // db is empty.
+                self.append_storage(address, &slot, &U256::from_be_bytes(**value))?;
+                // Record storage history at genesis
+                self.write_storage_history(address, slot, u64::MAX, &genesis_history)?;
+                Ok::<(), HistoryError<Self::Error>>(())
+            })?;
+            Ok(())
+        })
     }
 }
 
