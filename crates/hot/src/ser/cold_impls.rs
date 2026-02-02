@@ -210,7 +210,7 @@ fn decode_transact(data: &[u8]) -> Result<Transact, DeserError> {
 // Note: Enter does NOT have a token field
 // ============================================================================
 
-fn encoded_size_enter(_e: &Enter) -> usize {
+const fn encoded_size_enter(_e: &Enter) -> usize {
     // rollupChainId: 32 bytes
     // rollupRecipient: 20 bytes
     // amount: 32 bytes
@@ -242,7 +242,7 @@ fn decode_enter(data: &[u8]) -> Result<Enter, DeserError> {
 //                    rollupRecipient (Address), amount (U256)
 // ============================================================================
 
-fn encoded_size_enter_token(_e: &EnterToken) -> usize {
+const fn encoded_size_enter_token(_e: &EnterToken) -> usize {
     // rollupChainId: 32 bytes
     // token: 20 bytes
     // rollupRecipient: 20 bytes
