@@ -67,9 +67,26 @@ pub trait UnsafeDbWrite: HotKvWrite + super::sealed::Sealed {
         self.queue_put::<tables::PlainAccountState>(address, account)
     }
 
+    /// Append an account by its address. This should generally only be used
+    /// when initializing the database (e.g., from genesis).
+    fn append_account(&self, address: &Address, account: &Account) -> Result<(), Self::Error> {
+        self.queue_append::<tables::PlainAccountState>(address, account)
+    }
+
     /// Write a storage entry by its address and key.
     fn put_storage(&self, address: &Address, key: &U256, entry: &U256) -> Result<(), Self::Error> {
         self.queue_put_dual::<tables::PlainStorageState>(address, key, entry)
+    }
+
+    /// Append a storage entry by its address and key. This should generally
+    /// only be used when initializing the database (e.g., from genesis).
+    fn append_storage(
+        &self,
+        address: &Address,
+        key: &U256,
+        entry: &U256,
+    ) -> Result<(), Self::Error> {
+        self.queue_append_dual::<tables::PlainStorageState>(address, key, entry)
     }
 
     /// Write a sealed block header (header + number).
