@@ -1,4 +1,4 @@
-//! MDBX table definitions for cold storage.
+//! MDBX table definitions and backend for cold storage.
 //!
 //! This crate provides table definitions for storing historical blockchain data
 //! in MDBX. It defines 8 tables:
@@ -19,6 +19,12 @@
 //! ## Metadata Tables
 //!
 //! - [`ColdMetadata`]: Storage metadata (latest block, finalized, safe, earliest).
+//!
+//! ## Backend Implementation
+//!
+//! When the `backend` feature is enabled, this crate also provides
+//! [`MdbxColdBackend`], an MDBX-based implementation of the [`signet_cold::ColdStorage`]
+//! trait.
 
 #![warn(
     missing_copy_implementations,
@@ -40,3 +46,11 @@ pub use tables::{
     ColdBlockHashIndex, ColdHeaders, ColdMetadata, ColdReceipts, ColdSignetEvents,
     ColdTransactions, ColdTxHashIndex, ColdZenithHeaders, MetadataKey,
 };
+
+#[cfg(feature = "backend")]
+mod backend;
+#[cfg(feature = "backend")]
+pub use backend::MdbxColdBackend;
+
+#[cfg(feature = "backend")]
+pub use signet_hot_mdbx::{DatabaseArguments, DatabaseEnvKind};
