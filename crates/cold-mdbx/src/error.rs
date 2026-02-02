@@ -18,3 +18,10 @@ pub enum MdbxColdError {
     #[error("database is read-only")]
     ReadOnly,
 }
+
+#[cfg(feature = "backend")]
+impl From<MdbxColdError> for signet_cold::ColdStorageError {
+    fn from(error: MdbxColdError) -> Self {
+        Self::Backend(Box::new(error))
+    }
+}
