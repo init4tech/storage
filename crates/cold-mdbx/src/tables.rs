@@ -257,16 +257,16 @@ mod tests {
     #[test]
     fn test_int_key_tables() {
         // Tables with int_key should have INT_KEY = true
-        assert!(ColdHeaders::INT_KEY);
-        assert!(ColdTransactions::INT_KEY);
-        assert!(ColdReceipts::INT_KEY);
-        assert!(ColdSignetEvents::INT_KEY);
-        assert!(ColdZenithHeaders::INT_KEY);
+        const { assert!(ColdHeaders::INT_KEY) };
+        const { assert!(ColdTransactions::INT_KEY) };
+        const { assert!(ColdReceipts::INT_KEY) };
+        const { assert!(ColdSignetEvents::INT_KEY) };
+        const { assert!(ColdZenithHeaders::INT_KEY) };
 
         // Non-int_key tables should have INT_KEY = false
-        assert!(!ColdBlockHashIndex::INT_KEY);
-        assert!(!ColdTxHashIndex::INT_KEY);
-        assert!(!ColdMetadata::INT_KEY);
+        const { assert!(!ColdBlockHashIndex::INT_KEY) };
+        const { assert!(!ColdTxHashIndex::INT_KEY) };
+        const { assert!(!ColdMetadata::INT_KEY) };
     }
 
     #[test]
