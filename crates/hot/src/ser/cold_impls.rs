@@ -418,10 +418,7 @@ fn decode_log(data: &[u8]) -> Result<(Log, usize), DeserError> {
     let topics_start = 21;
     let topics_end = topics_start + topics_len * 32;
     if data.len() < topics_end + 4 {
-        return Err(DeserError::InsufficientData {
-            needed: topics_end + 4,
-            available: data.len(),
-        });
+        return Err(DeserError::InsufficientData { needed: topics_end + 4, available: data.len() });
     }
 
     let mut topics = Vec::with_capacity(topics_len);
