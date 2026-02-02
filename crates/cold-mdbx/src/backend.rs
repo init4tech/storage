@@ -565,7 +565,7 @@ impl ColdStorage for MdbxColdBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-utils"))]
 mod tests {
     use super::*;
     use signet_cold::conformance::conformance;

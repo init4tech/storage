@@ -10,7 +10,6 @@ pub enum MdbxColdError {
     Ser(#[from] DeserError),
 
     /// An MDBX error occurred.
-    #[cfg(feature = "backend")]
     #[error("mdbx error: {0}")]
     Mdbx(#[from] signet_hot_mdbx::MdbxError),
 
@@ -19,7 +18,6 @@ pub enum MdbxColdError {
     ReadOnly,
 }
 
-#[cfg(feature = "backend")]
 impl From<MdbxColdError> for signet_cold::ColdStorageError {
     fn from(error: MdbxColdError) -> Self {
         Self::Backend(Box::new(error))
