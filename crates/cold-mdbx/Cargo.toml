@@ -1,0 +1,26 @@
+[package]
+name = "signet-cold-mdbx"
+description = "MDBX table definitions for signet-cold storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["mdbx", "storage", "cold-storage", "blockchain"]
+categories = ["database-implementations"]
+
+[dependencies]
+alloy.workspace = true
+signet-hot.workspace = true
+signet-storage-types.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+signet-hot-mdbx = { workspace = true, features = ["test-utils"] }
+signet-libmdbx.workspace = true
+tempfile.workspace = true
+
+[features]
+default = []

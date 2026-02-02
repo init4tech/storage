@@ -13,6 +13,7 @@ categories = ["database-implementations"]
 
 [dependencies]
 signet-storage-types.workspace = true
+signet-zenith.workspace = true
 
 trevm.workspace = true
 
