@@ -34,8 +34,8 @@
 //!     .receipts(receipts)
 //!     .build();
 //!
-//! // Write to both storages
-//! storage.append_blocks(&[block]).await?;
+//! // Write to both storages (takes ownership)
+//! storage.append_blocks(vec![block])?;
 //! ```
 
 #![warn(
@@ -58,5 +58,8 @@ pub use unified::UnifiedStorage;
 
 // Re-export key types for convenience
 pub use signet_cold::{ColdStorageError, ColdStorageHandle};
-pub use signet_hot::{HistoryError, HistoryRead, HistoryWrite, HotKv, model::HotKvRead};
+pub use signet_hot::{
+    HistoryError, HistoryRead, HistoryWrite, HotKv,
+    model::{HotKvRead, RevmRead, RevmWrite},
+};
 pub use signet_storage_types::{ExecutedBlock, ExecutedBlockBuilder};

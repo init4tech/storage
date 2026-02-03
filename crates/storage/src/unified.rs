@@ -9,7 +9,7 @@ use alloy::primitives::BlockNumber;
 use signet_cold::{BlockData, ColdStorageError, ColdStorageHandle, ColdStorageReadHandle};
 use signet_hot::{
     HistoryError, HistoryRead, HistoryWrite, HotKv,
-    model::{HotKvError, HotKvWrite},
+    model::{HotKvError, HotKvWrite, RevmRead},
 };
 use signet_storage_types::ExecutedBlock;
 
@@ -81,8 +81,8 @@ fn map_history_error<E: std::error::Error + Send + Sync + 'static>(
 ///
 /// let storage = UnifiedStorage::new(hot_db, cold_handle);
 ///
-/// // Append executed blocks
-/// storage.append_blocks(&blocks)?;
+/// // Append executed blocks (takes ownership)
+/// storage.append_blocks(blocks)?;
 ///
 /// // Handle reorgs
 /// storage.unwind_above(reorg_block)?;
@@ -126,6 +126,18 @@ impl<H: HotKv> UnifiedStorage<H> {
         self.hot.reader().map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))
     }
 
+    /// Create a revm-compatible read-only database adapter.
+    ///
+    /// The returned [`RevmRead`] implements revm's `Database` and `DatabaseRef`
+    /// traits, allowing it to be used directly with revm for EVM execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction cannot be created.
+    pub fn revm_reader(&self) -> StorageResult<RevmRead<H::RoTx>> {
+        self.hot.revm_reader().map_err(|e| StorageError::Hot(HistoryError::Db(e)))
+    }
+
     /// Append executed blocks to both hot and cold storage.
     ///
     /// This method:
@@ -145,15 +157,15 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// [`Backpressure`]: signet_cold::ColdStorageError::Backpressure
     /// [`TaskTerminated`]: signet_cold::ColdStorageError::TaskTerminated
-    pub fn append_blocks(&self, blocks: &[ExecutedBlock]) -> StorageResult<()> {
+    pub fn append_blocks(&self, blocks: Vec<ExecutedBlock>) -> StorageResult<()> {
         if blocks.is_empty() {
             return Ok(());
         }
 
-        // 1. Write to hot storage synchronously
-        self.write_hot(blocks)?;
+        // 1. Write to hot storage (borrows blocks)
+        self.write_hot(&blocks)?;
 
-        // 2. Dispatch to cold storage synchronously (non-blocking)
+        // 2. Dispatch to cold storage (consumes blocks)
         self.dispatch_cold(blocks)?;
 
         Ok(())
@@ -179,15 +191,17 @@ impl<H: HotKv> UnifiedStorage<H> {
     }
 
     /// Dispatch blocks to cold storage synchronously (non-blocking).
-    fn dispatch_cold(&self, blocks: &[ExecutedBlock]) -> StorageResult<()> {
+    ///
+    /// Consumes the blocks to avoid cloning.
+    fn dispatch_cold(&self, blocks: Vec<ExecutedBlock>) -> StorageResult<()> {
         let cold_data: Vec<_> = blocks
-            .iter()
+            .into_iter()
             .map(|b| {
                 BlockData::new(
-                    b.header.clone().into_inner(),
-                    b.transactions.clone(),
-                    b.receipts.clone(),
-                    b.signet_events.clone(),
+                    b.header.into_inner(),
+                    b.transactions,
+                    b.receipts,
+                    b.signet_events,
                     b.zenith_header,
                 )
             })
@@ -258,18 +272,20 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// Use this to recover cold storage after failures. The caller is
     /// responsible for fetching the missing block data.
     ///
+    /// Consumes the blocks to avoid cloning.
+    ///
     /// # Errors
     ///
     /// Returns an error if cold storage write fails.
-    pub async fn replay_to_cold(&self, blocks: &[ExecutedBlock]) -> Result<(), ColdStorageError> {
+    pub async fn replay_to_cold(&self, blocks: Vec<ExecutedBlock>) -> Result<(), ColdStorageError> {
         let cold_data: Vec<_> = blocks
-            .iter()
+            .into_iter()
             .map(|b| {
                 BlockData::new(
-                    b.header.clone().into_inner(),
-                    b.transactions.clone(),
-                    b.receipts.clone(),
-                    b.signet_events.clone(),
+                    b.header.into_inner(),
+                    b.transactions,
+                    b.receipts,
+                    b.signet_events,
                     b.zenith_header,
                 )
             })
