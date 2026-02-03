@@ -272,9 +272,7 @@ impl ColdStorageHandle {
     ///
     /// When backpressure occurs, hot storage already contains the data.
     /// Callers may:
-    /// - Accept the gap and use [`cold_lag`](crate::UnifiedStorage::cold_lag)
-    ///   later to detect and repair via
-    ///   [`replay_to_cold`](crate::UnifiedStorage::replay_to_cold)
+    /// - Accept the gap and detect/repair later (hot storage is authoritative)
     /// - Retry with exponential backoff (not recommended in hot path)
     /// - Increase channel capacity at construction time
     ///

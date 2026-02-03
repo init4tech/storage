@@ -33,9 +33,9 @@ pub enum ColdStorageError {
     ///   and all subsequent dispatches will fail until the task is restarted.
     ///
     /// Callers cannot distinguish between these cases from the error alone.
-    /// Use [`ColdStorageHandle::get_latest_block`] to probe task health: a
+    /// Use `ColdStorageHandle::get_latest_block` to probe task health: a
     /// response indicates the task is alive (backpressure), while
-    /// [`ColdStorageError::Cancelled`] indicates task failure.
+    /// [`Cancelled`](Self::Cancelled) indicates task failure.
     #[error("failed to send request to cold storage task")]
     SendFailed,
 }
