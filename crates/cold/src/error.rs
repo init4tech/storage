@@ -18,26 +18,28 @@ pub enum ColdStorageError {
     #[error("Task cancelled")]
     Cancelled,
 
-    /// Failed to send request to cold storage task.
+    /// The cold storage task cannot keep up with incoming requests.
     ///
-    /// This error occurs in two scenarios:
+    /// The channel is full, indicating transient backpressure. The cold storage
+    /// task is still running but processing requests slower than they arrive.
     ///
-    /// - **Backpressure**: The channel is full because the cold storage task
-    ///   cannot keep up with incoming requests. This is typically transient
-    ///   and indicates the caller is producing faster than cold storage can
-    ///   consume. Callers may retry after a delay or accept data loss in cold
-    ///   storage (hot storage remains authoritative).
+    /// Callers may:
+    /// - Accept the gap (hot storage is authoritative) and repair later
+    /// - Retry after a delay with exponential backoff
+    /// - Increase channel capacity at construction time
+    #[error("cold storage backpressure: channel full")]
+    Backpressure,
+
+    /// The cold storage task has terminated.
     ///
-    /// - **Task failure**: The channel is closed because the cold storage task
-    ///   has terminated (panic, cancellation, or shutdown). This is persistent
-    ///   and all subsequent dispatches will fail until the task is restarted.
+    /// The channel is closed because the task has stopped (panic, cancellation,
+    /// or shutdown). This is persistent: all subsequent dispatches will fail
+    /// until the task is restarted.
     ///
-    /// Callers cannot distinguish between these cases from the error alone.
-    /// Use `ColdStorageHandle::get_latest_block` to probe task health: a
-    /// response indicates the task is alive (backpressure), while
-    /// [`Cancelled`](Self::Cancelled) indicates task failure.
-    #[error("failed to send request to cold storage task")]
-    SendFailed,
+    /// Hot storage remains consistent and authoritative. Cold storage can be
+    /// replayed from hot storage after task recovery.
+    #[error("cold storage task terminated: channel closed")]
+    TaskTerminated,
 }
 
 impl ColdStorageError {

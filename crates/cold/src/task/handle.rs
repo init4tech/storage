@@ -264,29 +264,23 @@ impl ColdStorageHandle {
     /// immediately without waiting for the write to complete. The write
     /// result is discarded.
     ///
-    /// # Backpressure
+    /// # Errors
     ///
-    /// Returns [`ColdStorageError::SendFailed`] if the channel is full
-    /// (backpressure) or closed (task terminated). This is non-blocking:
-    /// callers are never stalled waiting for cold storage.
+    /// - [`ColdStorageError::Backpressure`]: Channel is full. The task is alive
+    ///   but cannot keep up. Transient; may retry or accept the gap.
+    /// - [`ColdStorageError::TaskTerminated`]: Channel is closed. The task has
+    ///   stopped and must be restarted.
     ///
-    /// When backpressure occurs, hot storage already contains the data.
-    /// Callers may:
-    /// - Accept the gap and detect/repair later (hot storage is authoritative)
-    /// - Retry with exponential backoff (not recommended in hot path)
-    /// - Increase channel capacity at construction time
-    ///
-    /// # Task Failure
-    ///
-    /// If the cold storage task has crashed, all dispatches fail with
-    /// `SendFailed`. The task must be restarted to recover. Hot storage
-    /// remains consistent and authoritative; cold storage can be replayed
-    /// from hot storage after task recovery.
+    /// In both cases, hot storage already contains the data and remains
+    /// authoritative.
     pub fn dispatch_append_blocks(&self, data: Vec<BlockData>) -> ColdResult<()> {
         let (resp, _rx) = oneshot::channel();
-        self.sender
-            .try_send(ColdWriteRequest::AppendBlocks { data, resp }.into())
-            .map_err(|_| ColdStorageError::SendFailed)
+        self.sender.try_send(ColdWriteRequest::AppendBlocks { data, resp }.into()).map_err(|e| {
+            match e {
+                mpsc::error::TrySendError::Full(_) => ColdStorageError::Backpressure,
+                mpsc::error::TrySendError::Closed(_) => ColdStorageError::TaskTerminated,
+            }
+        })
     }
 
     /// Dispatch truncate without waiting for response (non-blocking).
@@ -295,15 +289,18 @@ impl ColdStorageHandle {
     /// immediately without waiting for the truncate to complete. The result
     /// is discarded.
     ///
-    /// # Backpressure and Task Failure
+    /// # Errors
     ///
-    /// Same semantics as [`dispatch_append_blocks`](Self::dispatch_append_blocks).
-    /// If cold storage falls behind during a reorg, it may temporarily contain
+    /// Same as [`dispatch_append_blocks`](Self::dispatch_append_blocks). If
+    /// cold storage falls behind during a reorg, it may temporarily contain
     /// stale data until the truncate is processed or replayed.
     pub fn dispatch_truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
         let (resp, _rx) = oneshot::channel();
-        self.sender
-            .try_send(ColdWriteRequest::TruncateAbove { block, resp }.into())
-            .map_err(|_| ColdStorageError::SendFailed)
+        self.sender.try_send(ColdWriteRequest::TruncateAbove { block, resp }.into()).map_err(|e| {
+            match e {
+                mpsc::error::TrySendError::Full(_) => ColdStorageError::Backpressure,
+                mpsc::error::TrySendError::Closed(_) => ColdStorageError::TaskTerminated,
+            }
+        })
     }
 }

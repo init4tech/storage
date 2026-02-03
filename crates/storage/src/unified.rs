@@ -49,9 +49,13 @@ fn map_history_error<E: std::error::Error + Send + Sync + 'static>(
 ///
 /// # Backpressure and Failure Recovery
 ///
-/// Cold storage dispatch uses non-blocking sends. When the cold storage task
-/// cannot keep up (backpressure) or has failed, writes return
-/// [`ColdStorageError::SendFailed`].
+/// Cold storage dispatch uses non-blocking sends. Two distinct errors indicate
+/// dispatch failure:
+///
+/// - [`ColdStorageError::Backpressure`]: Channel full. The task is alive but
+///   cannot keep up. Transient; may resolve on its own or with retry.
+/// - [`ColdStorageError::TaskTerminated`]: Channel closed. The task has stopped
+///   and must be restarted. Persistent until recovery.
 ///
 /// **Important**: Hot storage is always authoritative. When cold dispatch fails:
 ///
@@ -60,21 +64,15 @@ fn map_history_error<E: std::error::Error + Send + Sync + 'static>(
 /// 3. Use [`cold_lag`](Self::cold_lag) to detect gaps between hot and cold
 /// 4. Use [`replay_to_cold`](Self::replay_to_cold) to recover cold storage
 ///
-/// Callers should decide based on their requirements:
+/// Callers should decide based on their requirements and the error type:
 ///
-/// - **Tolerate gaps**: Log the error and continue. Periodically check
-///   `cold_lag()` and replay missing blocks during maintenance windows.
-/// - **Require consistency**: Treat `SendFailed` as fatal and halt until
-///   cold storage is recovered.
+/// - **Backpressure**: Log and continue, or retry with backoff. The task will
+///   catch up eventually. Use `cold_lag()` to monitor.
+/// - **TaskTerminated**: The task must be restarted. Halt or switch to degraded
+///   mode until recovery, then replay missing blocks.
 ///
-/// # Task Failure vs Backpressure
-///
-/// `SendFailed` does not distinguish between transient backpressure and
-/// permanent task failure. To diagnose:
-///
-/// - Call an async method like [`ColdStorageHandle::get_latest_block`]
-/// - Success indicates the task is alive (was backpressure)
-/// - [`ColdStorageError::Cancelled`] indicates task termination
+/// [`ColdStorageError::Backpressure`]: signet_cold::ColdStorageError::Backpressure
+/// [`ColdStorageError::TaskTerminated`]: signet_cold::ColdStorageError::TaskTerminated
 ///
 /// # Example
 ///
@@ -129,12 +127,16 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// # Errors
     ///
     /// - [`StorageError::Hot`]: Hot storage write failed. No data was written.
-    /// - [`StorageError::Cold`] with [`ColdStorageError::SendFailed`]: Hot storage
-    ///   succeeded but cold dispatch failed (backpressure or task failure). The
-    ///   data is safely in hot storage; cold storage can be recovered later via
-    ///   [`replay_to_cold`](Self::replay_to_cold).
+    /// - [`StorageError::Cold`]: Hot storage succeeded but cold dispatch failed.
+    ///   Check the inner [`ColdStorageError`] variant:
+    ///   - [`Backpressure`]: Task alive but channel full. May retry or continue.
+    ///   - [`TaskTerminated`]: Task stopped. Requires restart.
     ///
-    /// [`ColdStorageError::SendFailed`]: signet_cold::ColdStorageError::SendFailed
+    /// In both cold error cases, data is safely in hot storage and can be
+    /// recovered later via [`replay_to_cold`](Self::replay_to_cold).
+    ///
+    /// [`Backpressure`]: signet_cold::ColdStorageError::Backpressure
+    /// [`TaskTerminated`]: signet_cold::ColdStorageError::TaskTerminated
     pub fn append_blocks(&self, blocks: &[ExecutedBlock]) -> StorageResult<()> {
         if blocks.is_empty() {
             return Ok(());
@@ -195,13 +197,16 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// # Errors
     ///
     /// - [`StorageError::Hot`]: Hot storage unwind failed. State is unchanged.
-    /// - [`StorageError::Cold`] with [`ColdStorageError::SendFailed`]: Hot storage
-    ///   unwound successfully but cold truncate dispatch failed. Cold storage may
-    ///   temporarily contain stale blocks until the truncate is replayed. This is
-    ///   safe: queries to cold storage for unwound blocks return stale data, but
-    ///   hot storage is authoritative.
+    /// - [`StorageError::Cold`]: Hot storage unwound but cold truncate dispatch
+    ///   failed. Check the inner [`ColdStorageError`] variant:
+    ///   - [`Backpressure`]: Task alive but channel full.
+    ///   - [`TaskTerminated`]: Task stopped.
     ///
-    /// [`ColdStorageError::SendFailed`]: signet_cold::ColdStorageError::SendFailed
+    /// Cold storage may temporarily contain stale blocks until the truncate is
+    /// replayed. This is safe: hot storage is authoritative.
+    ///
+    /// [`Backpressure`]: signet_cold::ColdStorageError::Backpressure
+    /// [`TaskTerminated`]: signet_cold::ColdStorageError::TaskTerminated
     pub fn unwind_above(&self, block: BlockNumber) -> StorageResult<()> {
         // 1. Unwind hot storage synchronously
         let writer = self
