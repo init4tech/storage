@@ -260,7 +260,30 @@ impl ColdStorageHandle {
 
     /// Dispatch append blocks without waiting for response (non-blocking).
     ///
-    /// Returns error if the channel is full or closed. The response is ignored.
+    /// Unlike [`append_blocks`](Self::append_blocks), this method returns
+    /// immediately without waiting for the write to complete. The write
+    /// result is discarded.
+    ///
+    /// # Backpressure
+    ///
+    /// Returns [`ColdStorageError::SendFailed`] if the channel is full
+    /// (backpressure) or closed (task terminated). This is non-blocking:
+    /// callers are never stalled waiting for cold storage.
+    ///
+    /// When backpressure occurs, hot storage already contains the data.
+    /// Callers may:
+    /// - Accept the gap and use [`cold_lag`](crate::UnifiedStorage::cold_lag)
+    ///   later to detect and repair via
+    ///   [`replay_to_cold`](crate::UnifiedStorage::replay_to_cold)
+    /// - Retry with exponential backoff (not recommended in hot path)
+    /// - Increase channel capacity at construction time
+    ///
+    /// # Task Failure
+    ///
+    /// If the cold storage task has crashed, all dispatches fail with
+    /// `SendFailed`. The task must be restarted to recover. Hot storage
+    /// remains consistent and authoritative; cold storage can be replayed
+    /// from hot storage after task recovery.
     pub fn dispatch_append_blocks(&self, data: Vec<BlockData>) -> ColdResult<()> {
         let (resp, _rx) = oneshot::channel();
         self.sender
@@ -270,7 +293,15 @@ impl ColdStorageHandle {
 
     /// Dispatch truncate without waiting for response (non-blocking).
     ///
-    /// Returns error if the channel is full or closed. The response is ignored.
+    /// Unlike [`truncate_above`](Self::truncate_above), this method returns
+    /// immediately without waiting for the truncate to complete. The result
+    /// is discarded.
+    ///
+    /// # Backpressure and Task Failure
+    ///
+    /// Same semantics as [`dispatch_append_blocks`](Self::dispatch_append_blocks).
+    /// If cold storage falls behind during a reorg, it may temporarily contain
+    /// stale data until the truncate is processed or replayed.
     pub fn dispatch_truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
         let (resp, _rx) = oneshot::channel();
         self.sender

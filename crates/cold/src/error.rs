@@ -18,7 +18,24 @@ pub enum ColdStorageError {
     #[error("Task cancelled")]
     Cancelled,
 
-    /// Failed to send request to cold storage task (channel full or closed).
+    /// Failed to send request to cold storage task.
+    ///
+    /// This error occurs in two scenarios:
+    ///
+    /// - **Backpressure**: The channel is full because the cold storage task
+    ///   cannot keep up with incoming requests. This is typically transient
+    ///   and indicates the caller is producing faster than cold storage can
+    ///   consume. Callers may retry after a delay or accept data loss in cold
+    ///   storage (hot storage remains authoritative).
+    ///
+    /// - **Task failure**: The channel is closed because the cold storage task
+    ///   has terminated (panic, cancellation, or shutdown). This is persistent
+    ///   and all subsequent dispatches will fail until the task is restarted.
+    ///
+    /// Callers cannot distinguish between these cases from the error alone.
+    /// Use [`ColdStorageHandle::get_latest_block`] to probe task health: a
+    /// response indicates the task is alive (backpressure), while
+    /// [`ColdStorageError::Cancelled`] indicates task failure.
     #[error("failed to send request to cold storage task")]
     SendFailed,
 }

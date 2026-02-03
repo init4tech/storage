@@ -47,6 +47,35 @@ fn map_history_error<E: std::error::Error + Send + Sync + 'static>(
 /// Both hot storage and cold storage errors are returned. Cold storage dispatch
 /// fails immediately if the channel is full (non-blocking).
 ///
+/// # Backpressure and Failure Recovery
+///
+/// Cold storage dispatch uses non-blocking sends. When the cold storage task
+/// cannot keep up (backpressure) or has failed, writes return
+/// [`ColdStorageError::SendFailed`].
+///
+/// **Important**: Hot storage is always authoritative. When cold dispatch fails:
+///
+/// 1. Hot storage already contains the committed data
+/// 2. Cold storage may be behind (backpressure) or unavailable (task failure)
+/// 3. Use [`cold_lag`](Self::cold_lag) to detect gaps between hot and cold
+/// 4. Use [`replay_to_cold`](Self::replay_to_cold) to recover cold storage
+///
+/// Callers should decide based on their requirements:
+///
+/// - **Tolerate gaps**: Log the error and continue. Periodically check
+///   `cold_lag()` and replay missing blocks during maintenance windows.
+/// - **Require consistency**: Treat `SendFailed` as fatal and halt until
+///   cold storage is recovered.
+///
+/// # Task Failure vs Backpressure
+///
+/// `SendFailed` does not distinguish between transient backpressure and
+/// permanent task failure. To diagnose:
+///
+/// - Call an async method like [`ColdStorageHandle::get_latest_block`]
+/// - Success indicates the task is alive (was backpressure)
+/// - [`ColdStorageError::Cancelled`] indicates task termination
+///
 /// # Example
 ///
 /// ```ignore
@@ -99,7 +128,13 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// # Errors
     ///
-    /// Returns an error if hot storage write fails or if cold storage channel is full.
+    /// - [`StorageError::Hot`]: Hot storage write failed. No data was written.
+    /// - [`StorageError::Cold`] with [`ColdStorageError::SendFailed`]: Hot storage
+    ///   succeeded but cold dispatch failed (backpressure or task failure). The
+    ///   data is safely in hot storage; cold storage can be recovered later via
+    ///   [`replay_to_cold`](Self::replay_to_cold).
+    ///
+    /// [`ColdStorageError::SendFailed`]: signet_cold::ColdStorageError::SendFailed
     pub fn append_blocks(&self, blocks: &[ExecutedBlock]) -> StorageResult<()> {
         if blocks.is_empty() {
             return Ok(());
@@ -159,7 +194,14 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// # Errors
     ///
-    /// Returns an error if hot storage unwind fails or if cold storage channel is full.
+    /// - [`StorageError::Hot`]: Hot storage unwind failed. State is unchanged.
+    /// - [`StorageError::Cold`] with [`ColdStorageError::SendFailed`]: Hot storage
+    ///   unwound successfully but cold truncate dispatch failed. Cold storage may
+    ///   temporarily contain stale blocks until the truncate is replayed. This is
+    ///   safe: queries to cold storage for unwound blocks return stale data, but
+    ///   hot storage is authoritative.
+    ///
+    /// [`ColdStorageError::SendFailed`]: signet_cold::ColdStorageError::SendFailed
     pub fn unwind_above(&self, block: BlockNumber) -> StorageResult<()> {
         // 1. Unwind hot storage synchronously
         let writer = self
