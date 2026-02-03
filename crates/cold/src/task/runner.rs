@@ -29,7 +29,7 @@ const MAX_CONCURRENT_READERS: usize = 64;
 ///
 /// # Processing Model
 ///
-/// - **Reads**: Spawned as concurrent tasks (up to [`MAX_CONCURRENT_READERS`]).
+/// - **Reads**: Spawned as concurrent tasks (up to 64 in flight).
 ///   Multiple reads can execute in parallel.
 /// - **Writes**: Processed inline (sequential). Each write completes before
 ///   the next is started, ensuring ordering.

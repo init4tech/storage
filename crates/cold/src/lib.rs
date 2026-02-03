@@ -53,8 +53,8 @@
 //!
 //! ## Recovery Procedures
 //!
-//! Use these methods on [`UnifiedStorage`](signet_storage::UnifiedStorage) to
-//! detect and recover from inconsistencies:
+//! Use these methods on `UnifiedStorage` (from `signet-storage`) to detect and
+//! recover from inconsistencies:
 //!
 //! - **`cold_lag()`**: Returns `Some(first_missing_block)` if cold is behind
 //!   hot. Returns `None` if synced.
