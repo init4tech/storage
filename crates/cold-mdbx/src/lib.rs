@@ -1,4 +1,4 @@
-//! MDBX table definitions for cold storage.
+//! MDBX table definitions and backend for cold storage.
 //!
 //! This crate provides table definitions for storing historical blockchain data
 //! in MDBX. It defines 8 tables:
@@ -40,3 +40,8 @@ pub use tables::{
     ColdBlockHashIndex, ColdHeaders, ColdMetadata, ColdReceipts, ColdSignetEvents,
     ColdTransactions, ColdTxHashIndex, ColdZenithHeaders, MetadataKey,
 };
+
+mod backend;
+pub use backend::MdbxColdBackend;
+
+pub use signet_hot_mdbx::{DatabaseArguments, DatabaseEnvKind};

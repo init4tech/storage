@@ -13,7 +13,9 @@ categories = ["database-implementations"]
 
 [dependencies]
 alloy.workspace = true
+signet-cold = { version = "0.0.1", path = "../cold" }
 signet-hot.workspace = true
+signet-hot-mdbx.workspace = true
 signet-storage-types.workspace = true
 thiserror.workspace = true
 
@@ -21,6 +23,8 @@ thiserror.workspace = true
 signet-hot-mdbx = { workspace = true, features = ["test-utils"] }
 signet-libmdbx.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [features]
 default = []
+test-utils = ["signet-cold/test-utils"]
