@@ -30,6 +30,9 @@ pub use int_list::{BlockNumberList, IntegerList, IntegerListError};
 mod sharded;
 pub use sharded::ShardedKey;
 
+mod tx_location;
+pub use tx_location::TxLocation;
+
 mod util;
 pub use util::{EthereumHardfork, genesis_header};
 

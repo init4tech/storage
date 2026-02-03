@@ -21,6 +21,7 @@
 
 mod error;
 pub use error::DeserError;
+mod cold_impls;
 mod impls;
 mod reth_impls;
 mod traits;

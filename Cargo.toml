@@ -36,8 +36,10 @@ incremental = false
 [workspace.dependencies]
 # internal
 signet-hot = { version = "0.0.1", path = "./crates/hot" }
+signet-hot-mdbx = { version = "0.0.1", path = "./crates/hot-mdbx" }
 signet-mdbx-hot = { version = "0.0.1", path = "./crates/mdbx-hot" }
 signet-cold = { version = "0.0.1", path = "./crates/cold" }
+signet-cold-mdbx = { version = "0.0.1", path = "./crates/cold-mdbx" }
 signet-storage = { version = "0.0.1", path = "./crates/storage" }
 signet-storage-types = { version = "0.0.1", path = "./crates/types" }
 

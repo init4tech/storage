@@ -65,7 +65,7 @@ bitflags! {
     }
 }
 
-/// Helper method building a [`Header`] given [`Genesis`] and [`ChainHardforks`].
+/// Helper method building a [`Header`] given [`Genesis`] and [`EthereumHardfork`].
 pub fn genesis_header(genesis: &Genesis, hardforks: &EthereumHardfork) -> Header {
     // If London is activated at genesis, we set the initial base fee as per EIP-1559.
     let base_fee_per_gas = hardforks
