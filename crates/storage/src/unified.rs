@@ -6,7 +6,7 @@
 
 use crate::{StorageError, StorageResult};
 use alloy::primitives::BlockNumber;
-use signet_cold::{BlockData, ColdStorageError, ColdStorageHandle};
+use signet_cold::{BlockData, ColdStorageError, ColdStorageHandle, ColdStorageReadHandle};
 use signet_hot::{
     HistoryError, HistoryRead, HistoryWrite, HotKv,
     model::{HotKvError, HotKvWrite},
@@ -107,6 +107,14 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// Get a reference to the cold storage handle.
     pub const fn cold(&self) -> &ColdStorageHandle {
         &self.cold
+    }
+
+    /// Get a read-only cold storage handle.
+    ///
+    /// The returned handle can only perform read operations and cannot modify
+    /// storage. Use this for components that only need to query historical data.
+    pub fn cold_reader(&self) -> ColdStorageReadHandle {
+        self.cold.reader()
     }
 
     /// Create a read-only transaction for hot storage.

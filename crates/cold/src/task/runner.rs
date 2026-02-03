@@ -1,30 +1,47 @@
 //! Cold storage task runner.
 //!
-//! The [`ColdStorageTask`] processes requests from a channel and dispatches
-//! them to the storage backend.
+//! The [`ColdStorageTask`] processes requests from channels and dispatches
+//! them to the storage backend. Reads and writes use separate channels:
+//!
+//! - **Reads**: Processed concurrently (up to 64 in flight) via spawned tasks
+//! - **Writes**: Processed sequentially (inline await) to maintain ordering
 
-use crate::{
-    ColdReadRequest, ColdStorage, ColdStorageHandle, ColdStorageRequest, ColdWriteRequest,
-};
+use crate::{ColdReadRequest, ColdStorage, ColdStorageHandle, ColdWriteRequest};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, instrument};
 
-/// Channel size for cold storage requests.
-const COLD_STORAGE_CHANNEL_SIZE: usize = 256;
+/// Channel size for cold storage read requests.
+const READ_CHANNEL_SIZE: usize = 256;
 
-/// Maximum concurrent request handlers.
-const MAX_CONCURRENT_HANDLERS: usize = 64;
+/// Channel size for cold storage write requests.
+const WRITE_CHANNEL_SIZE: usize = 256;
+
+/// Maximum concurrent read request handlers.
+const MAX_CONCURRENT_READERS: usize = 64;
 
 /// The cold storage task that processes requests.
 ///
-/// This task receives requests over a channel and dispatches them to the
-/// storage backend. It supports graceful shutdown via a cancellation token.
+/// This task receives requests over separate read and write channels and
+/// dispatches them to the storage backend. It supports graceful shutdown
+/// via a cancellation token.
+///
+/// # Processing Model
+///
+/// - **Reads**: Spawned as concurrent tasks (up to [`MAX_CONCURRENT_READERS`]).
+///   Multiple reads can execute in parallel.
+/// - **Writes**: Processed inline (sequential). Each write completes before
+///   the next is started, ensuring ordering.
+///
+/// This design prioritizes write ordering for correctness while allowing
+/// read throughput to scale with concurrency.
 pub struct ColdStorageTask<B: ColdStorage> {
     backend: Arc<B>,
-    receiver: mpsc::Receiver<ColdStorageRequest>,
+    read_receiver: mpsc::Receiver<ColdReadRequest>,
+    write_receiver: mpsc::Receiver<ColdWriteRequest>,
     cancel_token: CancellationToken,
+    /// Task tracker for concurrent read handlers only.
     task_tracker: TaskTracker,
 }
 
@@ -37,21 +54,23 @@ impl<B: ColdStorage> std::fmt::Debug for ColdStorageTask<B> {
 impl<B: ColdStorage> ColdStorageTask<B> {
     /// Create a new cold storage task and return its handle.
     pub fn new(backend: B, cancel_token: CancellationToken) -> (Self, ColdStorageHandle) {
-        let (sender, receiver) = mpsc::channel(COLD_STORAGE_CHANNEL_SIZE);
+        let (read_sender, read_receiver) = mpsc::channel(READ_CHANNEL_SIZE);
+        let (write_sender, write_receiver) = mpsc::channel(WRITE_CHANNEL_SIZE);
         let task = Self {
             backend: Arc::new(backend),
-            receiver,
+            read_receiver,
+            write_receiver,
             cancel_token,
             task_tracker: TaskTracker::new(),
         };
-        let handle = ColdStorageHandle::new(sender);
+        let handle = ColdStorageHandle::new(read_sender, write_sender);
         (task, handle)
     }
 
     /// Spawn the task and return the handle.
     ///
     /// The task will run until the cancellation token is triggered or the
-    /// channel is closed.
+    /// channels are closed.
     pub fn spawn(backend: B, cancel_token: CancellationToken) -> ColdStorageHandle {
         let (task, handle) = Self::new(backend, cancel_token);
         tokio::spawn(task.run());
@@ -65,22 +84,36 @@ impl<B: ColdStorage> ColdStorageTask<B> {
 
         loop {
             tokio::select! {
-                // Check for cancellation
+                biased;
+
+                // Check for cancellation first
                 _ = self.cancel_token.cancelled() => {
                     debug!("Cold storage task received cancellation signal");
                     break;
                 }
 
-                // Process incoming requests
-                maybe_request = self.receiver.recv() => {
-                    match maybe_request {
-                        Some(request) => {
-                            // Wait if we've hit the concurrent handler limit (backpressure)
-                            while self.task_tracker.len() >= MAX_CONCURRENT_HANDLERS {
-                                // Wait for at least one task to complete
+                // Process writes sequentially (inline await, not spawned)
+                maybe_write = self.write_receiver.recv() => {
+                    match maybe_write {
+                        Some(write_req) => {
+                            Self::handle_write(Arc::clone(&self.backend), write_req).await;
+                        }
+                        None => {
+                            debug!("Cold storage write channel closed");
+                            break;
+                        }
+                    }
+                }
+
+                // Process reads concurrently (spawned)
+                maybe_read = self.read_receiver.recv() => {
+                    match maybe_read {
+                        Some(read_req) => {
+                            // Apply backpressure: wait if we've hit the concurrent reader limit
+                            while self.task_tracker.len() >= MAX_CONCURRENT_READERS {
                                 tokio::select! {
                                     _ = self.cancel_token.cancelled() => {
-                                        debug!("Cancellation while waiting for task slot");
+                                        debug!("Cancellation while waiting for read task slot");
                                         break;
                                     }
                                     _ = self.task_tracker.wait() => {}
@@ -89,11 +122,11 @@ impl<B: ColdStorage> ColdStorageTask<B> {
 
                             let backend = Arc::clone(&self.backend);
                             self.task_tracker.spawn(async move {
-                                Self::handle_request(backend, request).await;
+                                Self::handle_read(backend, read_req).await;
                             });
                         }
                         None => {
-                            debug!("Cold storage channel closed");
+                            debug!("Cold storage read channel closed");
                             break;
                         }
                     }
@@ -101,22 +134,11 @@ impl<B: ColdStorage> ColdStorageTask<B> {
             }
         }
 
-        // Graceful shutdown: wait for in-progress tasks to complete
-        debug!("Waiting for in-progress handlers to complete");
+        // Graceful shutdown: wait for in-progress read tasks to complete
+        debug!("Waiting for in-progress read handlers to complete");
         self.task_tracker.close();
         self.task_tracker.wait().await;
         debug!("Cold storage task shut down gracefully");
-    }
-
-    async fn handle_request(backend: Arc<B>, request: ColdStorageRequest) {
-        match request {
-            ColdStorageRequest::Read(read_req) => {
-                Self::handle_read(backend, read_req).await;
-            }
-            ColdStorageRequest::Write(write_req) => {
-                Self::handle_write(backend, write_req).await;
-            }
-        }
     }
 
     async fn handle_read(backend: Arc<B>, req: ColdReadRequest) {
