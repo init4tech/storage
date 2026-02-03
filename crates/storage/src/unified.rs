@@ -178,11 +178,10 @@ impl<H: HotKv> UnifiedStorage<H> {
             .writer()
             .map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))?;
 
-        // Convert to hot storage format
-        let hot_data: Vec<_> =
-            blocks.iter().map(|b| (b.header.clone(), b.bundle.clone())).collect();
-
-        writer.append_blocks(&hot_data).map_err(|e| StorageError::Hot(map_history_error(e)))?;
+        // Pass references directly - no cloning
+        writer
+            .append_blocks(blocks.iter().map(|b| (&b.header, &b.bundle)))
+            .map_err(|e| StorageError::Hot(map_history_error(e)))?;
         writer
             .raw_commit()
             .map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))?;

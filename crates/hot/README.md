@@ -16,9 +16,9 @@ fn example<D: HotKv>(db: &D) -> Result<(), signet_hot::db::HotKvError> {
     let tip = reader.get_chain_tip()?;
     let account = reader.get_account(&address)?;
 
-    // Write operations
+    // Write operations (pass iterator of (&header, &bundle) tuples)
     let writer = db.writer()?;
-    writer.append_blocks(&blocks)?;
+    writer.append_blocks(blocks.iter().map(|(h, b)| (h, b)))?;
     writer.commit()?;
     Ok(())
 }

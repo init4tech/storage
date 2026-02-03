@@ -415,7 +415,7 @@ pub fn test_unwind_conformance<Kv: HotKv>(store_a: &Kv, store_b: &Kv) {
     // Store A: Append all 5 blocks, then unwind to block 1
     {
         let writer = store_a.writer().unwrap();
-        writer.append_blocks(&blocks).unwrap();
+        writer.append_blocks(blocks.iter().map(|(h, b)| (h, b))).unwrap();
         writer.commit().unwrap();
     }
     {
@@ -427,7 +427,7 @@ pub fn test_unwind_conformance<Kv: HotKv>(store_a: &Kv, store_b: &Kv) {
     // Store B: Append only blocks 0, 1
     {
         let writer = store_b.writer().unwrap();
-        writer.append_blocks(&blocks[0..2]).unwrap();
+        writer.append_blocks(blocks[0..2].iter().map(|(h, b)| (h, b))).unwrap();
         writer.commit().unwrap();
     }
 
