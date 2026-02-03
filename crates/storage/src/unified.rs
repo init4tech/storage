@@ -8,10 +8,28 @@ use crate::{StorageError, StorageResult};
 use alloy::primitives::BlockNumber;
 use signet_cold::{BlockData, ColdStorageError, ColdStorageHandle};
 use signet_hot::{
-    HistoryRead, HistoryWrite, HotKv,
-    model::{HotKvRead, HotKvWrite},
+    HistoryError, HistoryRead, HistoryWrite, HotKv,
+    model::{HotKvError, HotKvWrite},
 };
 use signet_storage_types::ExecutedBlock;
+
+/// Helper to convert a `HistoryError<E>` to `HistoryError<HotKvError>`.
+fn map_history_error<E: std::error::Error + Send + Sync + 'static>(
+    err: HistoryError<E>,
+) -> HistoryError<HotKvError> {
+    match err {
+        HistoryError::NonContiguousBlock { expected, got } => {
+            HistoryError::NonContiguousBlock { expected, got }
+        }
+        HistoryError::ParentHashMismatch { expected, got } => {
+            HistoryError::ParentHashMismatch { expected, got }
+        }
+        HistoryError::DbNotEmpty => HistoryError::DbNotEmpty,
+        HistoryError::EmptyRange => HistoryError::EmptyRange,
+        HistoryError::Db(e) => HistoryError::Db(HotKvError::from_err(e)),
+        HistoryError::IntList(e) => HistoryError::IntList(e),
+    }
+}
 
 /// Unified storage combining hot and cold backends.
 ///
@@ -21,14 +39,13 @@ use signet_storage_types::ExecutedBlock;
 /// # Write Semantics
 ///
 /// - Hot storage writes are synchronous and use database transactions
-/// - Cold storage writes are dispatched asynchronously via the handle
-/// - On `append_blocks`, hot storage is written first (sync), then cold storage
-///   is notified (async dispatch)
+/// - Cold storage writes are dispatched synchronously via the handle (non-blocking)
+/// - On `append_blocks`, hot storage is written first, then cold storage is notified
 ///
 /// # Error Handling
 ///
-/// Hot storage errors are returned immediately. Cold storage write errors are
-/// logged but do not block the caller - cold storage is fire-and-forget.
+/// Both hot storage and cold storage errors are returned. Cold storage dispatch
+/// fails immediately if the channel is full (non-blocking).
 ///
 /// # Example
 ///
@@ -38,10 +55,10 @@ use signet_storage_types::ExecutedBlock;
 /// let storage = UnifiedStorage::new(hot_db, cold_handle);
 ///
 /// // Append executed blocks
-/// storage.append_blocks(&blocks).await?;
+/// storage.append_blocks(&blocks)?;
 ///
 /// // Handle reorgs
-/// storage.unwind_above(reorg_block).await?;
+/// storage.unwind_above(reorg_block)?;
 /// ```
 #[derive(Debug)]
 pub struct UnifiedStorage<H: HotKv> {
@@ -70,27 +87,20 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// # Errors
     ///
     /// Returns an error if the transaction cannot be created.
-    pub fn reader(&self) -> Result<H::RoTx, StorageError<<H::RoTx as HotKvRead>::Error>> {
-        self.hot.reader().map_err(StorageError::HotTx)
+    pub fn reader(&self) -> StorageResult<H::RoTx> {
+        self.hot.reader().map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))
     }
 
     /// Append executed blocks to both hot and cold storage.
     ///
     /// This method:
     /// 1. Writes to hot storage synchronously (validates chain extension, updates state)
-    /// 2. Dispatches writes to cold storage asynchronously (fire-and-forget)
-    ///
-    /// Hot storage errors are returned immediately. Cold storage writes are
-    /// dispatched asynchronously; errors are logged but not propagated.
+    /// 2. Dispatches writes to cold storage synchronously (non-blocking)
     ///
     /// # Errors
     ///
-    /// Returns an error if hot storage write fails. Cold storage errors are
-    /// logged but not returned.
-    pub async fn append_blocks(
-        &self,
-        blocks: &[ExecutedBlock],
-    ) -> StorageResult<(), <H::RwTx as HotKvRead>::Error> {
+    /// Returns an error if hot storage write fails or if cold storage channel is full.
+    pub fn append_blocks(&self, blocks: &[ExecutedBlock]) -> StorageResult<()> {
         if blocks.is_empty() {
             return Ok(());
         }
@@ -98,33 +108,33 @@ impl<H: HotKv> UnifiedStorage<H> {
         // 1. Write to hot storage synchronously
         self.write_hot(blocks)?;
 
-        // 2. Dispatch to cold storage asynchronously (fire-and-forget)
-        self.dispatch_cold(blocks).await;
+        // 2. Dispatch to cold storage synchronously (non-blocking)
+        self.dispatch_cold(blocks)?;
 
         Ok(())
     }
 
     /// Write blocks to hot storage.
-    fn write_hot(
-        &self,
-        blocks: &[ExecutedBlock],
-    ) -> StorageResult<(), <H::RwTx as HotKvRead>::Error> {
-        let writer = self.hot.writer().map_err(StorageError::HotTx)?;
+    fn write_hot(&self, blocks: &[ExecutedBlock]) -> StorageResult<()> {
+        let writer = self
+            .hot
+            .writer()
+            .map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))?;
 
         // Convert to hot storage format
         let hot_data: Vec<_> =
             blocks.iter().map(|b| (b.header.clone(), b.bundle.clone())).collect();
 
-        writer.append_blocks(&hot_data)?;
-        writer.raw_commit().map_err(|e| StorageError::Hot(signet_hot::HistoryError::Db(e)))?;
+        writer.append_blocks(&hot_data).map_err(|e| StorageError::Hot(map_history_error(e)))?;
+        writer
+            .raw_commit()
+            .map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))?;
 
         Ok(())
     }
 
-    /// Dispatch blocks to cold storage asynchronously.
-    ///
-    /// Errors are logged but not propagated (fire-and-forget).
-    async fn dispatch_cold(&self, blocks: &[ExecutedBlock]) {
+    /// Dispatch blocks to cold storage synchronously (non-blocking).
+    fn dispatch_cold(&self, blocks: &[ExecutedBlock]) -> StorageResult<()> {
         let cold_data: Vec<_> = blocks
             .iter()
             .map(|b| {
@@ -138,46 +148,32 @@ impl<H: HotKv> UnifiedStorage<H> {
             })
             .collect();
 
-        if let Err(e) = self.cold.append_blocks(cold_data).await {
-            tracing::error!(
-                error = ?e,
-                block_count = blocks.len(),
-                first_block = blocks.first().map(|b| b.block_number()),
-                "failed to append blocks to cold storage"
-            );
-        }
+        self.cold.dispatch_append_blocks(cold_data).map_err(StorageError::Cold)
     }
 
     /// Unwind storage above the given block number (reorg handling).
     ///
     /// This method:
     /// 1. Unwinds hot storage synchronously (restores previous state)
-    /// 2. Truncates cold storage asynchronously (fire-and-forget)
+    /// 2. Truncates cold storage synchronously (non-blocking dispatch)
     ///
     /// # Errors
     ///
-    /// Returns an error if hot storage unwind fails. Cold storage errors are
-    /// logged but not returned.
-    pub async fn unwind_above(
-        &self,
-        block: BlockNumber,
-    ) -> StorageResult<(), <H::RwTx as HotKvRead>::Error> {
+    /// Returns an error if hot storage unwind fails or if cold storage channel is full.
+    pub fn unwind_above(&self, block: BlockNumber) -> StorageResult<()> {
         // 1. Unwind hot storage synchronously
-        let writer = self.hot.writer().map_err(StorageError::HotTx)?;
+        let writer = self
+            .hot
+            .writer()
+            .map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))?;
 
-        writer.unwind_above(block)?;
-        writer.raw_commit().map_err(|e| StorageError::Hot(signet_hot::HistoryError::Db(e)))?;
+        writer.unwind_above(block).map_err(|e| StorageError::Hot(map_history_error(e)))?;
+        writer
+            .raw_commit()
+            .map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))?;
 
-        // 2. Truncate cold storage asynchronously (fire-and-forget)
-        if let Err(e) = self.cold.truncate_above(block).await {
-            tracing::error!(
-                error = ?e,
-                block,
-                "failed to truncate cold storage"
-            );
-        }
-
-        Ok(())
+        // 2. Truncate cold storage synchronously (non-blocking dispatch)
+        self.cold.dispatch_truncate_above(block).map_err(StorageError::Cold)
     }
 
     /// Check how far behind cold storage is compared to hot storage.
@@ -187,13 +183,11 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// # Errors
     ///
     /// Returns an error if either storage cannot be queried.
-    pub async fn cold_lag(
-        &self,
-    ) -> Result<Option<BlockNumber>, StorageError<<H::RoTx as HotKvRead>::Error>> {
+    pub async fn cold_lag(&self) -> StorageResult<Option<BlockNumber>> {
         let reader = self.reader()?;
         let hot_tip = reader
             .get_chain_tip()
-            .map_err(|e| StorageError::Hot(signet_hot::HistoryError::Db(e)))?;
+            .map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))?;
 
         let cold_tip = self.cold.get_latest_block().await.map_err(StorageError::Cold)?;
 

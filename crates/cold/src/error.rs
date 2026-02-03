@@ -17,6 +17,10 @@ pub enum ColdStorageError {
     /// The storage task was cancelled.
     #[error("Task cancelled")]
     Cancelled,
+
+    /// Failed to send request to cold storage task (channel full or closed).
+    #[error("failed to send request to cold storage task")]
+    SendFailed,
 }
 
 impl ColdStorageError {

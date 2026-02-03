@@ -18,7 +18,6 @@ signet-storage-types.workspace = true
 
 alloy.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 
 [features]
 default = []

@@ -253,4 +253,28 @@ impl ColdStorageHandle {
         let (resp, rx) = oneshot::channel();
         self.send(ColdWriteRequest::TruncateAbove { block, resp }.into(), rx).await
     }
+
+    // ==========================================================================
+    // Synchronous Fire-and-Forget Dispatch
+    // ==========================================================================
+
+    /// Dispatch append blocks without waiting for response (non-blocking).
+    ///
+    /// Returns error if the channel is full or closed. The response is ignored.
+    pub fn dispatch_append_blocks(&self, data: Vec<BlockData>) -> ColdResult<()> {
+        let (resp, _rx) = oneshot::channel();
+        self.sender
+            .try_send(ColdWriteRequest::AppendBlocks { data, resp }.into())
+            .map_err(|_| ColdStorageError::SendFailed)
+    }
+
+    /// Dispatch truncate without waiting for response (non-blocking).
+    ///
+    /// Returns error if the channel is full or closed. The response is ignored.
+    pub fn dispatch_truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
+        let (resp, _rx) = oneshot::channel();
+        self.sender
+            .try_send(ColdWriteRequest::TruncateAbove { block, resp }.into())
+            .map_err(|_| ColdStorageError::SendFailed)
+    }
 }
