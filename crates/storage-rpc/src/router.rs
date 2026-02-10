@@ -22,11 +22,14 @@
 //! axum::serve(listener, router.into_axum("/")).await?;
 //! ```
 
-use crate::handlers::{self, DEFAULT_CHAIN_ID};
+use crate::handlers::{self, evm, gas, state, DEFAULT_CHAIN_ID};
 use ajj::Router;
-use signet_hot::HotKv;
+use alloy::primitives::{Address, Bytes, B256};
+use alloy::rpc::types::TransactionRequest;
+use signet_hot::{HotKv, model::HotKvRead};
 use signet_storage::UnifiedStorage;
 use std::sync::Arc;
+use trevm::revm::database::DBErrorMarker;
 
 /// RPC context containing storage and configuration.
 ///
@@ -87,7 +90,10 @@ impl RpcRouter {
     pub fn build<H: HotKv + Send + Sync + 'static>(
         self,
         storage: Arc<UnifiedStorage<H>>,
-    ) -> Router<()> {
+    ) -> Router<()>
+    where
+        <<H as HotKv>::RoTx as HotKvRead>::Error: DBErrorMarker,
+    {
         let ctx = RpcContext::new(storage, self.chain_id);
 
         Router::new()
@@ -103,7 +109,82 @@ impl RpcRouter {
                 handlers::eth_protocol_version().await
             })
             .route("eth_syncing", || async { handlers::eth_syncing().await })
+            // ================================================================
+            // State query endpoints (hot path)
+            // ================================================================
+            .route("eth_getBalance", {
+                let storage = Arc::clone(&ctx.storage);
+                move |address: Address| {
+                    let storage = Arc::clone(&storage);
+                    async move { state::eth_get_balance(&storage, address, None).await }
+                }
+            })
+            .route("eth_getTransactionCount", {
+                let storage = Arc::clone(&ctx.storage);
+                move |address: Address| {
+                    let storage = Arc::clone(&storage);
+                    async move { state::eth_get_transaction_count(&storage, address, None).await }
+                }
+            })
+            .route("eth_getCode", {
+                let storage = Arc::clone(&ctx.storage);
+                move |address: Address| {
+                    let storage = Arc::clone(&storage);
+                    async move { state::eth_get_code(&storage, address, None).await }
+                }
+            })
+            // Note: eth_getStorageAt takes (address, slot) params - wrapped in tuple for ajj
+            .route("eth_getStorageAt", {
+                let storage = Arc::clone(&ctx.storage);
+                move |(address, slot): (Address, B256)| {
+                    let storage = Arc::clone(&storage);
+                    async move { state::eth_get_storage_at(&storage, address, slot, None).await }
+                }
+            })
+            // ================================================================
+            // Gas endpoints (hot path)
+            // ================================================================
+            .route("eth_gasPrice", {
+                let storage = Arc::clone(&ctx.storage);
+                move || {
+                    let storage = Arc::clone(&storage);
+                    async move { gas::eth_gas_price(&storage).await }
+                }
+            })
+            .route("eth_maxPriorityFeePerGas", {
+                let storage = Arc::clone(&ctx.storage);
+                move || {
+                    let storage = Arc::clone(&storage);
+                    async move { gas::eth_max_priority_fee_per_gas(&storage).await }
+                }
+            })
+            // ================================================================
+            // EVM execution endpoints (hot path)
+            // ================================================================
+            .route("eth_call", {
+                let storage = Arc::clone(&ctx.storage);
+                move |call: TransactionRequest| {
+                    let storage = Arc::clone(&storage);
+                    async move { evm::eth_call(&storage, call, None).await }
+                }
+            })
+            .route("eth_estimateGas", {
+                let storage = Arc::clone(&ctx.storage);
+                move |call: TransactionRequest| {
+                    let storage = Arc::clone(&storage);
+                    async move { evm::eth_estimate_gas(&storage, call, None).await }
+                }
+            })
+            .route("eth_sendRawTransaction", {
+                let storage = Arc::clone(&ctx.storage);
+                move |data: Bytes| {
+                    let storage = Arc::clone(&storage);
+                    async move { evm::eth_send_raw_transaction(&storage, data).await }
+                }
+            })
+            // ================================================================
             // Unsupported endpoints (return errors)
+            // ================================================================
             .route("eth_coinbase", || async { handlers::eth_coinbase().await })
             .route("eth_accounts", || async { handlers::eth_accounts().await })
             .route("eth_blobBaseFee", || async {
@@ -167,7 +248,10 @@ impl RpcRouter {
         self,
         storage: Arc<UnifiedStorage<H>>,
         path: &str,
-    ) -> axum::Router {
+    ) -> axum::Router
+    where
+        <<H as HotKv>::RoTx as HotKvRead>::Error: DBErrorMarker,
+    {
         self.build(storage).into_axum(path)
     }
 }

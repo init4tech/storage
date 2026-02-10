@@ -38,6 +38,30 @@
 //! | `eth_protocolVersion` | "1.0" |
 //! | `eth_syncing` | false |
 //!
+//! ## State Query Endpoints (hot storage)
+//!
+//! | Method | Description |
+//! |--------|-------------|
+//! | `eth_getBalance` | Account balance |
+//! | `eth_getTransactionCount` | Account nonce |
+//! | `eth_getCode` | Contract bytecode |
+//! | `eth_getStorageAt` | Contract storage slot |
+//!
+//! ## Gas Endpoints (hot storage)
+//!
+//! | Method | Description |
+//! |--------|-------------|
+//! | `eth_gasPrice` | Current gas price (base fee + priority fee) |
+//! | `eth_maxPriorityFeePerGas` | Suggested priority fee |
+//!
+//! ## EVM Execution Endpoints (hot storage)
+//!
+//! | Method | Description |
+//! |--------|-------------|
+//! | `eth_call` | Execute read-only EVM call |
+//! | `eth_estimateGas` | Estimate gas for transaction |
+//! | `eth_sendRawTransaction` | Submit raw transaction (stub) |
+//!
 //! ## Unsupported Endpoints (return errors)
 //!
 //! The following methods return "method not supported" errors because they
@@ -55,8 +79,8 @@
 //!
 //! The server uses [`UnifiedStorage`] as its single backend, which provides:
 //!
-//! - Hot storage for fast state access (accounts, storage, code)
-//! - Cold storage for historical data (blocks, transactions, receipts)
+//! - **Hot storage** for fast state access (accounts, storage, code, EVM execution)
+//! - **Cold storage** for historical data (blocks, transactions, receipts)
 //!
 //! Handlers are async functions that receive storage context and return
 //! results following the Ethereum JSON-RPC specification.

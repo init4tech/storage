@@ -2,6 +2,22 @@
 //!
 //! This module contains the handler implementations for Ethereum JSON-RPC methods.
 //! Handlers are async functions that take storage context and return RPC results.
+//!
+//! # Module Organization
+//!
+//! - **Stub endpoints**: Static responses (chain ID, protocol version, syncing)
+//! - **State queries** (`state`): Account balance, nonce, code, storage (hot path)
+//! - **Gas estimation** (`gas`): Gas price, priority fee (hot path)
+//! - **EVM execution** (`evm`): eth_call, estimateGas, sendRawTransaction (hot path)
+
+// Hot path handlers (Phase 3: ENG-1845)
+pub mod evm;
+pub mod gas;
+pub mod state;
+
+pub use evm::{eth_call, eth_estimate_gas, eth_send_raw_transaction};
+pub use gas::{eth_gas_price, eth_max_priority_fee_per_gas};
+pub use state::{eth_get_balance, eth_get_code, eth_get_storage_at, eth_get_transaction_count};
 
 use crate::error::{RpcError, RpcResult};
 use alloy::primitives::U64;
