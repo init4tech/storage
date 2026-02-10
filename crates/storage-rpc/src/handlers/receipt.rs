@@ -3,15 +3,17 @@
 //! This module contains handlers for transaction receipt query endpoints that
 //! read from cold storage.
 
-use crate::error::{RpcResult, internal_err, rpc_ok};
+use crate::error::RpcResult;
 use crate::router::RpcContext;
 use crate::types::{RpcLog, RpcReceipt};
+use ajj::ResponsePayload;
 use alloy::{
     consensus::Transaction,
     primitives::{B256, U64},
 };
 use signet_cold::{ReceiptSpecifier, TransactionSpecifier};
 use signet_hot::HotKv;
+use std::borrow::Cow;
 
 /// Handler for `eth_getTransactionReceipt`.
 ///
@@ -24,20 +26,30 @@ pub(crate) async fn eth_get_transaction_receipt<H: HotKv>(
 
     let receipt = match cold.get_receipt(ReceiptSpecifier::TxHash(tx_hash)).await {
         Ok(r) => r,
-        Err(e) => return internal_err(format!("Failed to get receipt: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to get receipt: {e}"
+            )));
+        }
     };
 
     let Some(receipt) = receipt else {
-        return rpc_ok(None);
+        return ResponsePayload(Ok(None));
     };
 
     let tx = match cold.get_transaction(TransactionSpecifier::Hash(tx_hash)).await {
         Ok(t) => t,
-        Err(e) => return internal_err(format!("Failed to get transaction: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to get transaction: {e}"
+            )));
+        }
     };
 
     let Some(tx) = tx else {
-        return internal_err("Receipt found but transaction missing");
+        return ResponsePayload::internal_error_message(Cow::Borrowed(
+            "Receipt found but transaction missing",
+        ));
     };
 
     let logs: Vec<RpcLog> = receipt
@@ -57,7 +69,7 @@ pub(crate) async fn eth_get_transaction_receipt<H: HotKv>(
         })
         .collect();
 
-    rpc_ok(Some(RpcReceipt {
+    ResponsePayload(Ok(Some(RpcReceipt {
         transaction_hash: tx_hash,
         transaction_index: None,
         block_hash: None,
@@ -67,5 +79,5 @@ pub(crate) async fn eth_get_transaction_receipt<H: HotKv>(
         status: U64::from(u64::from(receipt.inner.status.coerce_status())),
         to: tx.to(),
         logs,
-    }))
+    })))
 }

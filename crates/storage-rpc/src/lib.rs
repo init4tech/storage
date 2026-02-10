@@ -11,7 +11,7 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use signet_storage_rpc::RpcRouter;
+//! use signet_storage_rpc::RpcContext;
 //! use signet_storage::UnifiedStorage;
 //! use std::sync::Arc;
 //!
@@ -19,9 +19,8 @@
 //! let storage = Arc::new(UnifiedStorage::new(hot_db, cold_handle));
 //!
 //! // Build the RPC router
-//! let axum_router = RpcRouter::new()
-//!     .with_chain_id(31337)  // Local devnet
-//!     .build_axum(storage, "/");
+//! let axum_router = RpcContext { storage, chain_id: 31337 }
+//!     .build_axum("/");
 //!
 //! // Serve over HTTP
 //! let listener = tokio::net::TcpListener::bind("0.0.0.0:8545").await?;
@@ -100,12 +99,12 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod error;
-pub use error::{RpcResult, rpc_ok};
+pub use error::RpcResult;
 
 pub mod handlers;
 
 pub mod router;
-pub use router::RpcRouter;
+pub use router::RpcContext;
 
 pub mod types;
 pub use types::{BlockTransactions, RpcBlock, RpcLog, RpcReceipt, RpcTransaction};

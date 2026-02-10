@@ -6,10 +6,12 @@
 //! - `eth_getCode` - Contract bytecode
 //! - `eth_getStorageAt` - Contract storage slot
 
-use crate::error::{RpcResult, internal_err, rpc_ok};
+use crate::error::RpcResult;
 use crate::router::RpcContext;
+use ajj::ResponsePayload;
 use alloy::primitives::{Address, B256, Bytes, U64, U256};
 use signet_hot::{HotKv, db::HotDbRead};
+use std::borrow::Cow;
 
 /// Handler for `eth_getBalance`.
 ///
@@ -25,15 +27,23 @@ pub(crate) async fn eth_get_balance<H: HotKv>(
 ) -> RpcResult<U256> {
     let reader = match state.storage.reader() {
         Ok(r) => r,
-        Err(e) => return internal_err(format!("Failed to create reader: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to create reader: {e}"
+            )));
+        }
     };
 
     let account = match reader.get_account(&address) {
         Ok(a) => a,
-        Err(e) => return internal_err(format!("Failed to read account: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to read account: {e}"
+            )));
+        }
     };
 
-    rpc_ok(account.map(|a| a.balance).unwrap_or_default())
+    ResponsePayload(Ok(account.map(|a| a.balance).unwrap_or_default()))
 }
 
 /// Handler for `eth_getTransactionCount`.
@@ -50,15 +60,23 @@ pub(crate) async fn eth_get_transaction_count<H: HotKv>(
 ) -> RpcResult<U64> {
     let reader = match state.storage.reader() {
         Ok(r) => r,
-        Err(e) => return internal_err(format!("Failed to create reader: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to create reader: {e}"
+            )));
+        }
     };
 
     let account = match reader.get_account(&address) {
         Ok(a) => a,
-        Err(e) => return internal_err(format!("Failed to read account: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to read account: {e}"
+            )));
+        }
     };
 
-    rpc_ok(U64::from(account.map(|a| a.nonce).unwrap_or_default()))
+    ResponsePayload(Ok(U64::from(account.map(|a| a.nonce).unwrap_or_default())))
 }
 
 /// Handler for `eth_getCode`.
@@ -75,28 +93,42 @@ pub(crate) async fn eth_get_code<H: HotKv>(
 ) -> RpcResult<Bytes> {
     let reader = match state.storage.reader() {
         Ok(r) => r,
-        Err(e) => return internal_err(format!("Failed to create reader: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to create reader: {e}"
+            )));
+        }
     };
 
     let account = match reader.get_account(&address) {
         Ok(a) => a,
-        Err(e) => return internal_err(format!("Failed to read account: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to read account: {e}"
+            )));
+        }
     };
 
     let Some(account) = account else {
-        return rpc_ok(Bytes::default());
+        return ResponsePayload(Ok(Bytes::default()));
     };
 
     let Some(code_hash) = account.bytecode_hash else {
-        return rpc_ok(Bytes::default());
+        return ResponsePayload(Ok(Bytes::default()));
     };
 
     let bytecode = match reader.get_bytecode(&code_hash) {
         Ok(b) => b,
-        Err(e) => return internal_err(format!("Failed to read bytecode: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to read bytecode: {e}"
+            )));
+        }
     };
 
-    rpc_ok(bytecode.map(|bc| Bytes::copy_from_slice(bc.original_byte_slice())).unwrap_or_default())
+    ResponsePayload(Ok(bytecode
+        .map(|bc| Bytes::copy_from_slice(bc.original_byte_slice()))
+        .unwrap_or_default()))
 }
 
 /// Handler for `eth_getStorageAt`.
@@ -114,17 +146,25 @@ pub(crate) async fn eth_get_storage_at<H: HotKv>(
 ) -> RpcResult<B256> {
     let reader = match state.storage.reader() {
         Ok(r) => r,
-        Err(e) => return internal_err(format!("Failed to create reader: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to create reader: {e}"
+            )));
+        }
     };
 
     let slot_u256 = U256::from_be_bytes(slot.0);
 
     let value = match reader.get_storage(&address, &slot_u256) {
         Ok(v) => v,
-        Err(e) => return internal_err(format!("Failed to read storage: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to read storage: {e}"
+            )));
+        }
     };
 
-    rpc_ok(B256::from(value.unwrap_or_default().to_be_bytes()))
+    ResponsePayload(Ok(B256::from(value.unwrap_or_default().to_be_bytes())))
 }
 
 #[cfg(test)]

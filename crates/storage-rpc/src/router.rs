@@ -1,28 +1,28 @@
 //! JSON-RPC router configuration.
 //!
-//! This module provides the [`RpcRouter`] builder for creating an ajj router
+//! This module provides the [`RpcContext`] type for creating an ajj router
 //! with all Ethereum JSON-RPC methods registered.
 //!
 //! # Example
 //!
 //! ```ignore
-//! use signet_storage_rpc::RpcRouter;
+//! use signet_storage_rpc::RpcContext;
 //! use signet_storage::UnifiedStorage;
+//! use std::sync::Arc;
 //!
 //! // Create storage instance
-//! let storage = UnifiedStorage::new(hot, cold);
+//! let storage = Arc::new(UnifiedStorage::new(hot, cold));
 //!
 //! // Build the router
-//! let router = RpcRouter::new()
-//!     .with_chain_id(31337)
-//!     .build(storage);
+//! let ctx = RpcContext { storage, chain_id: 31337 };
+//! let router = ctx.build();
 //!
 //! // Serve over HTTP
 //! let listener = tokio::net::TcpListener::bind("0.0.0.0:8545").await?;
 //! axum::serve(listener, router.into_axum("/")).await?;
 //! ```
 
-use crate::handlers::{self, DEFAULT_CHAIN_ID, block, evm, gas, receipt, state, transaction};
+use crate::handlers::{self, block, evm, gas, receipt, state, transaction};
 use ajj::Router;
 use signet_hot::{HotKv, model::HotKvRead};
 use signet_storage::UnifiedStorage;
@@ -30,11 +30,12 @@ use std::sync::Arc;
 use trevm::revm::database::DBErrorMarker;
 
 /// Router state providing storage context to all handlers.
-pub(crate) struct RpcContext<H: HotKv> {
+#[derive(Debug)]
+pub struct RpcContext<H: HotKv> {
     /// Unified storage backend.
-    pub(crate) storage: Arc<UnifiedStorage<H>>,
+    pub storage: Arc<UnifiedStorage<H>>,
     /// Chain ID for `eth_chainId`.
-    pub(crate) chain_id: u64,
+    pub chain_id: u64,
 }
 
 impl<H: HotKv> Clone for RpcContext<H> {
@@ -43,43 +44,14 @@ impl<H: HotKv> Clone for RpcContext<H> {
     }
 }
 
-/// Builder for creating an RPC router.
-#[derive(Debug, Clone, Copy)]
-pub struct RpcRouter {
-    chain_id: u64,
-}
-
-impl Default for RpcRouter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RpcRouter {
-    /// Create a new router builder with default settings.
-    pub const fn new() -> Self {
-        Self { chain_id: DEFAULT_CHAIN_ID }
-    }
-
-    /// Set the chain ID to return from `eth_chainId`.
-    pub const fn with_chain_id(mut self, chain_id: u64) -> Self {
-        self.chain_id = chain_id;
-        self
-    }
-
-    /// Build the ajj router with the given storage backend.
+impl<H: HotKv + Send + Sync + 'static> RpcContext<H>
+where
+    <<H as HotKv>::RoTx as HotKvRead>::Error: DBErrorMarker,
+{
+    /// Build the ajj router with all Ethereum JSON-RPC methods registered.
     ///
-    /// This registers all Ethereum JSON-RPC methods with the router.
     /// Storage is passed to handlers via ajj's state mechanism.
-    pub fn build<H: HotKv + Send + Sync + 'static>(
-        self,
-        storage: Arc<UnifiedStorage<H>>,
-    ) -> Router<()>
-    where
-        <<H as HotKv>::RoTx as HotKvRead>::Error: DBErrorMarker,
-    {
-        let ctx = RpcContext { storage, chain_id: self.chain_id };
-
+    pub fn build(self) -> Router<()> {
         Router::<RpcContext<H>>::new()
             // ============================================================
             // Stub endpoints (state-dependent)
@@ -130,7 +102,7 @@ impl RpcRouter {
             // ============================================================
             // Provide state, switching to Router<()>
             // ============================================================
-            .with_state::<()>(ctx)
+            .with_state::<()>(self)
             // ============================================================
             // Stub endpoints (stateless)
             // ============================================================
@@ -172,37 +144,37 @@ impl RpcRouter {
     /// # Example
     ///
     /// ```ignore
-    /// let axum_router = RpcRouter::new()
-    ///     .build_axum(storage, "/rpc");
+    /// let axum_router = RpcContext { storage, chain_id: 31337 }
+    ///     .build_axum("/rpc");
     ///
     /// let listener = tokio::net::TcpListener::bind("0.0.0.0:8545").await?;
     /// axum::serve(listener, axum_router).await?;
     /// ```
-    pub fn build_axum<H: HotKv + Send + Sync + 'static>(
-        self,
-        storage: Arc<UnifiedStorage<H>>,
-        path: &str,
-    ) -> axum::Router
-    where
-        <<H as HotKv>::RoTx as HotKvRead>::Error: DBErrorMarker,
-    {
-        self.build(storage).into_axum(path)
+    pub fn build_axum(self, path: &str) -> axum::Router {
+        self.build().into_axum(path)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::DEFAULT_CHAIN_ID;
 
-    #[test]
-    fn test_router_builder_defaults() {
-        let builder = RpcRouter::new();
-        assert_eq!(builder.chain_id, DEFAULT_CHAIN_ID);
+    #[tokio::test]
+    async fn test_router_builder_defaults() {
+        let ctx: RpcContext<signet_hot::mem::MemKv> = RpcContext {
+            storage: crate::handlers::state::tests::create_test_storage(),
+            chain_id: DEFAULT_CHAIN_ID,
+        };
+        assert_eq!(ctx.chain_id, DEFAULT_CHAIN_ID);
     }
 
-    #[test]
-    fn test_router_builder_chain_id() {
-        let builder = RpcRouter::new().with_chain_id(1);
-        assert_eq!(builder.chain_id, 1);
+    #[tokio::test]
+    async fn test_router_builder_chain_id() {
+        let ctx: RpcContext<signet_hot::mem::MemKv> = RpcContext {
+            storage: crate::handlers::state::tests::create_test_storage(),
+            chain_id: 1,
+        };
+        assert_eq!(ctx.chain_id, 1);
     }
 }

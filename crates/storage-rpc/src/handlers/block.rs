@@ -3,15 +3,17 @@
 //! This module contains handlers for block query endpoints that read from
 //! cold storage.
 
-use crate::error::{RpcResult, internal_err, rpc_ok};
+use crate::error::RpcResult;
 use crate::router::RpcContext;
 use crate::types::{BlockTransactions, RpcBlock, RpcLog, RpcReceipt};
+use ajj::ResponsePayload;
 use alloy::{
     eips::BlockNumberOrTag,
     primitives::{B256, U64},
 };
 use signet_cold::{BlockTag, HeaderSpecifier};
 use signet_hot::HotKv;
+use std::borrow::Cow;
 
 /// Convert a BlockNumberOrTag to a HeaderSpecifier.
 pub const fn block_id_to_specifier(block_id: BlockNumberOrTag) -> HeaderSpecifier {
@@ -30,48 +32,53 @@ pub const fn block_id_to_specifier(block_id: BlockNumberOrTag) -> HeaderSpecifie
 /// Returns the latest block number.
 pub(crate) async fn eth_block_number<H: HotKv>(state: RpcContext<H>) -> RpcResult<U64> {
     let cold = state.storage.cold_reader();
-    let latest = cold
-        .get_latest_block()
-        .await
-        .map_err(|e| internal_err::<U64>(format!("Failed to get latest block: {e}")));
 
-    match latest {
-        Ok(Some(num)) => rpc_ok(U64::from(num)),
-        Ok(None) => rpc_ok(U64::ZERO),
-        Err(rp) => rp,
+    match cold.get_latest_block().await {
+        Ok(Some(num)) => ResponsePayload(Ok(U64::from(num))),
+        Ok(None) => ResponsePayload::internal_error_message(Cow::Borrowed("no blocks in storage")),
+        Err(e) => ResponsePayload::internal_error_message(Cow::Owned(format!(
+            "Failed to get latest block: {e}"
+        ))),
     }
 }
 
-/// Handler for `eth_getBlockByHash`.
-///
-/// Returns block information by hash.
-pub(crate) async fn eth_get_block_by_hash<H: HotKv>(
-    (hash, _full_txs): (B256, bool),
-    state: RpcContext<H>,
+/// Shared implementation for getting a block by specifier.
+async fn get_block<H: HotKv>(
+    spec: HeaderSpecifier,
+    state: &RpcContext<H>,
 ) -> RpcResult<Option<RpcBlock>> {
     let cold = state.storage.cold_reader();
 
-    let header = match cold.get_header(HeaderSpecifier::Hash(hash)).await {
+    let header = match cold.get_header(spec).await {
         Ok(h) => h,
-        Err(e) => return internal_err(format!("Failed to get header: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to get header: {e}"
+            )));
+        }
     };
 
     let Some(header) = header else {
-        return rpc_ok(None);
+        return ResponsePayload(Ok(None));
     };
 
+    let hash = header.hash_slow();
     let block_number = header.number;
 
     let txs = match cold.get_transactions_in_block(block_number).await {
         Ok(t) => t,
-        Err(e) => return internal_err(format!("Failed to get transactions: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to get transactions: {e}"
+            )));
+        }
     };
 
     // Note: We currently return hashes only. When full_txs is true,
     // we would populate with full RpcTransaction objects.
     let tx_hashes: Vec<B256> = txs.iter().map(|tx| *tx.tx_hash()).collect();
 
-    rpc_ok(Some(RpcBlock {
+    ResponsePayload(Ok(Some(RpcBlock {
         hash,
         number: U64::from(header.number),
         parent_hash: header.parent_hash,
@@ -81,30 +88,59 @@ pub(crate) async fn eth_get_block_by_hash<H: HotKv>(
         base_fee_per_gas: header.base_fee_per_gas.map(U64::from),
         transactions: BlockTransactions::Hashes(tx_hashes),
         uncles: vec![],
-    }))
+    })))
+}
+
+/// Handler for `eth_getBlockByHash`.
+///
+/// Returns block information by hash.
+pub(crate) async fn eth_get_block_by_hash<H: HotKv>(
+    (hash, _full_txs): (B256, bool),
+    state: RpcContext<H>,
+) -> RpcResult<Option<RpcBlock>> {
+    get_block(HeaderSpecifier::Hash(hash), &state).await
 }
 
 /// Handler for `eth_getBlockByNumber`.
 ///
 /// Returns block information by number or tag.
 pub(crate) async fn eth_get_block_by_number<H: HotKv>(
-    (block_id, full_txs): (BlockNumberOrTag, bool),
+    (block_id, _full_txs): (BlockNumberOrTag, bool),
     state: RpcContext<H>,
 ) -> RpcResult<Option<RpcBlock>> {
+    get_block(block_id_to_specifier(block_id), &state).await
+}
+
+/// Shared implementation for getting transaction count by specifier.
+async fn get_block_tx_count<H: HotKv>(
+    spec: HeaderSpecifier,
+    state: &RpcContext<H>,
+) -> RpcResult<Option<U64>> {
     let cold = state.storage.cold_reader();
-    let spec = block_id_to_specifier(block_id);
 
     let header = match cold.get_header(spec).await {
         Ok(h) => h,
-        Err(e) => return internal_err(format!("Failed to get header: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to get header: {e}"
+            )));
+        }
     };
 
     let Some(header) = header else {
-        return rpc_ok(None);
+        return ResponsePayload(Ok(None));
     };
 
-    let hash = header.hash_slow();
-    eth_get_block_by_hash((hash, full_txs), state).await
+    let count = match cold.get_transaction_count(header.number).await {
+        Ok(c) => c,
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to get transaction count: {e}"
+            )));
+        }
+    };
+
+    ResponsePayload(Ok(Some(U64::from(count))))
 }
 
 /// Handler for `eth_getBlockTransactionCountByHash`.
@@ -114,23 +150,7 @@ pub(crate) async fn eth_get_block_transaction_count_by_hash<H: HotKv>(
     hash: B256,
     state: RpcContext<H>,
 ) -> RpcResult<Option<U64>> {
-    let cold = state.storage.cold_reader();
-
-    let header = match cold.get_header(HeaderSpecifier::Hash(hash)).await {
-        Ok(h) => h,
-        Err(e) => return internal_err(format!("Failed to get header: {e}")),
-    };
-
-    let Some(header) = header else {
-        return rpc_ok(None);
-    };
-
-    let count = match cold.get_transaction_count(header.number).await {
-        Ok(c) => c,
-        Err(e) => return internal_err(format!("Failed to get transaction count: {e}")),
-    };
-
-    rpc_ok(Some(U64::from(count)))
+    get_block_tx_count(HeaderSpecifier::Hash(hash), &state).await
 }
 
 /// Handler for `eth_getBlockTransactionCountByNumber`.
@@ -140,24 +160,7 @@ pub(crate) async fn eth_get_block_transaction_count_by_number<H: HotKv>(
     block_id: BlockNumberOrTag,
     state: RpcContext<H>,
 ) -> RpcResult<Option<U64>> {
-    let cold = state.storage.cold_reader();
-    let spec = block_id_to_specifier(block_id);
-
-    let header = match cold.get_header(spec).await {
-        Ok(h) => h,
-        Err(e) => return internal_err(format!("Failed to get header: {e}")),
-    };
-
-    let Some(header) = header else {
-        return rpc_ok(None);
-    };
-
-    let count = match cold.get_transaction_count(header.number).await {
-        Ok(c) => c,
-        Err(e) => return internal_err(format!("Failed to get transaction count: {e}")),
-    };
-
-    rpc_ok(Some(U64::from(count)))
+    get_block_tx_count(block_id_to_specifier(block_id), &state).await
 }
 
 /// Handler for `eth_getBlockReceipts`.
@@ -172,11 +175,15 @@ pub(crate) async fn eth_get_block_receipts<H: HotKv>(
 
     let header = match cold.get_header(spec).await {
         Ok(h) => h,
-        Err(e) => return internal_err(format!("Failed to get header: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to get header: {e}"
+            )));
+        }
     };
 
     let Some(header) = header else {
-        return rpc_ok(None);
+        return ResponsePayload(Ok(None));
     };
 
     let block_hash = header.hash_slow();
@@ -184,12 +191,20 @@ pub(crate) async fn eth_get_block_receipts<H: HotKv>(
 
     let receipts = match cold.get_receipts_in_block(block_number).await {
         Ok(r) => r,
-        Err(e) => return internal_err(format!("Failed to get receipts: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to get receipts: {e}"
+            )));
+        }
     };
 
     let txs = match cold.get_transactions_in_block(block_number).await {
         Ok(t) => t,
-        Err(e) => return internal_err(format!("Failed to get transactions: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to get transactions: {e}"
+            )));
+        }
     };
 
     let rpc_receipts = receipts
@@ -237,5 +252,5 @@ pub(crate) async fn eth_get_block_receipts<H: HotKv>(
         })
         .collect();
 
-    rpc_ok(Some(rpc_receipts))
+    ResponsePayload(Ok(Some(rpc_receipts)))
 }

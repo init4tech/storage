@@ -5,10 +5,9 @@
 //! - `eth_estimateGas` - Estimate gas for a transaction
 //! - `eth_sendRawTransaction` - Submit a raw transaction (stub)
 
-use crate::error::{
-    RpcResult, internal_err, internal_err_with_data, invalid_params, method_not_supported, rpc_ok,
-};
+use crate::error::{METHOD_NOT_SUPPORTED, RpcResult};
 use crate::router::RpcContext;
+use ajj::{ErrorPayload, ResponsePayload};
 use alloy::{
     consensus::TxEnvelope,
     primitives::{Bytes, U64},
@@ -16,6 +15,7 @@ use alloy::{
     rpc::types::TransactionRequest,
 };
 use signet_hot::{HotKv, db::HistoryRead, model::HotKvRead};
+use std::borrow::Cow;
 use trevm::{
     EstimationResult, NoopBlock, NoopCfg, TrevmBuilder,
     revm::{
@@ -40,16 +40,28 @@ where
 {
     let db = match state.storage.revm_reader() {
         Ok(r) => r,
-        Err(e) => return internal_err(format!("Failed to create revm reader: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to create revm reader: {e}"
+            )));
+        }
     };
 
     let reader = match state.storage.reader() {
         Ok(r) => r,
-        Err(e) => return internal_err(format!("Failed to create reader: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to create reader: {e}"
+            )));
+        }
     };
     let header = match reader.last_header() {
         Ok(h) => h,
-        Err(e) => return internal_err(format!("Failed to read header: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to read header: {e}"
+            )));
+        }
     };
 
     let trevm = TrevmBuilder::new()
@@ -65,18 +77,25 @@ where
 
     let (result, _) = match trevm.fill_tx(&call).call() {
         Ok(r) => r,
-        Err(e) => return internal_err(format!("EVM call failed: {:?}", e.into_error())),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "EVM call failed: {:?}",
+                e.into_error()
+            )));
+        }
     };
 
     match result {
-        ExecutionResult::Success { output, .. } => rpc_ok(output.data().clone()),
-        ExecutionResult::Revert { output, .. } => internal_err_with_data(
-            "execution reverted",
-            format!("0x{}", alloy::hex::encode(&output)),
-        ),
-        ExecutionResult::Halt { reason, .. } => {
-            internal_err(format!("execution halted: {reason:?}"))
+        ExecutionResult::Success { output, .. } => ResponsePayload(Ok(output.data().clone())),
+        ExecutionResult::Revert { output, .. } => {
+            ResponsePayload::internal_error_with_message_and_obj(
+                Cow::Borrowed("execution reverted"),
+                format!("0x{}", alloy::hex::encode(&output)),
+            )
         }
+        ExecutionResult::Halt { reason, .. } => ResponsePayload::internal_error_message(
+            Cow::Owned(format!("execution halted: {reason:?}")),
+        ),
     }
 }
 
@@ -97,16 +116,28 @@ where
 {
     let db = match state.storage.revm_reader() {
         Ok(r) => r,
-        Err(e) => return internal_err(format!("Failed to create revm reader: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to create revm reader: {e}"
+            )));
+        }
     };
 
     let reader = match state.storage.reader() {
         Ok(r) => r,
-        Err(e) => return internal_err(format!("Failed to create reader: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to create reader: {e}"
+            )));
+        }
     };
     let header = match reader.last_header() {
         Ok(h) => h,
-        Err(e) => return internal_err(format!("Failed to read header: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to read header: {e}"
+            )));
+        }
     };
 
     let trevm = TrevmBuilder::new()
@@ -122,18 +153,25 @@ where
 
     let (estimation, _) = match trevm.fill_tx(&call).estimate_gas() {
         Ok(r) => r,
-        Err(e) => return internal_err(format!("Gas estimation failed: {:?}", e.into_error())),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Gas estimation failed: {:?}",
+                e.into_error()
+            )));
+        }
     };
 
     match estimation {
-        EstimationResult::Success { limit, .. } => rpc_ok(U64::from(limit)),
-        EstimationResult::Revert { reason, .. } => internal_err_with_data(
-            "execution reverted",
-            format!("0x{}", alloy::hex::encode(&reason)),
-        ),
-        EstimationResult::Halt { reason, .. } => {
-            internal_err(format!("execution halted: {reason:?}"))
+        EstimationResult::Success { limit, .. } => ResponsePayload(Ok(U64::from(limit))),
+        EstimationResult::Revert { reason, .. } => {
+            ResponsePayload::internal_error_with_message_and_obj(
+                Cow::Borrowed("execution reverted"),
+                format!("0x{}", alloy::hex::encode(&reason)),
+            )
         }
+        EstimationResult::Halt { reason, .. } => ResponsePayload::internal_error_message(
+            Cow::Owned(format!("execution halted: {reason:?}")),
+        ),
     }
 }
 
@@ -153,16 +191,26 @@ pub(crate) async fn eth_send_raw_transaction<H: HotKv>(
 ) -> RpcResult<alloy::primitives::B256> {
     let tx = match TxEnvelope::decode(&mut data.as_ref()) {
         Ok(t) => t,
-        Err(e) => return invalid_params(format!("invalid transaction: {e}")),
+        Err(e) => {
+            return ResponsePayload(Err(ErrorPayload {
+                code: -32602,
+                message: Cow::Owned(format!("invalid transaction: {e}")),
+                data: None,
+            }));
+        }
     };
 
     let tx_hash = *tx.tx_hash();
 
     // In production, this would forward to a tx-cache or mempool
     // For now, we reject with a clear message
-    method_not_supported(&format!(
-        "transaction submission not yet implemented (tx_hash: {tx_hash})"
-    ))
+    ResponsePayload(Err(ErrorPayload {
+        code: METHOD_NOT_SUPPORTED,
+        message: Cow::Owned(format!(
+            "transaction submission not yet implemented (tx_hash: {tx_hash})"
+        )),
+        data: None,
+    }))
 }
 
 #[cfg(test)]

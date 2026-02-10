@@ -13,7 +13,6 @@ categories = ["web-programming"]
 
 [dependencies]
 signet-storage.workspace = true
-signet-storage-types.workspace = true
 signet-hot.workspace = true
 signet-cold.workspace = true
 
@@ -27,6 +26,7 @@ trevm.workspace = true
 [dev-dependencies]
 signet-cold = { workspace = true, features = ["in-memory"] }
 signet-hot = { workspace = true, features = ["in-memory"] }
+signet-storage-types.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-util.workspace = true
 

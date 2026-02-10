@@ -4,10 +4,12 @@
 //! - `eth_gasPrice` - Current gas price suggestion
 //! - `eth_maxPriorityFeePerGas` - Current priority fee suggestion
 
-use crate::error::{RpcResult, internal_err, rpc_ok};
+use crate::error::RpcResult;
 use crate::router::RpcContext;
+use ajj::ResponsePayload;
 use alloy::primitives::U256;
 use signet_hot::{HotKv, db::HistoryRead};
+use std::borrow::Cow;
 
 /// Default minimum gas price in wei (1 gwei).
 const DEFAULT_MIN_GAS_PRICE: u64 = 1_000_000_000;
@@ -25,12 +27,20 @@ const DEFAULT_PRIORITY_FEE: u64 = 1_000_000_000;
 pub(crate) async fn eth_gas_price<H: HotKv>(state: RpcContext<H>) -> RpcResult<U256> {
     let reader = match state.storage.reader() {
         Ok(r) => r,
-        Err(e) => return internal_err(format!("Failed to create reader: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to create reader: {e}"
+            )));
+        }
     };
 
     let header = match reader.last_header() {
         Ok(h) => h,
-        Err(e) => return internal_err(format!("Failed to read header: {e}")),
+        Err(e) => {
+            return ResponsePayload::internal_error_message(Cow::Owned(format!(
+                "Failed to read header: {e}"
+            )));
+        }
     };
 
     let gas_price = match header {
@@ -42,7 +52,7 @@ pub(crate) async fn eth_gas_price<H: HotKv>(state: RpcContext<H>) -> RpcResult<U
         None => U256::from(DEFAULT_MIN_GAS_PRICE),
     };
 
-    rpc_ok(gas_price)
+    ResponsePayload(Ok(gas_price))
 }
 
 /// Handler for `eth_maxPriorityFeePerGas`.
@@ -55,7 +65,7 @@ pub(crate) async fn eth_gas_price<H: HotKv>(state: RpcContext<H>) -> RpcResult<U
 pub(crate) async fn eth_max_priority_fee_per_gas<H: HotKv>(
     _state: RpcContext<H>,
 ) -> RpcResult<U256> {
-    rpc_ok(U256::from(DEFAULT_PRIORITY_FEE))
+    ResponsePayload(Ok(U256::from(DEFAULT_PRIORITY_FEE)))
 }
 
 #[cfg(test)]
