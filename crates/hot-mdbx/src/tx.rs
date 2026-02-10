@@ -100,10 +100,6 @@ impl<K: TransactionKind + WriteMarker> Tx<K> {
     fn store_fsi(&self, table: &'static str, fsi: FixedSizeInfo) -> Result<(), MdbxError> {
         let db = self.inner.open_db(None)?;
 
-        let mut key_buf = B256::ZERO;
-        let to_copy = core::cmp::min(32, table.len());
-        key_buf[..to_copy].copy_from_slice(&table.as_bytes()[..to_copy]);
-
         let mut value_buf = [0u8; 8];
         fsi.encode_value_to(&mut value_buf.as_mut_slice());
 

@@ -1,3 +1,4 @@
+use bytes::Buf;
 use parking_lot::RwLock;
 use signet_hot::ValSer;
 use std::collections::HashMap;
@@ -87,8 +88,9 @@ impl ValSer for FixedSizeInfo {
     where
         Self: Sized,
     {
-        let key2_size = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
-        let total_size = u32::from_be_bytes(data[4..8].try_into().unwrap()) as usize;
+        let mut buf = data;
+        let key2_size = buf.get_u32() as usize;
+        let total_size = buf.get_u32() as usize;
         if key2_size == 0 {
             Ok(FixedSizeInfo::None)
         } else if total_size == 0 {
