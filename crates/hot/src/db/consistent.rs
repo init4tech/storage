@@ -78,15 +78,63 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
     }
 
     /// Append a range of blocks and their associated state to the database.
-    fn append_blocks(
+    fn append_blocks<'a>(
         &self,
-        blocks: &[(SealedHeader, BundleState)],
+        blocks: impl IntoIterator<Item = (&'a SealedHeader, &'a BundleState)>,
     ) -> Result<(), HistoryError<Self::Error>> {
-        self.validate_chain_extension(blocks.iter().map(|(h, _)| h))?;
+        let mut iter = blocks.into_iter();
 
-        let Some(first_num) = blocks.first().map(|(h, _)| h.number) else { return Ok(()) };
-        let last_num = blocks.last().map(|(h, _)| h.number).expect("non-empty; qed");
-        self.append_blocks_inconsistent(blocks)?;
+        let Some((first_header, first_bundle)) = iter.next() else {
+            return Err(HistoryError::EmptyRange);
+        };
+
+        // Validate first header against DB tip
+        match self.get_chain_tip().map_err(HistoryError::Db)? {
+            None => { /* Empty DB - first block is valid as genesis */ }
+            Some((tip_number, tip_hash)) => {
+                let expected_number = tip_number + 1;
+                if first_header.number != expected_number {
+                    return Err(HistoryError::NonContiguousBlock {
+                        expected: expected_number,
+                        got: first_header.number,
+                    });
+                }
+                if first_header.parent_hash != tip_hash {
+                    return Err(HistoryError::ParentHashMismatch {
+                        expected: tip_hash,
+                        got: first_header.parent_hash,
+                    });
+                }
+            }
+        }
+
+        // Write first block and track range
+        self.append_block_inconsistent(first_header, first_bundle)?;
+        let first_num = first_header.number;
+        let mut last_num = first_num;
+        let mut prev = first_header;
+
+        // Process remaining: validate chain continuity and write in one pass
+        for (header, bundle) in iter {
+            let expected_number = prev.number + 1;
+            if header.number != expected_number {
+                return Err(HistoryError::NonContiguousBlock {
+                    expected: expected_number,
+                    got: header.number,
+                });
+            }
+            let expected_hash = prev.hash();
+            if header.parent_hash != expected_hash {
+                return Err(HistoryError::ParentHashMismatch {
+                    expected: expected_hash,
+                    got: header.parent_hash,
+                });
+            }
+
+            self.append_block_inconsistent(header, bundle)?;
+            last_num = header.number;
+            prev = header;
+        }
 
         self.update_history_indices_inconsistent(first_num..=last_num)
     }
@@ -247,7 +295,7 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
         let genesis_history = BlockNumberList::new_pre_sorted([genesis_number]);
 
         // Append the header, with empty state
-        self.append_blocks(&[(header, BundleState::default())])?;
+        self.append_blocks([(&header, &BundleState::default())])?;
 
         // Keep track of written bytecode hashes to avoid duplicates.
         let mut written_bytecode_hashes: AHashSet<B256> = AHashSet::new();

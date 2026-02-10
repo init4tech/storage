@@ -1276,7 +1276,7 @@ mod tests {
         // Append all blocks
         {
             let writer = db.writer().unwrap();
-            writer.append_blocks(&blocks).unwrap();
+            writer.append_blocks(blocks.iter().map(|(h, b)| (h, b))).unwrap();
             writer.commit().unwrap();
         }
 

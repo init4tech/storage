@@ -1,6 +1,7 @@
 //! Request and response types for the cold storage task.
 //!
 //! These types define the messages sent over channels to the cold storage task.
+//! Reads and writes use separate channels with their own request types.
 
 use crate::{
     BlockData, ColdStorageError, HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier,
@@ -23,6 +24,8 @@ pub struct AppendBlockRequest {
 }
 
 /// Read requests for cold storage.
+///
+/// These requests are processed concurrently (up to 64 in flight).
 #[derive(Debug)]
 pub enum ColdReadRequest {
     // --- Headers ---
@@ -114,6 +117,8 @@ pub enum ColdReadRequest {
 }
 
 /// Write requests for cold storage.
+///
+/// These requests are processed sequentially to maintain ordering.
 #[derive(Debug)]
 pub enum ColdWriteRequest {
     /// Append a single block.
@@ -132,25 +137,4 @@ pub enum ColdWriteRequest {
         /// The response channel.
         resp: Responder<()>,
     },
-}
-
-/// Combined request enum for the cold storage task.
-#[derive(Debug)]
-pub enum ColdStorageRequest {
-    /// A read request.
-    Read(ColdReadRequest),
-    /// A write request.
-    Write(ColdWriteRequest),
-}
-
-impl From<ColdReadRequest> for ColdStorageRequest {
-    fn from(req: ColdReadRequest) -> Self {
-        Self::Read(req)
-    }
-}
-
-impl From<ColdWriteRequest> for ColdStorageRequest {
-    fn from(req: ColdWriteRequest) -> Self {
-        Self::Write(req)
-    }
 }

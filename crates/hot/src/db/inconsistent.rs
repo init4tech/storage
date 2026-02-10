@@ -503,11 +503,13 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
     ///    chain tip before calling this method.
     /// 2. After calling this method, the caller MUST call
     ///    `update_history_indices`.
-    fn append_blocks_inconsistent(
+    fn append_blocks_inconsistent<'a>(
         &self,
-        blocks: &[(SealedHeader, BundleState)],
+        blocks: impl IntoIterator<Item = (&'a SealedHeader, &'a BundleState)>,
     ) -> Result<(), Self::Error> {
-        blocks.iter().try_for_each(|(header, state)| self.append_block_inconsistent(header, state))
+        blocks
+            .into_iter()
+            .try_for_each(|(header, state)| self.append_block_inconsistent(header, state))
     }
 }
 
