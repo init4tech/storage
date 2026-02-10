@@ -105,7 +105,7 @@ pub use error::{ErrorCode, RpcError, RpcResult};
 pub mod handlers;
 
 pub mod router;
-pub use router::{RpcContext, RpcRouter};
+pub use router::RpcRouter;
 
 // Re-export key dependencies for convenience
 pub use ajj;

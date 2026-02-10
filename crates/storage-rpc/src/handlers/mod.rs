@@ -6,11 +6,19 @@
 //! # Module Organization
 //!
 //! - **Stub endpoints**: Static responses (chain ID, protocol version, syncing)
+//! - **Block queries** (`block`): Block data by number/hash (cold path - Phase 2)
+//! - **Transaction queries** (`transaction`): Transaction data (cold path - Phase 2)
+//! - **Receipt queries** (`receipt`): Transaction receipt data (cold path - Phase 2)
 //! - **State queries** (`state`): Account balance, nonce, code, storage (hot path)
 //! - **Gas estimation** (`gas`): Gas price, priority fee (hot path)
 //! - **EVM execution** (`evm`): eth_call, estimateGas, sendRawTransaction (hot path)
 
-// Hot path handlers (Phase 3: ENG-1845)
+// Cold path handlers (Phase 2: ENG-1844)
+pub mod block;
+pub mod receipt;
+pub mod transaction;
+
+// Hot path handlers (Phase 1: ENG-1843)
 pub mod evm;
 pub mod gas;
 pub mod state;
