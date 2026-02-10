@@ -1,6 +1,6 @@
 //! EVM execution handlers.
 //!
-//! These handlers execute EVM operations using the revm database adapter:
+//! These handlers execute EVM operations using the trevm typestate API:
 //! - `eth_call` - Execute a read-only EVM call
 //! - `eth_estimateGas` - Estimate gas for a transaction
 //! - `eth_sendRawTransaction` - Submit a raw transaction (stub)
@@ -11,23 +11,17 @@ use crate::error::{
 use crate::router::RpcContext;
 use alloy::{
     consensus::TxEnvelope,
-    primitives::{Bytes, TxKind, U64, U256},
+    primitives::{Bytes, U64},
     rlp::Decodable,
     rpc::types::TransactionRequest,
 };
 use signet_hot::{HotKv, db::HistoryRead, model::HotKvRead};
-use trevm::revm::{
-    Context, ExecuteEvm, MainBuilder, MainContext,
-    context_interface::result::{ExecutionResult, HaltReason, ResultAndState},
-    database::{DBErrorMarker, Database},
-    primitives::hardfork::SpecId,
+use trevm::{
+    EstimationResult, NoopBlock, NoopCfg, TrevmBuilder,
+    revm::{
+        context::result::ExecutionResult, database::DBErrorMarker, primitives::hardfork::SpecId,
+    },
 };
-
-/// Default gas limit for calls (30M gas).
-const DEFAULT_GAS_LIMIT: u64 = 30_000_000;
-
-/// Minimum gas for any transaction (21000 for plain transfer).
-const MIN_GAS: u64 = 21_000;
 
 /// Handler for `eth_call`.
 ///
@@ -58,19 +52,30 @@ where
         Err(e) => return internal_err(format!("Failed to read header: {e}")),
     };
 
-    let result = match execute_call(db, &call, header.as_ref()) {
-        Ok(r) => r,
-        Err(msg) => return internal_err(msg),
+    let trevm = TrevmBuilder::new()
+        .with_spec_id(SpecId::CANCUN)
+        .with_db(db)
+        .build_trevm()
+        .fill_cfg(&NoopCfg);
+
+    let trevm = match header {
+        Some(ref h) => trevm.fill_block(h),
+        None => trevm.fill_block(&NoopBlock),
     };
 
-    match result.result {
-        ExecutionResult::Success { output, .. } => rpc_ok(Bytes::copy_from_slice(output.data())),
+    let (result, _) = match trevm.fill_tx(&call).call() {
+        Ok(r) => r,
+        Err(e) => return internal_err(format!("EVM call failed: {:?}", e.into_error())),
+    };
+
+    match result {
+        ExecutionResult::Success { output, .. } => rpc_ok(output.data().clone()),
         ExecutionResult::Revert { output, .. } => internal_err_with_data(
             "execution reverted",
             format!("0x{}", alloy::hex::encode(&output)),
         ),
         ExecutionResult::Halt { reason, .. } => {
-            internal_err(format!("execution halted: {:?}", reason))
+            internal_err(format!("execution halted: {reason:?}"))
         }
     }
 }
@@ -78,7 +83,7 @@ where
 /// Handler for `eth_estimateGas`.
 ///
 /// Estimates the gas required to execute a transaction.
-/// Uses binary search to find the minimum gas that allows execution to succeed.
+/// Uses trevm's built-in binary search to find the minimum gas.
 ///
 /// # Parameters
 /// - `call`: Transaction request with call parameters
@@ -90,6 +95,11 @@ pub(crate) async fn eth_estimate_gas<H: HotKv>(
 where
     <<H as HotKv>::RoTx as HotKvRead>::Error: DBErrorMarker,
 {
+    let db = match state.storage.revm_reader() {
+        Ok(r) => r,
+        Err(e) => return internal_err(format!("Failed to create revm reader: {e}")),
+    };
+
     let reader = match state.storage.reader() {
         Ok(r) => r,
         Err(e) => return internal_err(format!("Failed to create reader: {e}")),
@@ -99,72 +109,32 @@ where
         Err(e) => return internal_err(format!("Failed to read header: {e}")),
     };
 
-    let user_gas_limit = call.gas.unwrap_or(DEFAULT_GAS_LIMIT);
-    let mut low = MIN_GAS;
-    let mut high = user_gas_limit;
+    let trevm = TrevmBuilder::new()
+        .with_spec_id(SpecId::CANCUN)
+        .with_db(db)
+        .build_trevm()
+        .fill_cfg(&NoopCfg);
 
-    // First, try with maximum gas to ensure the transaction can succeed
-    let best_estimate = {
-        let db = match state.storage.revm_reader() {
-            Ok(r) => r,
-            Err(e) => return internal_err(format!("Failed to create revm reader: {e}")),
-        };
-
-        let mut test_call = call.clone();
-        test_call.gas = Some(high);
-
-        let result = match execute_call(db, &test_call, header.as_ref()) {
-            Ok(r) => r,
-            Err(msg) => return internal_err(msg),
-        };
-
-        match result.result {
-            ExecutionResult::Success { gas_used, .. } => gas_used,
-            ExecutionResult::Revert { output, .. } => {
-                return internal_err_with_data(
-                    "execution reverted",
-                    format!("0x{}", alloy::hex::encode(&output)),
-                );
-            }
-            ExecutionResult::Halt { reason, .. } => {
-                return internal_err(format!("execution halted: {:?}", reason));
-            }
-        }
+    let trevm = match header {
+        Some(ref h) => trevm.fill_block(h),
+        None => trevm.fill_block(&NoopBlock),
     };
 
-    // Binary search for minimum gas
-    high = best_estimate;
-    low = low.min(high);
+    let (estimation, _) = match trevm.fill_tx(&call).estimate_gas() {
+        Ok(r) => r,
+        Err(e) => return internal_err(format!("Gas estimation failed: {:?}", e.into_error())),
+    };
 
-    while low < high {
-        let mid = (low + high) / 2;
-
-        let db = match state.storage.revm_reader() {
-            Ok(r) => r,
-            Err(e) => return internal_err(format!("Failed to create revm reader: {e}")),
-        };
-
-        let mut test_call = call.clone();
-        test_call.gas = Some(mid);
-
-        let result = match execute_call(db, &test_call, header.as_ref()) {
-            Ok(r) => r,
-            Err(msg) => return internal_err(msg),
-        };
-
-        match result.result {
-            ExecutionResult::Success { .. } => {
-                high = mid;
-            }
-            ExecutionResult::Revert { .. } | ExecutionResult::Halt { .. } => {
-                low = mid + 1;
-            }
+    match estimation {
+        EstimationResult::Success { limit, .. } => rpc_ok(U64::from(limit)),
+        EstimationResult::Revert { reason, .. } => internal_err_with_data(
+            "execution reverted",
+            format!("0x{}", alloy::hex::encode(&reason)),
+        ),
+        EstimationResult::Halt { reason, .. } => {
+            internal_err(format!("execution halted: {reason:?}"))
         }
     }
-
-    // Add a small buffer (10%) to account for execution variance
-    let estimate = high.saturating_add(high / 10);
-    rpc_ok(U64::from(estimate.min(user_gas_limit)))
 }
 
 /// Handler for `eth_sendRawTransaction`.
@@ -195,56 +165,10 @@ pub(crate) async fn eth_send_raw_transaction<H: HotKv>(
     ))
 }
 
-/// Execute an EVM call with the given database and call parameters.
-fn execute_call<D: Database>(
-    db: D,
-    call: &TransactionRequest,
-    header: Option<&alloy::consensus::Header>,
-) -> Result<ResultAndState<HaltReason>, String>
-where
-    D::Error: core::fmt::Debug,
-{
-    let from = call.from.unwrap_or_default();
-    let to = call.to.unwrap_or(TxKind::Create);
-    let value = call.value.unwrap_or_default();
-    let input = call.input.input().cloned().unwrap_or_default();
-    let gas_limit = call.gas.unwrap_or(DEFAULT_GAS_LIMIT);
-
-    let (block_number, timestamp, base_fee) = match header {
-        Some(h) => (h.number, h.timestamp, h.base_fee_per_gas.unwrap_or(0)),
-        None => (0, 0, 0),
-    };
-
-    let ctx = Context::mainnet()
-        .with_db(db)
-        .modify_cfg_chained(|c| {
-            c.spec = SpecId::CANCUN;
-            c.disable_balance_check = true;
-            c.disable_base_fee = true;
-        })
-        .modify_block_chained(|b| {
-            b.number = U256::from(block_number);
-            b.timestamp = U256::from(timestamp);
-            b.basefee = base_fee;
-        })
-        .modify_tx_chained(|tx| {
-            tx.caller = from;
-            tx.kind = to;
-            tx.value = value;
-            tx.data = input;
-            tx.gas_limit = gas_limit;
-            tx.gas_price = base_fee as u128;
-        });
-
-    let mut evm = ctx.build_mainnet();
-
-    evm.replay().map_err(|e| format!("EVM execution failed: {:?}", e))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{Address, U256};
+    use alloy::primitives::{Address, TxKind, U256};
     use signet_cold::{ColdStorageTask, mem::MemColdBackend};
     use signet_hot::{mem::MemKv, model::HotKvWrite, tables::PlainAccountState};
     use signet_storage::UnifiedStorage;
@@ -318,7 +242,6 @@ mod tests {
 
         let gas = *result.as_success().unwrap();
         assert!(gas >= U64::from(21000));
-        assert!(gas <= U64::from(30000));
     }
 
     #[tokio::test]

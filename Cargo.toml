@@ -50,7 +50,7 @@ signet-libmdbx = { version = "0.8.0" }
 signet-zenith = "0.16.0-rc.8"
 
 # trevm
-trevm = { version = "0.34.0", features = ["full_env_cfg"] }
+trevm = { version = "0.34.0", features = ["full_env_cfg", "call", "estimate_gas"] }
 
 # alloy
 alloy = { version = "1.6", default-features = false, features = ["consensus", "rlp"] }
