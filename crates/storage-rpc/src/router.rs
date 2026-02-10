@@ -22,7 +22,7 @@
 //! axum::serve(listener, router.into_axum("/")).await?;
 //! ```
 
-use crate::handlers::{self, block, receipt, transaction, DEFAULT_CHAIN_ID};
+use crate::handlers::{self, DEFAULT_CHAIN_ID, block, receipt, transaction};
 use ajj::Router;
 use alloy::{eips::BlockNumberOrTag, primitives::B256};
 use signet_hot::HotKv;
@@ -44,9 +44,7 @@ impl Default for RpcRouter {
 impl RpcRouter {
     /// Create a new router builder with default settings.
     pub const fn new() -> Self {
-        Self {
-            chain_id: DEFAULT_CHAIN_ID,
-        }
+        Self { chain_id: DEFAULT_CHAIN_ID }
     }
 
     /// Set the chain ID to return from `eth_chainId`.
@@ -70,12 +68,10 @@ impl RpcRouter {
         // ================================================================
         // Stub endpoints (return static values)
         // ================================================================
-        router = router.route("eth_chainId", move || {
-            async move { handlers::eth_chain_id(chain_id).await }
-        });
-        router = router.route("eth_protocolVersion", || async {
-            handlers::eth_protocol_version().await
-        });
+        router = router
+            .route("eth_chainId", move || async move { handlers::eth_chain_id(chain_id).await });
+        router = router
+            .route("eth_protocolVersion", || async { handlers::eth_protocol_version().await });
         router = router.route("eth_syncing", || async { handlers::eth_syncing().await });
 
         // ================================================================
@@ -101,10 +97,15 @@ impl RpcRouter {
         }
         {
             let cold = cold.clone();
-            router = router.route("eth_getBlockTransactionCountByNumber", move |block_id: BlockNumberOrTag| {
-                let cold = cold.clone();
-                async move { block::eth_get_block_transaction_count_by_number(&cold, block_id).await }
-            });
+            router = router.route(
+                "eth_getBlockTransactionCountByNumber",
+                move |block_id: BlockNumberOrTag| {
+                    let cold = cold.clone();
+                    async move {
+                        block::eth_get_block_transaction_count_by_number(&cold, block_id).await
+                    }
+                },
+            );
         }
         {
             let cold = cold.clone();
@@ -148,9 +149,7 @@ impl RpcRouter {
         // ================================================================
         router = router.route("eth_coinbase", || async { handlers::eth_coinbase().await });
         router = router.route("eth_accounts", || async { handlers::eth_accounts().await });
-        router = router.route("eth_blobBaseFee", || async {
-            handlers::eth_blob_base_fee().await
-        });
+        router = router.route("eth_blobBaseFee", || async { handlers::eth_blob_base_fee().await });
         router = router.route("eth_getUncleCountByBlockHash", || async {
             handlers::eth_get_uncle_count_by_block_hash().await
         });
@@ -166,25 +165,17 @@ impl RpcRouter {
         router = router.route("eth_mining", || async { handlers::eth_mining().await });
         router = router.route("eth_hashrate", || async { handlers::eth_hashrate().await });
         router = router.route("eth_getWork", || async { handlers::eth_get_work().await });
-        router = router.route("eth_submitWork", || async {
-            handlers::eth_submit_work().await
-        });
-        router = router.route("eth_submitHashrate", || async {
-            handlers::eth_submit_hashrate().await
-        });
-        router = router.route("eth_sendTransaction", || async {
-            handlers::eth_send_transaction().await
-        });
+        router = router.route("eth_submitWork", || async { handlers::eth_submit_work().await });
+        router =
+            router.route("eth_submitHashrate", || async { handlers::eth_submit_hashrate().await });
+        router = router
+            .route("eth_sendTransaction", || async { handlers::eth_send_transaction().await });
         router = router.route("eth_sign", || async { handlers::eth_sign().await });
-        router = router.route("eth_signTransaction", || async {
-            handlers::eth_sign_transaction().await
-        });
-        router = router.route("eth_getProof", || async {
-            handlers::eth_get_proof().await
-        });
-        router = router.route("eth_createAccessList", || async {
-            handlers::eth_create_access_list().await
-        });
+        router = router
+            .route("eth_signTransaction", || async { handlers::eth_sign_transaction().await });
+        router = router.route("eth_getProof", || async { handlers::eth_get_proof().await });
+        router = router
+            .route("eth_createAccessList", || async { handlers::eth_create_access_list().await });
         router = router.route("eth_newPendingTransactionFilter", || async {
             handlers::eth_new_pending_transaction_filter().await
         });

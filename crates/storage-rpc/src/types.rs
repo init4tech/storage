@@ -3,7 +3,7 @@
 //! These types replace `serde_json::Value` and `json!` macro usage with
 //! properly typed structs that implement Serialize.
 
-use alloy::primitives::{Address, Bytes, B256, U256};
+use alloy::primitives::{Address, B256, Bytes, U256};
 use serde::Serialize;
 
 /// RPC representation of an Ethereum log.

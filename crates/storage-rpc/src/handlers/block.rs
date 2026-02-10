@@ -4,7 +4,7 @@
 //! cold storage.
 
 use crate::error::{RpcError, RpcResult};
-use crate::types::{format_hex_u64, BlockTransactions, RpcBlock, RpcLog, RpcReceipt};
+use crate::types::{BlockTransactions, RpcBlock, RpcLog, RpcReceipt, format_hex_u64};
 use alloy::{
     eips::BlockNumberOrTag,
     primitives::{B256, U64},
@@ -12,7 +12,7 @@ use alloy::{
 use signet_cold::{BlockTag, ColdStorageReadHandle, HeaderSpecifier};
 
 /// Convert a BlockNumberOrTag to a HeaderSpecifier.
-pub fn block_id_to_specifier(block_id: BlockNumberOrTag) -> HeaderSpecifier {
+pub const fn block_id_to_specifier(block_id: BlockNumberOrTag) -> HeaderSpecifier {
     match block_id {
         BlockNumberOrTag::Number(num) => HeaderSpecifier::Number(num),
         BlockNumberOrTag::Latest => HeaderSpecifier::Tag(BlockTag::Latest),
@@ -115,8 +115,10 @@ pub async fn eth_get_block_transaction_count_by_hash(
         return Ok(None);
     };
 
-    let count =
-        cold.get_transaction_count(header.number).await.map_err(|e| RpcError::internal(e.to_string()))?;
+    let count = cold
+        .get_transaction_count(header.number)
+        .await
+        .map_err(|e| RpcError::internal(e.to_string()))?;
 
     Ok(Some(U64::from(count)))
 }
@@ -136,8 +138,10 @@ pub async fn eth_get_block_transaction_count_by_number(
         return Ok(None);
     };
 
-    let count =
-        cold.get_transaction_count(header.number).await.map_err(|e| RpcError::internal(e.to_string()))?;
+    let count = cold
+        .get_transaction_count(header.number)
+        .await
+        .map_err(|e| RpcError::internal(e.to_string()))?;
 
     Ok(Some(U64::from(count)))
 }
@@ -175,7 +179,10 @@ pub async fn eth_get_block_receipts(
 
     for (idx, (receipt, tx)) in receipts.iter().zip(txs.iter()).enumerate() {
         let gas_used = if idx > 0 {
-            receipt.inner.cumulative_gas_used.saturating_sub(receipts[idx - 1].inner.cumulative_gas_used)
+            receipt
+                .inner
+                .cumulative_gas_used
+                .saturating_sub(receipts[idx - 1].inner.cumulative_gas_used)
         } else {
             receipt.inner.cumulative_gas_used
         };

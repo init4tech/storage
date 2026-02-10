@@ -4,10 +4,10 @@
 //! cold storage.
 
 use crate::error::{RpcError, RpcResult};
-use crate::types::{format_hex_u256, format_hex_u64, RpcTransaction};
+use crate::types::{RpcTransaction, format_hex_u64, format_hex_u256};
 use alloy::{
     consensus::Transaction,
-    primitives::{Bytes, B256},
+    primitives::{B256, Bytes},
     rlp::Encodable,
 };
 use signet_cold::{ColdStorageReadHandle, TransactionSpecifier};

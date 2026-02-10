@@ -8,17 +8,17 @@
 use crate::error::{RpcError, RpcResult};
 use alloy::{
     consensus::TxEnvelope,
-    primitives::{Bytes, TxKind, U256, U64},
+    primitives::{Bytes, TxKind, U64, U256},
     rlp::Decodable,
     rpc::types::TransactionRequest,
 };
 use signet_hot::{HotKv, db::HistoryRead, model::HotKvRead};
 use signet_storage::UnifiedStorage;
 use trevm::revm::{
-    context_interface::result::{ExecutionResult, HaltReason, ResultAndState},
-    database::{Database, DBErrorMarker},
-    primitives::hardfork::SpecId,
     Context, ExecuteEvm, MainBuilder, MainContext,
+    context_interface::result::{ExecutionResult, HaltReason, ResultAndState},
+    database::{DBErrorMarker, Database},
+    primitives::hardfork::SpecId,
 };
 
 /// Default gas limit for calls (30M gas).
@@ -60,9 +60,7 @@ where
     let result = execute_call(db, &call, header.as_ref())?;
 
     match result.result {
-        ExecutionResult::Success { output, .. } => {
-            Ok(Bytes::copy_from_slice(output.data()))
-        }
+        ExecutionResult::Success { output, .. } => Ok(Bytes::copy_from_slice(output.data())),
         ExecutionResult::Revert { output, .. } => {
             // Return revert data as error
             Err(RpcError::with_data(
@@ -71,10 +69,9 @@ where
                 format!("0x{}", alloy::hex::encode(&output)),
             ))
         }
-        ExecutionResult::Halt { reason, .. } => Err(RpcError::internal(format!(
-            "execution halted: {:?}",
-            reason
-        ))),
+        ExecutionResult::Halt { reason, .. } => {
+            Err(RpcError::internal(format!("execution halted: {:?}", reason)))
+        }
     }
 }
 
@@ -103,27 +100,22 @@ where
         .map_err(|e| RpcError::internal(format!("Failed to read header: {e}")))?;
 
     // Determine gas limits for binary search
-    let user_gas_limit = call.gas.map(|g| g as u64).unwrap_or(DEFAULT_GAS_LIMIT);
+    let user_gas_limit = call.gas.unwrap_or(DEFAULT_GAS_LIMIT);
     let mut low = MIN_GAS;
     let mut high = user_gas_limit;
-    let mut best_estimate = high;
-
     // First, try with maximum gas to ensure the transaction can succeed
-    {
+    let best_estimate = {
         let db = storage
             .revm_reader()
             .map_err(|e| RpcError::internal(format!("Failed to create revm reader: {e}")))?;
 
         let mut test_call = call.clone();
-        test_call.gas = Some(high.into());
+        test_call.gas = Some(high);
 
         let result = execute_call(db, &test_call, header.as_ref())?;
 
         match result.result {
-            ExecutionResult::Success { gas_used, .. } => {
-                // Use the actual gas used as the starting point
-                best_estimate = gas_used;
-            }
+            ExecutionResult::Success { gas_used, .. } => gas_used,
             ExecutionResult::Revert { output, .. } => {
                 return Err(RpcError::with_data(
                     crate::error::ErrorCode::InternalError,
@@ -132,13 +124,10 @@ where
                 ));
             }
             ExecutionResult::Halt { reason, .. } => {
-                return Err(RpcError::internal(format!(
-                    "execution halted: {:?}",
-                    reason
-                )));
+                return Err(RpcError::internal(format!("execution halted: {:?}", reason)));
             }
         }
-    }
+    };
 
     // Binary search for minimum gas
     // Start with the gas actually used as the high bound
@@ -153,7 +142,7 @@ where
             .map_err(|e| RpcError::internal(format!("Failed to create revm reader: {e}")))?;
 
         let mut test_call = call.clone();
-        test_call.gas = Some(mid.into());
+        test_call.gas = Some(mid);
 
         let result = execute_call(db, &test_call, header.as_ref())?;
 
@@ -214,21 +203,14 @@ where
 {
     // Extract call parameters
     let from = call.from.unwrap_or_default();
-    let to = call.to.map(|t| match t {
-        TxKind::Call(addr) => TxKind::Call(addr),
-        TxKind::Create => TxKind::Create,
-    }).unwrap_or(TxKind::Create);
+    let to = call.to.unwrap_or(TxKind::Create);
     let value = call.value.unwrap_or_default();
     let input = call.input.input().cloned().unwrap_or_default();
-    let gas_limit = call.gas.map(|g| g as u64).unwrap_or(DEFAULT_GAS_LIMIT);
+    let gas_limit = call.gas.unwrap_or(DEFAULT_GAS_LIMIT);
 
     // Get block context from header
     let (block_number, timestamp, base_fee) = match header {
-        Some(h) => (
-            h.number,
-            h.timestamp,
-            h.base_fee_per_gas.unwrap_or(0),
-        ),
+        Some(h) => (h.number, h.timestamp, h.base_fee_per_gas.unwrap_or(0)),
         None => (0, 0, 0),
     };
 
@@ -257,27 +239,23 @@ where
 
     let mut evm = ctx.build_mainnet();
 
-    evm.replay()
-        .map_err(|e| RpcError::internal(format!("EVM execution failed: {:?}", e)))
+    evm.replay().map_err(|e| RpcError::internal(format!("EVM execution failed: {:?}", e)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy::primitives::{Address, U256};
-    use signet_cold::ColdStorageHandle;
-    use signet_hot::{
-        mem::MemKv,
-        model::{HotKv as _, HotKvWrite},
-        tables::PlainAccountState,
-    };
+    use signet_cold::{ColdStorageTask, mem::MemColdBackend};
+    use signet_hot::{mem::MemKv, model::HotKvWrite, tables::PlainAccountState};
     use signet_storage::UnifiedStorage;
     use signet_storage_types::Account;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
 
     fn create_test_storage() -> Arc<UnifiedStorage<MemKv>> {
         let mem_kv = MemKv::default();
-        let (cold_handle, _cold_task) = ColdStorageHandle::new_null();
+        let cold_handle = ColdStorageTask::spawn(MemColdBackend::new(), CancellationToken::new());
         Arc::new(UnifiedStorage::new(mem_kv, cold_handle))
     }
 

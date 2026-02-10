@@ -4,7 +4,7 @@
 //! read from cold storage.
 
 use crate::error::{RpcError, RpcResult};
-use crate::types::{format_hex_u64, RpcLog, RpcReceipt};
+use crate::types::{RpcLog, RpcReceipt, format_hex_u64};
 use alloy::{consensus::Transaction, primitives::B256};
 use signet_cold::{ColdStorageReadHandle, ReceiptSpecifier, TransactionSpecifier};
 

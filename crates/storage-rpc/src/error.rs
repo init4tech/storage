@@ -62,28 +62,17 @@ pub struct RpcError {
 impl RpcError {
     /// Create a new RPC error.
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            code: code.code(),
-            message: message.into(),
-            data: None,
-        }
+        Self { code: code.code(), message: message.into(), data: None }
     }
 
     /// Create a new RPC error with additional data.
     pub fn with_data(code: ErrorCode, message: impl Into<String>, data: impl Into<String>) -> Self {
-        Self {
-            code: code.code(),
-            message: message.into(),
-            data: Some(data.into()),
-        }
+        Self { code: code.code(), message: message.into(), data: Some(data.into()) }
     }
 
     /// Create a "method not supported" error.
     pub fn method_not_supported(method: &str) -> Self {
-        Self::new(
-            ErrorCode::MethodNotSupported,
-            format!("Method '{}' is not supported", method),
-        )
+        Self::new(ErrorCode::MethodNotSupported, format!("Method '{}' is not supported", method))
     }
 
     /// Create an "invalid params" error.

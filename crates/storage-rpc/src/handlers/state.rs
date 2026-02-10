@@ -7,7 +7,7 @@
 //! - `eth_getStorageAt` - Contract storage slot
 
 use crate::error::{RpcError, RpcResult};
-use alloy::primitives::{Address, Bytes, B256, U256, U64};
+use alloy::primitives::{Address, B256, Bytes, U64, U256};
 use signet_hot::{HotKv, db::HotDbRead};
 use signet_storage::UnifiedStorage;
 
@@ -94,9 +94,7 @@ pub async fn eth_get_code<H: HotKv>(
         .get_bytecode(&code_hash)
         .map_err(|e| RpcError::internal(format!("Failed to read bytecode: {e}")))?;
 
-    Ok(bytecode
-        .map(|bc| Bytes::copy_from_slice(bc.original_byte_slice()))
-        .unwrap_or_default())
+    Ok(bytecode.map(|bc| Bytes::copy_from_slice(bc.original_byte_slice())).unwrap_or_default())
 }
 
 /// Handler for `eth_getStorageAt`.
@@ -133,27 +131,27 @@ pub async fn eth_get_storage_at<H: HotKv>(
 mod tests {
     use super::*;
     use alloy::primitives::{Address, B256, U256};
-    use signet_cold::ColdStorageHandle;
+    use signet_cold::{ColdStorageTask, mem::MemColdBackend};
     use signet_hot::{
         mem::MemKv,
-        model::{HotKv as _, HotKvWrite},
+        model::HotKvWrite,
         tables::{Bytecodes, PlainAccountState, PlainStorageState},
     };
     use signet_storage::UnifiedStorage;
     use signet_storage_types::Account;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
     use trevm::revm::bytecode::Bytecode;
 
-    fn create_test_storage() -> (Arc<UnifiedStorage<MemKv>>, ColdStorageHandle) {
+    fn create_test_storage() -> Arc<UnifiedStorage<MemKv>> {
         let mem_kv = MemKv::default();
-        let (cold_handle, _cold_task) = ColdStorageHandle::new_null();
-        let storage = Arc::new(UnifiedStorage::new(mem_kv, cold_handle.clone()));
-        (storage, cold_handle)
+        let cold_handle = ColdStorageTask::spawn(MemColdBackend::new(), CancellationToken::new());
+        Arc::new(UnifiedStorage::new(mem_kv, cold_handle))
     }
 
     #[tokio::test]
     async fn test_get_balance_missing_account() {
-        let (storage, _) = create_test_storage();
+        let storage = create_test_storage();
         let address = Address::from_slice(&[0x1; 20]);
 
         let result = eth_get_balance(&storage, address, None).await;
@@ -163,18 +161,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_balance_existing_account() {
-        let (storage, _) = create_test_storage();
+        let storage = create_test_storage();
         let address = Address::from_slice(&[0x1; 20]);
         let expected_balance = U256::from(1000u64);
 
         // Write account data
         {
             let writer = storage.hot().writer().unwrap();
-            let account = Account {
-                nonce: 0,
-                balance: expected_balance,
-                bytecode_hash: None,
-            };
+            let account = Account { nonce: 0, balance: expected_balance, bytecode_hash: None };
             writer.queue_put::<PlainAccountState>(&address, &account).unwrap();
             writer.raw_commit().unwrap();
         }
@@ -186,7 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_transaction_count_missing_account() {
-        let (storage, _) = create_test_storage();
+        let storage = create_test_storage();
         let address = Address::from_slice(&[0x1; 20]);
 
         let result = eth_get_transaction_count(&storage, address, None).await;
@@ -196,18 +190,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_transaction_count_existing_account() {
-        let (storage, _) = create_test_storage();
+        let storage = create_test_storage();
         let address = Address::from_slice(&[0x1; 20]);
         let expected_nonce = 42u64;
 
         // Write account data
         {
             let writer = storage.hot().writer().unwrap();
-            let account = Account {
-                nonce: expected_nonce,
-                balance: U256::ZERO,
-                bytecode_hash: None,
-            };
+            let account =
+                Account { nonce: expected_nonce, balance: U256::ZERO, bytecode_hash: None };
             writer.queue_put::<PlainAccountState>(&address, &account).unwrap();
             writer.raw_commit().unwrap();
         }
@@ -219,7 +210,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_code_missing_account() {
-        let (storage, _) = create_test_storage();
+        let storage = create_test_storage();
         let address = Address::from_slice(&[0x1; 20]);
 
         let result = eth_get_code(&storage, address, None).await;
@@ -229,17 +220,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_code_eoa() {
-        let (storage, _) = create_test_storage();
+        let storage = create_test_storage();
         let address = Address::from_slice(&[0x1; 20]);
 
         // Write EOA (no bytecode)
         {
             let writer = storage.hot().writer().unwrap();
-            let account = Account {
-                nonce: 1,
-                balance: U256::from(1000u64),
-                bytecode_hash: None,
-            };
+            let account = Account { nonce: 1, balance: U256::from(1000u64), bytecode_hash: None };
             writer.queue_put::<PlainAccountState>(&address, &account).unwrap();
             writer.raw_commit().unwrap();
         }
@@ -251,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_code_contract() {
-        let (storage, _) = create_test_storage();
+        let storage = create_test_storage();
         let address = Address::from_slice(&[0x1; 20]);
         let code_bytes = vec![0x60, 0x80, 0x60, 0x40, 0x52]; // PUSH1 0x80 PUSH1 0x40 MSTORE
         let code_hash = B256::from_slice(&alloy::primitives::keccak256(&code_bytes).0);
@@ -259,11 +246,7 @@ mod tests {
         // Write contract account and bytecode
         {
             let writer = storage.hot().writer().unwrap();
-            let account = Account {
-                nonce: 1,
-                balance: U256::ZERO,
-                bytecode_hash: Some(code_hash),
-            };
+            let account = Account { nonce: 1, balance: U256::ZERO, bytecode_hash: Some(code_hash) };
             writer.queue_put::<PlainAccountState>(&address, &account).unwrap();
 
             let bytecode = Bytecode::new_raw(code_bytes.clone().into());
@@ -278,7 +261,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_storage_at_missing_account() {
-        let (storage, _) = create_test_storage();
+        let storage = create_test_storage();
         let address = Address::from_slice(&[0x1; 20]);
         let slot = B256::from_slice(&[0x2; 32]);
 
@@ -289,7 +272,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_storage_at_existing_slot() {
-        let (storage, _) = create_test_storage();
+        let storage = create_test_storage();
         let address = Address::from_slice(&[0x1; 20]);
         let slot = B256::from_slice(&[0x0; 32]);
         let expected_value = U256::from(12345u64);
@@ -306,9 +289,6 @@ mod tests {
 
         let result = eth_get_storage_at(&storage, address, slot, None).await;
         assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap(),
-            B256::from(expected_value.to_be_bytes())
-        );
+        assert_eq!(result.unwrap(), B256::from(expected_value.to_be_bytes()));
     }
 }

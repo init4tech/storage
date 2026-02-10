@@ -27,7 +27,10 @@ tracing.workspace = true
 trevm.workspace = true
 
 [dev-dependencies]
+signet-cold = { workspace = true, features = ["in-memory"] }
+signet-hot = { workspace = true, features = ["in-memory"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
+tokio-util.workspace = true
 
 [features]
 default = []

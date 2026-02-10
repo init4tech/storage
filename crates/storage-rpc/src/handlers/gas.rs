@@ -20,7 +20,7 @@ const DEFAULT_PRIORITY_FEE: u64 = 1_000_000_000;
 /// Returns the current gas price based on the latest block's base fee.
 /// This is a simplified implementation that uses base_fee + priority_fee.
 ///
-/// For EIP-1559 transactions, users should use `eth_maxPriorityFeePerGas` 
+/// For EIP-1559 transactions, users should use `eth_maxPriorityFeePerGas`
 /// and the base fee from the latest block header.
 pub async fn eth_gas_price<H: HotKv>(storage: &UnifiedStorage<H>) -> RpcResult<U256> {
     let reader = storage
@@ -67,60 +67,46 @@ pub async fn eth_max_priority_fee_per_gas<H: HotKv>(
 mod tests {
     use super::*;
     use alloy::consensus::Header;
-    use signet_cold::ColdStorageHandle;
-    use signet_hot::{
-        mem::MemKv,
-        model::{HotKv as _, HotKvWrite},
-        tables::Headers,
-    };
+    use signet_cold::{ColdStorageTask, mem::MemColdBackend};
+    use signet_hot::{mem::MemKv, model::HotKvWrite, tables::Headers};
     use signet_storage::UnifiedStorage;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
 
     fn create_test_storage() -> Arc<UnifiedStorage<MemKv>> {
         let mem_kv = MemKv::default();
-        let (cold_handle, _cold_task) = ColdStorageHandle::new_null();
+        let cold_handle = ColdStorageTask::spawn(MemColdBackend::new(), CancellationToken::new());
         Arc::new(UnifiedStorage::new(mem_kv, cold_handle))
     }
 
     #[tokio::test]
     async fn test_gas_price_no_blocks() {
         let storage = create_test_storage();
-
-        let result = eth_gas_price(&storage).await;
-        assert!(result.is_ok());
-        // Should return default minimum gas price
-        assert_eq!(result.unwrap(), U256::from(DEFAULT_MIN_GAS_PRICE));
+        let result = eth_gas_price(&storage).await.unwrap();
+        assert_eq!(result, U256::from(DEFAULT_MIN_GAS_PRICE));
     }
 
     #[tokio::test]
     async fn test_gas_price_with_block() {
         let storage = create_test_storage();
-        let base_fee = 2_000_000_000u128; // 2 gwei
+        let base_fee = 2_000_000_000u64; // 2 gwei
 
         // Write a header with base fee
         {
             let writer = storage.hot().writer().unwrap();
-            let mut header = Header::default();
-            header.base_fee_per_gas = Some(base_fee);
+            let header = Header { base_fee_per_gas: Some(base_fee), ..Default::default() };
             writer.queue_put::<Headers>(&0u64, &header).unwrap();
             writer.raw_commit().unwrap();
         }
 
-        let result = eth_gas_price(&storage).await;
-        assert!(result.is_ok());
-        // Should return base_fee + priority_fee
-        assert_eq!(
-            result.unwrap(),
-            U256::from(base_fee + DEFAULT_PRIORITY_FEE)
-        );
+        let result = eth_gas_price(&storage).await.unwrap();
+        assert_eq!(result, U256::from(base_fee.saturating_add(DEFAULT_PRIORITY_FEE)));
     }
 
     #[tokio::test]
     async fn test_max_priority_fee_per_gas() {
         let storage = create_test_storage();
-
-        let result = eth_max_priority_fee_per_gas(&storage).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), U256::from(DEFAULT_PRIORITY_FEE));
+        let result = eth_max_priority_fee_per_gas(&storage).await.unwrap();
+        assert_eq!(result, U256::from(DEFAULT_PRIORITY_FEE));
     }
 }
