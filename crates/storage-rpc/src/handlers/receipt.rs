@@ -5,8 +5,11 @@
 
 use crate::error::{RpcResult, internal_err, rpc_ok};
 use crate::router::RpcContext;
-use crate::types::{RpcLog, RpcReceipt, format_hex_u64};
-use alloy::{consensus::Transaction, primitives::B256};
+use crate::types::{RpcLog, RpcReceipt};
+use alloy::{
+    consensus::Transaction,
+    primitives::{B256, U64},
+};
 use signet_cold::{ReceiptSpecifier, TransactionSpecifier};
 use signet_hot::HotKv;
 
@@ -43,7 +46,7 @@ pub(crate) async fn eth_get_transaction_receipt<H: HotKv>(
         .iter()
         .enumerate()
         .map(|(log_idx, log)| RpcLog {
-            log_index: format_hex_u64(log_idx as u64),
+            log_index: U64::from(log_idx as u64),
             transaction_index: None,
             transaction_hash: tx_hash,
             block_hash: None,
@@ -59,13 +62,9 @@ pub(crate) async fn eth_get_transaction_receipt<H: HotKv>(
         transaction_index: None,
         block_hash: None,
         block_number: None,
-        cumulative_gas_used: format_hex_u64(receipt.inner.cumulative_gas_used),
-        gas_used: format_hex_u64(receipt.inner.cumulative_gas_used), // Approximate
-        status: if receipt.inner.status.coerce_status() {
-            "0x1".to_string()
-        } else {
-            "0x0".to_string()
-        },
+        cumulative_gas_used: U64::from(receipt.inner.cumulative_gas_used),
+        gas_used: U64::from(receipt.inner.cumulative_gas_used), // Approximate
+        status: U64::from(u64::from(receipt.inner.status.coerce_status())),
         to: tx.to(),
         logs,
     }))

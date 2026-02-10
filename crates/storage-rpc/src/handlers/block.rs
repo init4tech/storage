@@ -5,7 +5,7 @@
 
 use crate::error::{RpcResult, internal_err, rpc_ok};
 use crate::router::RpcContext;
-use crate::types::{BlockTransactions, RpcBlock, RpcLog, RpcReceipt, format_hex_u64};
+use crate::types::{BlockTransactions, RpcBlock, RpcLog, RpcReceipt};
 use alloy::{
     eips::BlockNumberOrTag,
     primitives::{B256, U64},
@@ -73,12 +73,12 @@ pub(crate) async fn eth_get_block_by_hash<H: HotKv>(
 
     rpc_ok(Some(RpcBlock {
         hash,
-        number: format_hex_u64(header.number),
+        number: U64::from(header.number),
         parent_hash: header.parent_hash,
-        timestamp: format_hex_u64(header.timestamp),
-        gas_limit: format_hex_u64(header.gas_limit),
-        gas_used: format_hex_u64(header.gas_used),
-        base_fee_per_gas: header.base_fee_per_gas.map(format_hex_u64),
+        timestamp: U64::from(header.timestamp),
+        gas_limit: U64::from(header.gas_limit),
+        gas_used: U64::from(header.gas_used),
+        base_fee_per_gas: header.base_fee_per_gas.map(U64::from),
         transactions: BlockTransactions::Hashes(tx_hashes),
         uncles: vec![],
     }))
@@ -212,11 +212,11 @@ pub(crate) async fn eth_get_block_receipts<H: HotKv>(
                 .iter()
                 .enumerate()
                 .map(|(log_idx, log)| RpcLog {
-                    log_index: format_hex_u64(log_idx as u64),
-                    transaction_index: Some(format_hex_u64(idx as u64)),
+                    log_index: U64::from(log_idx as u64),
+                    transaction_index: Some(U64::from(idx as u64)),
                     transaction_hash: *tx.tx_hash(),
                     block_hash: Some(block_hash),
-                    block_number: Some(format_hex_u64(block_number)),
+                    block_number: Some(U64::from(block_number)),
                     address: log.address,
                     data: log.data.data.clone(),
                     topics: log.data.topics().to_vec(),
@@ -225,16 +225,12 @@ pub(crate) async fn eth_get_block_receipts<H: HotKv>(
 
             RpcReceipt {
                 transaction_hash: *tx.tx_hash(),
-                transaction_index: Some(format_hex_u64(idx as u64)),
+                transaction_index: Some(U64::from(idx as u64)),
                 block_hash: Some(block_hash),
-                block_number: Some(format_hex_u64(block_number)),
-                cumulative_gas_used: format_hex_u64(receipt.inner.cumulative_gas_used),
-                gas_used: format_hex_u64(gas_used),
-                status: if receipt.inner.status.coerce_status() {
-                    "0x1".to_string()
-                } else {
-                    "0x0".to_string()
-                },
+                block_number: Some(U64::from(block_number)),
+                cumulative_gas_used: U64::from(receipt.inner.cumulative_gas_used),
+                gas_used: U64::from(gas_used),
+                status: U64::from(u64::from(receipt.inner.status.coerce_status())),
                 to: None,
                 logs,
             }

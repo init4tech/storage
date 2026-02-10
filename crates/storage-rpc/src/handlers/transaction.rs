@@ -5,10 +5,10 @@
 
 use crate::error::{RpcResult, internal_err, rpc_ok};
 use crate::router::RpcContext;
-use crate::types::{RpcTransaction, format_hex_u64, format_hex_u256};
+use crate::types::RpcTransaction;
 use alloy::{
     consensus::Transaction,
-    primitives::{B256, Bytes},
+    primitives::{B256, Bytes, U64},
     rlp::Encodable,
 };
 use signet_cold::TransactionSpecifier;
@@ -42,10 +42,10 @@ pub(crate) async fn eth_get_transaction_by_hash<H: HotKv>(
 
     rpc_ok(Some(RpcTransaction {
         hash: *tx.tx_hash(),
-        nonce: format_hex_u64(tx.nonce()),
+        nonce: U64::from(tx.nonce()),
         to: tx.to(),
-        value: format_hex_u256(tx.value()),
-        gas: format_hex_u64(tx.gas_limit()),
+        value: tx.value(),
+        gas: U64::from(tx.gas_limit()),
         input: tx.input().clone(),
     }))
 }
