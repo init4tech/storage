@@ -1,0 +1,31 @@
+[package]
+name = "signet-storage-rpc"
+description = "JSON-RPC server for Signet storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["blockchain", "storage", "ethereum", "rpc"]
+categories = ["web-programming"]
+
+[dependencies]
+signet-storage.workspace = true
+signet-hot.workspace = true
+
+alloy.workspace = true
+ajj = { version = "0.4", features = ["axum"] }
+axum = "0.8"
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[features]
+default = []
+test-utils = ["signet-storage/test-utils"]
