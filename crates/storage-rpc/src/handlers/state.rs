@@ -6,10 +6,10 @@
 //! - `eth_getCode` - Contract bytecode
 //! - `eth_getStorageAt` - Contract storage slot
 
-use crate::error::{RpcError, RpcResult};
+use crate::error::{RpcResult, internal_err, rpc_ok};
+use crate::router::RpcContext;
 use alloy::primitives::{Address, B256, Bytes, U64, U256};
 use signet_hot::{HotKv, db::HotDbRead};
-use signet_storage::UnifiedStorage;
 
 /// Handler for `eth_getBalance`.
 ///
@@ -19,20 +19,21 @@ use signet_storage::UnifiedStorage;
 /// # Parameters
 /// - `address`: The address to query
 /// - `_block`: Block identifier (ignored, always uses latest state)
-pub async fn eth_get_balance<H: HotKv>(
-    storage: &UnifiedStorage<H>,
-    address: Address,
-    _block: Option<String>,
+pub(crate) async fn eth_get_balance<H: HotKv>(
+    (address, _block): (Address, String),
+    state: RpcContext<H>,
 ) -> RpcResult<U256> {
-    let reader = storage
-        .reader()
-        .map_err(|e| RpcError::internal(format!("Failed to create reader: {e}")))?;
+    let reader = match state.storage.reader() {
+        Ok(r) => r,
+        Err(e) => return internal_err(format!("Failed to create reader: {e}")),
+    };
 
-    let account = reader
-        .get_account(&address)
-        .map_err(|e| RpcError::internal(format!("Failed to read account: {e}")))?;
+    let account = match reader.get_account(&address) {
+        Ok(a) => a,
+        Err(e) => return internal_err(format!("Failed to read account: {e}")),
+    };
 
-    Ok(account.map(|a| a.balance).unwrap_or_default())
+    rpc_ok(account.map(|a| a.balance).unwrap_or_default())
 }
 
 /// Handler for `eth_getTransactionCount`.
@@ -43,20 +44,21 @@ pub async fn eth_get_balance<H: HotKv>(
 /// # Parameters
 /// - `address`: The address to query
 /// - `_block`: Block identifier (ignored, always uses latest state)
-pub async fn eth_get_transaction_count<H: HotKv>(
-    storage: &UnifiedStorage<H>,
-    address: Address,
-    _block: Option<String>,
+pub(crate) async fn eth_get_transaction_count<H: HotKv>(
+    (address, _block): (Address, String),
+    state: RpcContext<H>,
 ) -> RpcResult<U64> {
-    let reader = storage
-        .reader()
-        .map_err(|e| RpcError::internal(format!("Failed to create reader: {e}")))?;
+    let reader = match state.storage.reader() {
+        Ok(r) => r,
+        Err(e) => return internal_err(format!("Failed to create reader: {e}")),
+    };
 
-    let account = reader
-        .get_account(&address)
-        .map_err(|e| RpcError::internal(format!("Failed to read account: {e}")))?;
+    let account = match reader.get_account(&address) {
+        Ok(a) => a,
+        Err(e) => return internal_err(format!("Failed to read account: {e}")),
+    };
 
-    Ok(U64::from(account.map(|a| a.nonce).unwrap_or_default()))
+    rpc_ok(U64::from(account.map(|a| a.nonce).unwrap_or_default()))
 }
 
 /// Handler for `eth_getCode`.
@@ -67,34 +69,34 @@ pub async fn eth_get_transaction_count<H: HotKv>(
 /// # Parameters
 /// - `address`: The address to query
 /// - `_block`: Block identifier (ignored, always uses latest state)
-pub async fn eth_get_code<H: HotKv>(
-    storage: &UnifiedStorage<H>,
-    address: Address,
-    _block: Option<String>,
+pub(crate) async fn eth_get_code<H: HotKv>(
+    (address, _block): (Address, String),
+    state: RpcContext<H>,
 ) -> RpcResult<Bytes> {
-    let reader = storage
-        .reader()
-        .map_err(|e| RpcError::internal(format!("Failed to create reader: {e}")))?;
+    let reader = match state.storage.reader() {
+        Ok(r) => r,
+        Err(e) => return internal_err(format!("Failed to create reader: {e}")),
+    };
 
-    // First get the account to find its bytecode hash
-    let account = reader
-        .get_account(&address)
-        .map_err(|e| RpcError::internal(format!("Failed to read account: {e}")))?;
+    let account = match reader.get_account(&address) {
+        Ok(a) => a,
+        Err(e) => return internal_err(format!("Failed to read account: {e}")),
+    };
 
     let Some(account) = account else {
-        return Ok(Bytes::default());
+        return rpc_ok(Bytes::default());
     };
 
     let Some(code_hash) = account.bytecode_hash else {
-        return Ok(Bytes::default());
+        return rpc_ok(Bytes::default());
     };
 
-    // Fetch the actual bytecode
-    let bytecode = reader
-        .get_bytecode(&code_hash)
-        .map_err(|e| RpcError::internal(format!("Failed to read bytecode: {e}")))?;
+    let bytecode = match reader.get_bytecode(&code_hash) {
+        Ok(b) => b,
+        Err(e) => return internal_err(format!("Failed to read bytecode: {e}")),
+    };
 
-    Ok(bytecode.map(|bc| Bytes::copy_from_slice(bc.original_byte_slice())).unwrap_or_default())
+    rpc_ok(bytecode.map(|bc| Bytes::copy_from_slice(bc.original_byte_slice())).unwrap_or_default())
 }
 
 /// Handler for `eth_getStorageAt`.
@@ -106,29 +108,27 @@ pub async fn eth_get_code<H: HotKv>(
 /// - `address`: The address to query
 /// - `slot`: The storage slot position
 /// - `_block`: Block identifier (ignored, always uses latest state)
-pub async fn eth_get_storage_at<H: HotKv>(
-    storage: &UnifiedStorage<H>,
-    address: Address,
-    slot: B256,
-    _block: Option<String>,
+pub(crate) async fn eth_get_storage_at<H: HotKv>(
+    (address, slot, _block): (Address, B256, String),
+    state: RpcContext<H>,
 ) -> RpcResult<B256> {
-    let reader = storage
-        .reader()
-        .map_err(|e| RpcError::internal(format!("Failed to create reader: {e}")))?;
+    let reader = match state.storage.reader() {
+        Ok(r) => r,
+        Err(e) => return internal_err(format!("Failed to create reader: {e}")),
+    };
 
-    // Convert B256 slot to U256 for the query
     let slot_u256 = U256::from_be_bytes(slot.0);
 
-    let value = reader
-        .get_storage(&address, &slot_u256)
-        .map_err(|e| RpcError::internal(format!("Failed to read storage: {e}")))?;
+    let value = match reader.get_storage(&address, &slot_u256) {
+        Ok(v) => v,
+        Err(e) => return internal_err(format!("Failed to read storage: {e}")),
+    };
 
-    // Convert back to B256 for the response
-    Ok(B256::from(value.unwrap_or_default().to_be_bytes()))
+    rpc_ok(B256::from(value.unwrap_or_default().to_be_bytes()))
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use alloy::primitives::{Address, B256, U256};
     use signet_cold::{ColdStorageTask, mem::MemColdBackend};
@@ -143,10 +143,14 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use trevm::revm::bytecode::Bytecode;
 
-    fn create_test_storage() -> Arc<UnifiedStorage<MemKv>> {
+    pub(crate) fn create_test_storage() -> Arc<UnifiedStorage<MemKv>> {
         let mem_kv = MemKv::default();
         let cold_handle = ColdStorageTask::spawn(MemColdBackend::new(), CancellationToken::new());
         Arc::new(UnifiedStorage::new(mem_kv, cold_handle))
+    }
+
+    fn test_ctx(storage: &Arc<UnifiedStorage<MemKv>>) -> RpcContext<MemKv> {
+        RpcContext { storage: storage.clone(), chain_id: 31337 }
     }
 
     #[tokio::test]
@@ -154,9 +158,8 @@ mod tests {
         let storage = create_test_storage();
         let address = Address::from_slice(&[0x1; 20]);
 
-        let result = eth_get_balance(&storage, address, None).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), U256::ZERO);
+        let result = eth_get_balance((address, "latest".into()), test_ctx(&storage)).await;
+        assert_eq!(result.0.unwrap(), U256::ZERO);
     }
 
     #[tokio::test]
@@ -165,7 +168,6 @@ mod tests {
         let address = Address::from_slice(&[0x1; 20]);
         let expected_balance = U256::from(1000u64);
 
-        // Write account data
         {
             let writer = storage.hot().writer().unwrap();
             let account = Account { nonce: 0, balance: expected_balance, bytecode_hash: None };
@@ -173,9 +175,8 @@ mod tests {
             writer.raw_commit().unwrap();
         }
 
-        let result = eth_get_balance(&storage, address, None).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), expected_balance);
+        let result = eth_get_balance((address, "latest".into()), test_ctx(&storage)).await;
+        assert_eq!(result.0.unwrap(), expected_balance);
     }
 
     #[tokio::test]
@@ -183,9 +184,9 @@ mod tests {
         let storage = create_test_storage();
         let address = Address::from_slice(&[0x1; 20]);
 
-        let result = eth_get_transaction_count(&storage, address, None).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), U64::ZERO);
+        let result =
+            eth_get_transaction_count((address, "latest".into()), test_ctx(&storage)).await;
+        assert_eq!(result.0.unwrap(), U64::ZERO);
     }
 
     #[tokio::test]
@@ -194,7 +195,6 @@ mod tests {
         let address = Address::from_slice(&[0x1; 20]);
         let expected_nonce = 42u64;
 
-        // Write account data
         {
             let writer = storage.hot().writer().unwrap();
             let account =
@@ -203,9 +203,9 @@ mod tests {
             writer.raw_commit().unwrap();
         }
 
-        let result = eth_get_transaction_count(&storage, address, None).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), U64::from(expected_nonce));
+        let result =
+            eth_get_transaction_count((address, "latest".into()), test_ctx(&storage)).await;
+        assert_eq!(result.0.unwrap(), U64::from(expected_nonce));
     }
 
     #[tokio::test]
@@ -213,9 +213,8 @@ mod tests {
         let storage = create_test_storage();
         let address = Address::from_slice(&[0x1; 20]);
 
-        let result = eth_get_code(&storage, address, None).await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+        let result = eth_get_code((address, "latest".into()), test_ctx(&storage)).await;
+        assert!(result.0.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -223,7 +222,6 @@ mod tests {
         let storage = create_test_storage();
         let address = Address::from_slice(&[0x1; 20]);
 
-        // Write EOA (no bytecode)
         {
             let writer = storage.hot().writer().unwrap();
             let account = Account { nonce: 1, balance: U256::from(1000u64), bytecode_hash: None };
@@ -231,9 +229,8 @@ mod tests {
             writer.raw_commit().unwrap();
         }
 
-        let result = eth_get_code(&storage, address, None).await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+        let result = eth_get_code((address, "latest".into()), test_ctx(&storage)).await;
+        assert!(result.0.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -243,7 +240,6 @@ mod tests {
         let code_bytes = vec![0x60, 0x80, 0x60, 0x40, 0x52]; // PUSH1 0x80 PUSH1 0x40 MSTORE
         let code_hash = B256::from_slice(&alloy::primitives::keccak256(&code_bytes).0);
 
-        // Write contract account and bytecode
         {
             let writer = storage.hot().writer().unwrap();
             let account = Account { nonce: 1, balance: U256::ZERO, bytecode_hash: Some(code_hash) };
@@ -254,9 +250,8 @@ mod tests {
             writer.raw_commit().unwrap();
         }
 
-        let result = eth_get_code(&storage, address, None).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().as_ref(), &code_bytes);
+        let result = eth_get_code((address, "latest".into()), test_ctx(&storage)).await;
+        assert_eq!(result.0.unwrap().as_ref(), &code_bytes);
     }
 
     #[tokio::test]
@@ -265,9 +260,8 @@ mod tests {
         let address = Address::from_slice(&[0x1; 20]);
         let slot = B256::from_slice(&[0x2; 32]);
 
-        let result = eth_get_storage_at(&storage, address, slot, None).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), B256::ZERO);
+        let result = eth_get_storage_at((address, slot, "latest".into()), test_ctx(&storage)).await;
+        assert_eq!(result.0.unwrap(), B256::ZERO);
     }
 
     #[tokio::test]
@@ -277,7 +271,6 @@ mod tests {
         let slot = B256::from_slice(&[0x0; 32]);
         let expected_value = U256::from(12345u64);
 
-        // Write storage data
         {
             let writer = storage.hot().writer().unwrap();
             let slot_u256 = U256::from_be_bytes(slot.0);
@@ -287,8 +280,7 @@ mod tests {
             writer.raw_commit().unwrap();
         }
 
-        let result = eth_get_storage_at(&storage, address, slot, None).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), B256::from(expected_value.to_be_bytes()));
+        let result = eth_get_storage_at((address, slot, "latest".into()), test_ctx(&storage)).await;
+        assert_eq!(result.0.unwrap(), B256::from(expected_value.to_be_bytes()));
     }
 }

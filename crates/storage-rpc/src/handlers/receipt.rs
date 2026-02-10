@@ -3,39 +3,40 @@
 //! This module contains handlers for transaction receipt query endpoints that
 //! read from cold storage.
 
-use crate::error::{RpcError, RpcResult};
+use crate::error::{RpcResult, internal_err, rpc_ok};
+use crate::router::RpcContext;
 use crate::types::{RpcLog, RpcReceipt, format_hex_u64};
 use alloy::{consensus::Transaction, primitives::B256};
-use signet_cold::{ColdStorageReadHandle, ReceiptSpecifier, TransactionSpecifier};
+use signet_cold::{ReceiptSpecifier, TransactionSpecifier};
+use signet_hot::HotKv;
 
 /// Handler for `eth_getTransactionReceipt`.
 ///
 /// Returns the receipt of a transaction by transaction hash.
-pub async fn eth_get_transaction_receipt(
-    cold: &ColdStorageReadHandle,
+pub(crate) async fn eth_get_transaction_receipt<H: HotKv>(
     tx_hash: B256,
+    state: RpcContext<H>,
 ) -> RpcResult<Option<RpcReceipt>> {
-    // Get the receipt
-    let receipt = cold
-        .get_receipt(ReceiptSpecifier::TxHash(tx_hash))
-        .await
-        .map_err(|e| RpcError::internal(e.to_string()))?;
+    let cold = state.storage.cold_reader();
+
+    let receipt = match cold.get_receipt(ReceiptSpecifier::TxHash(tx_hash)).await {
+        Ok(r) => r,
+        Err(e) => return internal_err(format!("Failed to get receipt: {e}")),
+    };
 
     let Some(receipt) = receipt else {
-        return Ok(None);
+        return rpc_ok(None);
     };
 
-    // Get the transaction to get additional info (from, to, etc.)
-    let tx = cold
-        .get_transaction(TransactionSpecifier::Hash(tx_hash))
-        .await
-        .map_err(|e| RpcError::internal(e.to_string()))?;
+    let tx = match cold.get_transaction(TransactionSpecifier::Hash(tx_hash)).await {
+        Ok(t) => t,
+        Err(e) => return internal_err(format!("Failed to get transaction: {e}")),
+    };
 
     let Some(tx) = tx else {
-        return Err(RpcError::internal("Receipt found but transaction missing"));
+        return internal_err("Receipt found but transaction missing");
     };
 
-    // Build logs
     let logs: Vec<RpcLog> = receipt
         .inner
         .logs
@@ -53,8 +54,7 @@ pub async fn eth_get_transaction_receipt(
         })
         .collect();
 
-    // Build receipt
-    let rpc_receipt = RpcReceipt {
+    rpc_ok(Some(RpcReceipt {
         transaction_hash: tx_hash,
         transaction_index: None,
         block_hash: None,
@@ -68,7 +68,5 @@ pub async fn eth_get_transaction_receipt(
         },
         to: tx.to(),
         logs,
-    };
-
-    Ok(Some(rpc_receipt))
+    }))
 }

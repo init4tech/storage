@@ -100,7 +100,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod error;
-pub use error::{ErrorCode, RpcError, RpcResult};
+pub use error::{RpcResult, rpc_ok};
 
 pub mod handlers;
 
@@ -114,7 +114,4 @@ pub use types::{BlockTransactions, RpcBlock, RpcLog, RpcReceipt, RpcTransaction}
 pub use ajj;
 pub use signet_storage::UnifiedStorage;
 
-// These are used in handlers and will be more extensively used in Phase 2
-use thiserror as _;
 use tokio as _;
-use tracing as _;

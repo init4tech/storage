@@ -1,98 +1,48 @@
-//! RPC error types following Ethereum JSON-RPC spec.
+//! RPC error helpers built on [`ajj`]'s error types.
 //!
-//! Error codes follow the JSON-RPC 2.0 specification and Ethereum conventions:
-//! - `-32700`: Parse error
-//! - `-32600`: Invalid Request
-//! - `-32601`: Method not found
-//! - `-32602`: Invalid params
-//! - `-32603`: Internal error
-//! - `-32000` to `-32099`: Server error (reserved for implementation-defined errors)
+//! This module provides thin convenience functions over [`ErrorPayload`] and
+//! [`ResponsePayload`] for constructing common JSON-RPC error responses.
 
-use serde::{Deserialize, Serialize};
-
-/// Standard JSON-RPC 2.0 error codes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum ErrorCode {
-    /// Invalid JSON was received.
-    ParseError = -32700,
-    /// The JSON sent is not a valid Request object.
-    InvalidRequest = -32600,
-    /// The method does not exist / is not available.
-    MethodNotFound = -32601,
-    /// Invalid method parameter(s).
-    InvalidParams = -32602,
-    /// Internal JSON-RPC error.
-    InternalError = -32603,
-    /// Method is not supported by this server.
-    MethodNotSupported = -32004,
-}
-
-impl ErrorCode {
-    /// Get the error code as an i32.
-    pub const fn code(self) -> i32 {
-        self as i32
-    }
-
-    /// Get the default message for this error code.
-    pub const fn message(self) -> &'static str {
-        match self {
-            Self::ParseError => "Parse error",
-            Self::InvalidRequest => "Invalid Request",
-            Self::MethodNotFound => "Method not found",
-            Self::InvalidParams => "Invalid params",
-            Self::InternalError => "Internal error",
-            Self::MethodNotSupported => "Method not supported",
-        }
-    }
-}
-
-/// RPC error type for handler results.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RpcError {
-    /// Error code.
-    pub code: i32,
-    /// Error message.
-    pub message: String,
-    /// Optional additional data.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<String>,
-}
-
-impl RpcError {
-    /// Create a new RPC error.
-    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self { code: code.code(), message: message.into(), data: None }
-    }
-
-    /// Create a new RPC error with additional data.
-    pub fn with_data(code: ErrorCode, message: impl Into<String>, data: impl Into<String>) -> Self {
-        Self { code: code.code(), message: message.into(), data: Some(data.into()) }
-    }
-
-    /// Create a "method not supported" error.
-    pub fn method_not_supported(method: &str) -> Self {
-        Self::new(ErrorCode::MethodNotSupported, format!("Method '{}' is not supported", method))
-    }
-
-    /// Create an "invalid params" error.
-    pub fn invalid_params(message: impl Into<String>) -> Self {
-        Self::new(ErrorCode::InvalidParams, message)
-    }
-
-    /// Create an "internal error".
-    pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(ErrorCode::InternalError, message)
-    }
-}
-
-impl std::fmt::Display for RpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[{}] {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for RpcError {}
+use ajj::{ErrorPayload, ResponsePayload};
+use std::borrow::Cow;
 
 /// Result type for RPC handlers.
-pub type RpcResult<T> = Result<T, RpcError>;
+pub type RpcResult<T> = ResponsePayload<T, String>;
+
+/// Error code for methods not supported by this server.
+const METHOD_NOT_SUPPORTED: i64 = -32004;
+
+/// Error code for invalid parameters.
+const INVALID_PARAMS: i64 = -32602;
+
+/// Wrap a successful value in an RPC result.
+pub const fn rpc_ok<T>(value: T) -> RpcResult<T> {
+    ResponsePayload(Ok(value))
+}
+
+/// Create a "method not supported" response (code -32004).
+pub fn method_not_supported<T>(method: &str) -> RpcResult<T> {
+    ResponsePayload(Err(ErrorPayload {
+        code: METHOD_NOT_SUPPORTED,
+        message: Cow::Owned(format!("Method '{method}' is not supported")),
+        data: None,
+    }))
+}
+
+/// Create an "invalid params" response (code -32602).
+pub fn invalid_params<T>(msg: impl Into<Cow<'static, str>>) -> RpcResult<T> {
+    ResponsePayload(Err(ErrorPayload { code: INVALID_PARAMS, message: msg.into(), data: None }))
+}
+
+/// Create an internal error response (code -32603).
+pub fn internal_err<T>(msg: impl std::fmt::Display) -> RpcResult<T> {
+    ResponsePayload::internal_error_message(Cow::Owned(msg.to_string()))
+}
+
+/// Create an internal error response with additional data (code -32603).
+pub fn internal_err_with_data<T>(
+    msg: impl Into<Cow<'static, str>>,
+    data: impl Into<String>,
+) -> RpcResult<T> {
+    ResponsePayload::internal_error_with_message_and_obj(msg.into(), data.into())
+}

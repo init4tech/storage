@@ -21,9 +21,7 @@ alloy = { workspace = true, features = ["rpc-types", "rlp"] }
 ajj = { version = "0.4", features = ["axum"] }
 axum = "0.8"
 serde = { workspace = true, features = ["derive"] }
-thiserror.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 trevm.workspace = true
 
 [dev-dependencies]

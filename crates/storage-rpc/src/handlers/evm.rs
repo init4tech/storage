@@ -5,7 +5,10 @@
 //! - `eth_estimateGas` - Estimate gas for a transaction
 //! - `eth_sendRawTransaction` - Submit a raw transaction (stub)
 
-use crate::error::{RpcError, RpcResult};
+use crate::error::{
+    RpcResult, internal_err, internal_err_with_data, invalid_params, method_not_supported, rpc_ok,
+};
+use crate::router::RpcContext;
 use alloy::{
     consensus::TxEnvelope,
     primitives::{Bytes, TxKind, U64, U256},
@@ -13,7 +16,6 @@ use alloy::{
     rpc::types::TransactionRequest,
 };
 use signet_hot::{HotKv, db::HistoryRead, model::HotKvRead};
-use signet_storage::UnifiedStorage;
 use trevm::revm::{
     Context, ExecuteEvm, MainBuilder, MainContext,
     context_interface::result::{ExecutionResult, HaltReason, ResultAndState},
@@ -35,42 +37,40 @@ const MIN_GAS: u64 = 21_000;
 /// # Parameters
 /// - `call`: Transaction request with call parameters
 /// - `_block`: Block identifier (ignored, always uses latest state)
-pub async fn eth_call<H: HotKv>(
-    storage: &UnifiedStorage<H>,
-    call: TransactionRequest,
-    _block: Option<String>,
+pub(crate) async fn eth_call<H: HotKv>(
+    (call, _block): (TransactionRequest, Option<String>),
+    state: RpcContext<H>,
 ) -> RpcResult<Bytes>
 where
     <<H as HotKv>::RoTx as HotKvRead>::Error: DBErrorMarker,
 {
-    // Get revm database adapter
-    let db = storage
-        .revm_reader()
-        .map_err(|e| RpcError::internal(format!("Failed to create revm reader: {e}")))?;
+    let db = match state.storage.revm_reader() {
+        Ok(r) => r,
+        Err(e) => return internal_err(format!("Failed to create revm reader: {e}")),
+    };
 
-    // Get latest block info for EVM context
-    let reader = storage
-        .reader()
-        .map_err(|e| RpcError::internal(format!("Failed to create reader: {e}")))?;
-    let header = reader
-        .last_header()
-        .map_err(|e| RpcError::internal(format!("Failed to read header: {e}")))?;
+    let reader = match state.storage.reader() {
+        Ok(r) => r,
+        Err(e) => return internal_err(format!("Failed to create reader: {e}")),
+    };
+    let header = match reader.last_header() {
+        Ok(h) => h,
+        Err(e) => return internal_err(format!("Failed to read header: {e}")),
+    };
 
-    // Build and execute EVM
-    let result = execute_call(db, &call, header.as_ref())?;
+    let result = match execute_call(db, &call, header.as_ref()) {
+        Ok(r) => r,
+        Err(msg) => return internal_err(msg),
+    };
 
     match result.result {
-        ExecutionResult::Success { output, .. } => Ok(Bytes::copy_from_slice(output.data())),
-        ExecutionResult::Revert { output, .. } => {
-            // Return revert data as error
-            Err(RpcError::with_data(
-                crate::error::ErrorCode::InternalError,
-                "execution reverted",
-                format!("0x{}", alloy::hex::encode(&output)),
-            ))
-        }
+        ExecutionResult::Success { output, .. } => rpc_ok(Bytes::copy_from_slice(output.data())),
+        ExecutionResult::Revert { output, .. } => internal_err_with_data(
+            "execution reverted",
+            format!("0x{}", alloy::hex::encode(&output)),
+        ),
         ExecutionResult::Halt { reason, .. } => {
-            Err(RpcError::internal(format!("execution halted: {:?}", reason)))
+            internal_err(format!("execution halted: {:?}", reason))
         }
     }
 }
@@ -83,76 +83,80 @@ where
 /// # Parameters
 /// - `call`: Transaction request with call parameters
 /// - `_block`: Block identifier (ignored, always uses latest state)
-pub async fn eth_estimate_gas<H: HotKv>(
-    storage: &UnifiedStorage<H>,
-    call: TransactionRequest,
-    _block: Option<String>,
+pub(crate) async fn eth_estimate_gas<H: HotKv>(
+    (call, _block): (TransactionRequest, Option<String>),
+    state: RpcContext<H>,
 ) -> RpcResult<U64>
 where
     <<H as HotKv>::RoTx as HotKvRead>::Error: DBErrorMarker,
 {
-    // Get latest block info
-    let reader = storage
-        .reader()
-        .map_err(|e| RpcError::internal(format!("Failed to create reader: {e}")))?;
-    let header = reader
-        .last_header()
-        .map_err(|e| RpcError::internal(format!("Failed to read header: {e}")))?;
+    let reader = match state.storage.reader() {
+        Ok(r) => r,
+        Err(e) => return internal_err(format!("Failed to create reader: {e}")),
+    };
+    let header = match reader.last_header() {
+        Ok(h) => h,
+        Err(e) => return internal_err(format!("Failed to read header: {e}")),
+    };
 
-    // Determine gas limits for binary search
     let user_gas_limit = call.gas.unwrap_or(DEFAULT_GAS_LIMIT);
     let mut low = MIN_GAS;
     let mut high = user_gas_limit;
+
     // First, try with maximum gas to ensure the transaction can succeed
     let best_estimate = {
-        let db = storage
-            .revm_reader()
-            .map_err(|e| RpcError::internal(format!("Failed to create revm reader: {e}")))?;
+        let db = match state.storage.revm_reader() {
+            Ok(r) => r,
+            Err(e) => return internal_err(format!("Failed to create revm reader: {e}")),
+        };
 
         let mut test_call = call.clone();
         test_call.gas = Some(high);
 
-        let result = execute_call(db, &test_call, header.as_ref())?;
+        let result = match execute_call(db, &test_call, header.as_ref()) {
+            Ok(r) => r,
+            Err(msg) => return internal_err(msg),
+        };
 
         match result.result {
             ExecutionResult::Success { gas_used, .. } => gas_used,
             ExecutionResult::Revert { output, .. } => {
-                return Err(RpcError::with_data(
-                    crate::error::ErrorCode::InternalError,
+                return internal_err_with_data(
                     "execution reverted",
                     format!("0x{}", alloy::hex::encode(&output)),
-                ));
+                );
             }
             ExecutionResult::Halt { reason, .. } => {
-                return Err(RpcError::internal(format!("execution halted: {:?}", reason)));
+                return internal_err(format!("execution halted: {:?}", reason));
             }
         }
     };
 
     // Binary search for minimum gas
-    // Start with the gas actually used as the high bound
     high = best_estimate;
     low = low.min(high);
 
     while low < high {
         let mid = (low + high) / 2;
 
-        let db = storage
-            .revm_reader()
-            .map_err(|e| RpcError::internal(format!("Failed to create revm reader: {e}")))?;
+        let db = match state.storage.revm_reader() {
+            Ok(r) => r,
+            Err(e) => return internal_err(format!("Failed to create revm reader: {e}")),
+        };
 
         let mut test_call = call.clone();
         test_call.gas = Some(mid);
 
-        let result = execute_call(db, &test_call, header.as_ref())?;
+        let result = match execute_call(db, &test_call, header.as_ref()) {
+            Ok(r) => r,
+            Err(msg) => return internal_err(msg),
+        };
 
         match result.result {
             ExecutionResult::Success { .. } => {
-                // Can succeed with this gas, try lower
                 high = mid;
             }
             ExecutionResult::Revert { .. } | ExecutionResult::Halt { .. } => {
-                // Need more gas
                 low = mid + 1;
             }
         }
@@ -160,7 +164,7 @@ where
 
     // Add a small buffer (10%) to account for execution variance
     let estimate = high.saturating_add(high / 10);
-    Ok(U64::from(estimate.min(user_gas_limit)))
+    rpc_ok(U64::from(estimate.min(user_gas_limit)))
 }
 
 /// Handler for `eth_sendRawTransaction`.
@@ -173,22 +177,21 @@ where
 ///
 /// # Parameters
 /// - `data`: RLP-encoded signed transaction
-pub async fn eth_send_raw_transaction<H: HotKv>(
-    _storage: &UnifiedStorage<H>,
+pub(crate) async fn eth_send_raw_transaction<H: HotKv>(
     data: Bytes,
+    _state: RpcContext<H>,
 ) -> RpcResult<alloy::primitives::B256> {
-    // Decode the transaction to validate it and extract the hash
-    let tx = TxEnvelope::decode(&mut data.as_ref())
-        .map_err(|e| RpcError::invalid_params(format!("invalid transaction: {e}")))?;
+    let tx = match TxEnvelope::decode(&mut data.as_ref()) {
+        Ok(t) => t,
+        Err(e) => return invalid_params(format!("invalid transaction: {e}")),
+    };
 
     let tx_hash = *tx.tx_hash();
 
     // In production, this would forward to a tx-cache or mempool
     // For now, we reject with a clear message
-    Err(RpcError::with_data(
-        crate::error::ErrorCode::MethodNotSupported,
-        "transaction submission not yet implemented",
-        format!("tx_hash: {tx_hash}"),
+    method_not_supported(&format!(
+        "transaction submission not yet implemented (tx_hash: {tx_hash})"
     ))
 }
 
@@ -197,24 +200,21 @@ fn execute_call<D: Database>(
     db: D,
     call: &TransactionRequest,
     header: Option<&alloy::consensus::Header>,
-) -> RpcResult<ResultAndState<HaltReason>>
+) -> Result<ResultAndState<HaltReason>, String>
 where
     D::Error: core::fmt::Debug,
 {
-    // Extract call parameters
     let from = call.from.unwrap_or_default();
     let to = call.to.unwrap_or(TxKind::Create);
     let value = call.value.unwrap_or_default();
     let input = call.input.input().cloned().unwrap_or_default();
     let gas_limit = call.gas.unwrap_or(DEFAULT_GAS_LIMIT);
 
-    // Get block context from header
     let (block_number, timestamp, base_fee) = match header {
         Some(h) => (h.number, h.timestamp, h.base_fee_per_gas.unwrap_or(0)),
         None => (0, 0, 0),
     };
 
-    // Build EVM with revm 22 API using Context builder pattern
     let ctx = Context::mainnet()
         .with_db(db)
         .modify_cfg_chained(|c| {
@@ -233,13 +233,12 @@ where
             tx.value = value;
             tx.data = input;
             tx.gas_limit = gas_limit;
-            // Set gas price equal to base fee to pass validation
             tx.gas_price = base_fee as u128;
         });
 
     let mut evm = ctx.build_mainnet();
 
-    evm.replay().map_err(|e| RpcError::internal(format!("EVM execution failed: {:?}", e)))
+    evm.replay().map_err(|e| format!("EVM execution failed: {:?}", e))
 }
 
 #[cfg(test)]
@@ -259,12 +258,15 @@ mod tests {
         Arc::new(UnifiedStorage::new(mem_kv, cold_handle))
     }
 
+    fn test_ctx(storage: &Arc<UnifiedStorage<MemKv>>) -> RpcContext<MemKv> {
+        RpcContext { storage: storage.clone(), chain_id: 31337 }
+    }
+
     #[tokio::test]
     async fn test_eth_call_simple() {
         let storage = create_test_storage();
         let address = Address::from_slice(&[0x1; 20]);
 
-        // Create an account with some balance
         {
             let writer = storage.hot().writer().unwrap();
             let account = Account {
@@ -276,7 +278,6 @@ mod tests {
             writer.raw_commit().unwrap();
         }
 
-        // Simple call with no data (balance check essentially)
         let call = TransactionRequest {
             from: Some(address),
             to: Some(TxKind::Call(address)),
@@ -284,9 +285,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result = eth_call(&storage, call, None).await;
-        // Should succeed with empty output (no contract code)
-        assert!(result.is_ok());
+        let result = eth_call((call, None), test_ctx(&storage)).await;
+        assert!(result.is_success());
     }
 
     #[tokio::test]
@@ -295,7 +295,6 @@ mod tests {
         let from = Address::from_slice(&[0x1; 20]);
         let to = Address::from_slice(&[0x2; 20]);
 
-        // Create sender account with balance
         {
             let writer = storage.hot().writer().unwrap();
             let account = Account {
@@ -307,7 +306,6 @@ mod tests {
             writer.raw_commit().unwrap();
         }
 
-        // Estimate gas for simple transfer
         let call = TransactionRequest {
             from: Some(from),
             to: Some(TxKind::Call(to)),
@@ -315,24 +313,21 @@ mod tests {
             ..Default::default()
         };
 
-        let result = eth_estimate_gas(&storage, call, None).await;
-        assert!(result.is_ok());
+        let result = eth_estimate_gas((call, None), test_ctx(&storage)).await;
+        assert!(result.is_success());
 
-        let gas = result.unwrap();
-        // Should be around 21000 for simple transfer (+ buffer)
+        let gas = *result.as_success().unwrap();
         assert!(gas >= U64::from(21000));
-        assert!(gas <= U64::from(30000)); // With 10% buffer
+        assert!(gas <= U64::from(30000));
     }
 
     #[tokio::test]
     async fn test_eth_send_raw_transaction_stub() {
         let storage = create_test_storage();
 
-        // Create a minimal valid transaction bytes (this will fail decoding)
         let invalid_data = Bytes::from(vec![0x01, 0x02, 0x03]);
 
-        let result = eth_send_raw_transaction(&storage, invalid_data).await;
-        // Should fail because data isn't valid RLP
-        assert!(result.is_err());
+        let result = eth_send_raw_transaction(invalid_data, test_ctx(&storage)).await;
+        assert!(result.is_error());
     }
 }

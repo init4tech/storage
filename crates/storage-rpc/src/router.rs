@@ -22,12 +22,26 @@
 //! axum::serve(listener, router.into_axum("/")).await?;
 //! ```
 
-use crate::handlers::{self, DEFAULT_CHAIN_ID, block, receipt, transaction};
+use crate::handlers::{self, DEFAULT_CHAIN_ID, block, evm, gas, receipt, state, transaction};
 use ajj::Router;
-use alloy::{eips::BlockNumberOrTag, primitives::B256};
-use signet_hot::HotKv;
+use signet_hot::{HotKv, model::HotKvRead};
 use signet_storage::UnifiedStorage;
 use std::sync::Arc;
+use trevm::revm::database::DBErrorMarker;
+
+/// Router state providing storage context to all handlers.
+pub(crate) struct RpcContext<H: HotKv> {
+    /// Unified storage backend.
+    pub(crate) storage: Arc<UnifiedStorage<H>>,
+    /// Chain ID for `eth_chainId`.
+    pub(crate) chain_id: u64,
+}
+
+impl<H: HotKv> Clone for RpcContext<H> {
+    fn clone(&self) -> Self {
+        Self { storage: self.storage.clone(), chain_id: self.chain_id }
+    }
+}
 
 /// Builder for creating an RPC router.
 #[derive(Debug, Clone, Copy)]
@@ -56,131 +70,99 @@ impl RpcRouter {
     /// Build the ajj router with the given storage backend.
     ///
     /// This registers all Ethereum JSON-RPC methods with the router.
+    /// Storage is passed to handlers via ajj's state mechanism.
     pub fn build<H: HotKv + Send + Sync + 'static>(
         self,
         storage: Arc<UnifiedStorage<H>>,
-    ) -> Router<()> {
-        let cold = storage.cold_reader();
-        let chain_id = self.chain_id;
+    ) -> Router<()>
+    where
+        <<H as HotKv>::RoTx as HotKvRead>::Error: DBErrorMarker,
+    {
+        let ctx = RpcContext { storage, chain_id: self.chain_id };
 
-        let mut router = Router::<()>::new();
-
-        // ================================================================
-        // Stub endpoints (return static values)
-        // ================================================================
-        router = router
-            .route("eth_chainId", move || async move { handlers::eth_chain_id(chain_id).await });
-        router = router
-            .route("eth_protocolVersion", || async { handlers::eth_protocol_version().await });
-        router = router.route("eth_syncing", || async { handlers::eth_syncing().await });
-
-        // ================================================================
-        // Block endpoints (cold path - Phase 2)
-        // ================================================================
-        {
-            let cold = cold.clone();
-            router = router.route("eth_blockNumber", move || {
-                let cold = cold.clone();
-                async move { block::eth_block_number(&cold).await }
-            });
-        }
-        // Note: eth_getBlockByHash and eth_getBlockByNumber require 2 params
-        // which ajj doesn't directly support with closures. These need to be
-        // added via a custom handler wrapper or by using ajj's state mechanism.
-        // For now, they're implemented with a default full_txs=false.
-        {
-            let cold = cold.clone();
-            router = router.route("eth_getBlockTransactionCountByHash", move |hash: B256| {
-                let cold = cold.clone();
-                async move { block::eth_get_block_transaction_count_by_hash(&cold, hash).await }
-            });
-        }
-        {
-            let cold = cold.clone();
-            router = router.route(
+        Router::<RpcContext<H>>::new()
+            // ============================================================
+            // Stub endpoints (state-dependent)
+            // ============================================================
+            .route("eth_chainId", handlers::eth_chain_id::<H>)
+            // ============================================================
+            // Block endpoints (cold path)
+            // ============================================================
+            .route("eth_blockNumber", block::eth_block_number::<H>)
+            .route("eth_getBlockByHash", block::eth_get_block_by_hash::<H>)
+            .route("eth_getBlockByNumber", block::eth_get_block_by_number::<H>)
+            .route(
+                "eth_getBlockTransactionCountByHash",
+                block::eth_get_block_transaction_count_by_hash::<H>,
+            )
+            .route(
                 "eth_getBlockTransactionCountByNumber",
-                move |block_id: BlockNumberOrTag| {
-                    let cold = cold.clone();
-                    async move {
-                        block::eth_get_block_transaction_count_by_number(&cold, block_id).await
-                    }
-                },
-            );
-        }
-        {
-            let cold = cold.clone();
-            router = router.route("eth_getBlockReceipts", move |block_id: BlockNumberOrTag| {
-                let cold = cold.clone();
-                async move { block::eth_get_block_receipts(&cold, block_id).await }
-            });
-        }
-
-        // ================================================================
-        // Transaction endpoints (cold path - Phase 2)
-        // ================================================================
-        {
-            let cold = cold.clone();
-            router = router.route("eth_getTransactionByHash", move |hash: B256| {
-                let cold = cold.clone();
-                async move { transaction::eth_get_transaction_by_hash(&cold, hash).await }
-            });
-        }
-        {
-            let cold = cold.clone();
-            router = router.route("eth_getRawTransactionByHash", move |hash: B256| {
-                let cold = cold.clone();
-                async move { transaction::eth_get_raw_transaction_by_hash(&cold, hash).await }
-            });
-        }
-
-        // ================================================================
-        // Receipt endpoints (cold path - Phase 2)
-        // ================================================================
-        {
-            let cold = cold.clone();
-            router = router.route("eth_getTransactionReceipt", move |tx_hash: B256| {
-                let cold = cold.clone();
-                async move { receipt::eth_get_transaction_receipt(&cold, tx_hash).await }
-            });
-        }
-
-        // ================================================================
-        // Unsupported endpoints (return errors)
-        // ================================================================
-        router = router.route("eth_coinbase", || async { handlers::eth_coinbase().await });
-        router = router.route("eth_accounts", || async { handlers::eth_accounts().await });
-        router = router.route("eth_blobBaseFee", || async { handlers::eth_blob_base_fee().await });
-        router = router.route("eth_getUncleCountByBlockHash", || async {
-            handlers::eth_get_uncle_count_by_block_hash().await
-        });
-        router = router.route("eth_getUncleCountByBlockNumber", || async {
-            handlers::eth_get_uncle_count_by_block_number().await
-        });
-        router = router.route("eth_getUncleByBlockHashAndIndex", || async {
-            handlers::eth_get_uncle_by_block_hash_and_index().await
-        });
-        router = router.route("eth_getUncleByBlockNumberAndIndex", || async {
-            handlers::eth_get_uncle_by_block_number_and_index().await
-        });
-        router = router.route("eth_mining", || async { handlers::eth_mining().await });
-        router = router.route("eth_hashrate", || async { handlers::eth_hashrate().await });
-        router = router.route("eth_getWork", || async { handlers::eth_get_work().await });
-        router = router.route("eth_submitWork", || async { handlers::eth_submit_work().await });
-        router =
-            router.route("eth_submitHashrate", || async { handlers::eth_submit_hashrate().await });
-        router = router
-            .route("eth_sendTransaction", || async { handlers::eth_send_transaction().await });
-        router = router.route("eth_sign", || async { handlers::eth_sign().await });
-        router = router
-            .route("eth_signTransaction", || async { handlers::eth_sign_transaction().await });
-        router = router.route("eth_getProof", || async { handlers::eth_get_proof().await });
-        router = router
-            .route("eth_createAccessList", || async { handlers::eth_create_access_list().await });
-        router = router.route("eth_newPendingTransactionFilter", || async {
-            handlers::eth_new_pending_transaction_filter().await
-        });
-
-        router
+                block::eth_get_block_transaction_count_by_number::<H>,
+            )
+            .route("eth_getBlockReceipts", block::eth_get_block_receipts::<H>)
+            // ============================================================
+            // Transaction endpoints (cold path)
+            // ============================================================
+            .route("eth_getTransactionByHash", transaction::eth_get_transaction_by_hash::<H>)
+            .route("eth_getRawTransactionByHash", transaction::eth_get_raw_transaction_by_hash::<H>)
+            // ============================================================
+            // Receipt endpoints (cold path)
+            // ============================================================
+            .route("eth_getTransactionReceipt", receipt::eth_get_transaction_receipt::<H>)
+            // ============================================================
+            // State endpoints (hot path)
+            // ============================================================
+            .route("eth_getBalance", state::eth_get_balance::<H>)
+            .route("eth_getTransactionCount", state::eth_get_transaction_count::<H>)
+            .route("eth_getCode", state::eth_get_code::<H>)
+            .route("eth_getStorageAt", state::eth_get_storage_at::<H>)
+            // ============================================================
+            // Gas endpoints (hot path)
+            // ============================================================
+            .route("eth_gasPrice", gas::eth_gas_price::<H>)
+            .route("eth_maxPriorityFeePerGas", gas::eth_max_priority_fee_per_gas::<H>)
+            // ============================================================
+            // EVM execution endpoints (hot path)
+            // ============================================================
+            .route("eth_call", evm::eth_call::<H>)
+            .route("eth_estimateGas", evm::eth_estimate_gas::<H>)
+            .route("eth_sendRawTransaction", evm::eth_send_raw_transaction::<H>)
+            // ============================================================
+            // Provide state, switching to Router<()>
+            // ============================================================
+            .with_state::<()>(ctx)
+            // ============================================================
+            // Stub endpoints (stateless)
+            // ============================================================
+            .route("eth_protocolVersion", handlers::eth_protocol_version)
+            .route("eth_syncing", handlers::eth_syncing)
+            // ============================================================
+            // Unsupported endpoints (stateless, return errors)
+            // ============================================================
+            .route("eth_coinbase", handlers::eth_coinbase)
+            .route("eth_accounts", handlers::eth_accounts)
+            .route("eth_blobBaseFee", handlers::eth_blob_base_fee)
+            .route("eth_getUncleCountByBlockHash", handlers::eth_get_uncle_count_by_block_hash)
+            .route("eth_getUncleCountByBlockNumber", handlers::eth_get_uncle_count_by_block_number)
+            .route(
+                "eth_getUncleByBlockHashAndIndex",
+                handlers::eth_get_uncle_by_block_hash_and_index,
+            )
+            .route(
+                "eth_getUncleByBlockNumberAndIndex",
+                handlers::eth_get_uncle_by_block_number_and_index,
+            )
+            .route("eth_mining", handlers::eth_mining)
+            .route("eth_hashrate", handlers::eth_hashrate)
+            .route("eth_getWork", handlers::eth_get_work)
+            .route("eth_submitWork", handlers::eth_submit_work)
+            .route("eth_submitHashrate", handlers::eth_submit_hashrate)
+            .route("eth_sendTransaction", handlers::eth_send_transaction)
+            .route("eth_sign", handlers::eth_sign)
+            .route("eth_signTransaction", handlers::eth_sign_transaction)
+            .route("eth_getProof", handlers::eth_get_proof)
+            .route("eth_createAccessList", handlers::eth_create_access_list)
+            .route("eth_newPendingTransactionFilter", handlers::eth_new_pending_transaction_filter)
     }
 
     /// Build the ajj router and convert to an axum router for HTTP serving.
@@ -200,7 +182,10 @@ impl RpcRouter {
         self,
         storage: Arc<UnifiedStorage<H>>,
         path: &str,
-    ) -> axum::Router {
+    ) -> axum::Router
+    where
+        <<H as HotKv>::RoTx as HotKvRead>::Error: DBErrorMarker,
+    {
         self.build(storage).into_axum(path)
     }
 }
