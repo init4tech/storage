@@ -4,12 +4,9 @@
 //! read from cold storage.
 
 use crate::error::{RpcError, RpcResult};
-use alloy::{
-    consensus::Transaction,
-    primitives::B256,
-};
+use crate::types::{format_hex_u64, RpcLog, RpcReceipt};
+use alloy::{consensus::Transaction, primitives::B256};
 use signet_cold::{ColdStorageReadHandle, ReceiptSpecifier, TransactionSpecifier};
-use serde_json::Value;
 
 /// Handler for `eth_getTransactionReceipt`.
 ///
@@ -17,7 +14,7 @@ use serde_json::Value;
 pub async fn eth_get_transaction_receipt(
     cold: &ColdStorageReadHandle,
     tx_hash: B256,
-) -> RpcResult<Option<Value>> {
+) -> RpcResult<Option<RpcReceipt>> {
     // Get the receipt
     let receipt = cold
         .get_receipt(ReceiptSpecifier::TxHash(tx_hash))
@@ -38,23 +35,40 @@ pub async fn eth_get_transaction_receipt(
         return Err(RpcError::internal("Receipt found but transaction missing"));
     };
 
-    // Build receipt JSON
-    let receipt_json = serde_json::json!({
-        "transactionHash": format!("{:?}", tx_hash),
-        "cumulativeGasUsed": format!("{:#x}", receipt.inner.cumulative_gas_used),
-        "gasUsed": format!("{:#x}", receipt.inner.cumulative_gas_used),
-        "status": if receipt.inner.status.coerce_status() { "0x1" } else { "0x0" },
-        "to": tx.to().map(|a| format!("{:?}", a)),
-        "logs": receipt.inner.logs.iter().enumerate().map(|(log_idx, log)| {
-            serde_json::json!({
-                "logIndex": format!("{:#x}", log_idx),
-                "transactionHash": format!("{:?}", tx_hash),
-                "address": format!("{:?}", log.address),
-                "data": format!("{}", log.data.data),
-                "topics": log.data.topics().iter().map(|t| format!("{:?}", t)).collect::<Vec<_>>(),
-            })
-        }).collect::<Vec<_>>(),
-    });
+    // Build logs
+    let logs: Vec<RpcLog> = receipt
+        .inner
+        .logs
+        .iter()
+        .enumerate()
+        .map(|(log_idx, log)| RpcLog {
+            log_index: format_hex_u64(log_idx as u64),
+            transaction_index: None,
+            transaction_hash: tx_hash,
+            block_hash: None,
+            block_number: None,
+            address: log.address,
+            data: log.data.data.clone(),
+            topics: log.data.topics().to_vec(),
+        })
+        .collect();
 
-    Ok(Some(receipt_json))
+    // Build receipt
+    let rpc_receipt = RpcReceipt {
+        transaction_hash: tx_hash,
+        transaction_index: None,
+        block_hash: None,
+        block_number: None,
+        cumulative_gas_used: format_hex_u64(receipt.inner.cumulative_gas_used),
+        gas_used: format_hex_u64(receipt.inner.cumulative_gas_used), // Approximate
+        status: if receipt.inner.status.coerce_status() {
+            "0x1".to_string()
+        } else {
+            "0x0".to_string()
+        },
+        to: tx.to(),
+        logs,
+    };
+
+    Ok(Some(rpc_receipt))
 }

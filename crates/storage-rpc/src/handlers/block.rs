@@ -4,15 +4,12 @@
 //! cold storage.
 
 use crate::error::{RpcError, RpcResult};
+use crate::types::{format_hex_u64, BlockTransactions, RpcBlock, RpcLog, RpcReceipt};
 use alloy::{
     eips::BlockNumberOrTag,
     primitives::{B256, U64},
 };
 use signet_cold::{BlockTag, ColdStorageReadHandle, HeaderSpecifier};
-use serde_json::Value;
-
-// Transaction trait is used implicitly by tx.tx_hash(), etc.
-use alloy::consensus::Transaction as _;
 
 /// Convert a BlockNumberOrTag to a HeaderSpecifier.
 pub fn block_id_to_specifier(block_id: BlockNumberOrTag) -> HeaderSpecifier {
@@ -44,8 +41,8 @@ pub async fn eth_block_number(cold: &ColdStorageReadHandle) -> RpcResult<U64> {
 pub async fn eth_get_block_by_hash(
     cold: &ColdStorageReadHandle,
     hash: B256,
-    full_txs: bool,
-) -> RpcResult<Option<Value>> {
+    _full_txs: bool,
+) -> RpcResult<Option<RpcBlock>> {
     let header = cold
         .get_header(HeaderSpecifier::Hash(hash))
         .await
@@ -57,38 +54,27 @@ pub async fn eth_get_block_by_hash(
 
     let block_number = header.number;
 
-    // Build a JSON representation of the block
-    let transactions = if full_txs {
-        let txs = cold
-            .get_transactions_in_block(block_number)
-            .await
-            .map_err(|e| RpcError::internal(e.to_string()))?;
+    // Get transaction hashes
+    let txs = cold
+        .get_transactions_in_block(block_number)
+        .await
+        .map_err(|e| RpcError::internal(e.to_string()))?;
 
-        // Return transaction hashes as simplified JSON
-        Value::Array(txs.iter().map(|tx| {
-            Value::String(format!("{:?}", tx.tx_hash()))
-        }).collect())
-    } else {
-        let txs = cold
-            .get_transactions_in_block(block_number)
-            .await
-            .map_err(|e| RpcError::internal(e.to_string()))?;
+    // Note: We currently return hashes only. When full_txs is true,
+    // we would populate with full RpcTransaction objects.
+    let tx_hashes: Vec<B256> = txs.iter().map(|tx| *tx.tx_hash()).collect();
 
-        Value::Array(txs.iter().map(|tx| Value::String(format!("{:?}", tx.tx_hash()))).collect())
+    let block = RpcBlock {
+        hash,
+        number: format_hex_u64(header.number),
+        parent_hash: header.parent_hash,
+        timestamp: format_hex_u64(header.timestamp),
+        gas_limit: format_hex_u64(header.gas_limit),
+        gas_used: format_hex_u64(header.gas_used),
+        base_fee_per_gas: header.base_fee_per_gas.map(format_hex_u64),
+        transactions: BlockTransactions::Hashes(tx_hashes),
+        uncles: vec![],
     };
-
-    // Build block JSON
-    let block = serde_json::json!({
-        "hash": format!("{:?}", hash),
-        "number": format!("{:#x}", header.number),
-        "parentHash": format!("{:?}", header.parent_hash),
-        "timestamp": format!("{:#x}", header.timestamp),
-        "gasLimit": format!("{:#x}", header.gas_limit),
-        "gasUsed": format!("{:#x}", header.gas_used),
-        "baseFeePerGas": header.base_fee_per_gas.map(|x| format!("{:#x}", x)),
-        "transactions": transactions,
-        "uncles": [],
-    });
 
     Ok(Some(block))
 }
@@ -100,7 +86,7 @@ pub async fn eth_get_block_by_number(
     cold: &ColdStorageReadHandle,
     block_id: BlockNumberOrTag,
     full_txs: bool,
-) -> RpcResult<Option<Value>> {
+) -> RpcResult<Option<RpcBlock>> {
     let spec = block_id_to_specifier(block_id);
 
     let header = cold.get_header(spec).await.map_err(|e| RpcError::internal(e.to_string()))?;
@@ -162,7 +148,7 @@ pub async fn eth_get_block_transaction_count_by_number(
 pub async fn eth_get_block_receipts(
     cold: &ColdStorageReadHandle,
     block_id: BlockNumberOrTag,
-) -> RpcResult<Option<Value>> {
+) -> RpcResult<Option<Vec<RpcReceipt>>> {
     let spec = block_id_to_specifier(block_id);
 
     let header = cold.get_header(spec).await.map_err(|e| RpcError::internal(e.to_string()))?;
@@ -184,41 +170,51 @@ pub async fn eth_get_block_receipts(
         .await
         .map_err(|e| RpcError::internal(e.to_string()))?;
 
-    // Build receipts as JSON
+    // Build receipts
     let mut rpc_receipts = Vec::new();
 
     for (idx, (receipt, tx)) in receipts.iter().zip(txs.iter()).enumerate() {
-
         let gas_used = if idx > 0 {
             receipt.inner.cumulative_gas_used.saturating_sub(receipts[idx - 1].inner.cumulative_gas_used)
         } else {
             receipt.inner.cumulative_gas_used
         };
 
-        let receipt_json = serde_json::json!({
-            "transactionHash": format!("{:?}", tx.tx_hash()),
-            "transactionIndex": format!("{:#x}", idx),
-            "blockHash": format!("{:?}", block_hash),
-            "blockNumber": format!("{:#x}", block_number),
-            "cumulativeGasUsed": format!("{:#x}", receipt.inner.cumulative_gas_used),
-            "gasUsed": format!("{:#x}", gas_used),
-            "status": if receipt.inner.status.coerce_status() { "0x1" } else { "0x0" },
-            "logs": receipt.inner.logs.iter().enumerate().map(|(log_idx, log)| {
-                serde_json::json!({
-                    "logIndex": format!("{:#x}", log_idx),
-                    "transactionIndex": format!("{:#x}", idx),
-                    "transactionHash": format!("{:?}", tx.tx_hash()),
-                    "blockHash": format!("{:?}", block_hash),
-                    "blockNumber": format!("{:#x}", block_number),
-                    "address": format!("{:?}", log.address),
-                    "data": format!("{}", log.data.data),
-                    "topics": log.data.topics().iter().map(|t| format!("{:?}", t)).collect::<Vec<_>>(),
-                })
-            }).collect::<Vec<_>>(),
-        });
+        let logs: Vec<RpcLog> = receipt
+            .inner
+            .logs
+            .iter()
+            .enumerate()
+            .map(|(log_idx, log)| RpcLog {
+                log_index: format_hex_u64(log_idx as u64),
+                transaction_index: Some(format_hex_u64(idx as u64)),
+                transaction_hash: *tx.tx_hash(),
+                block_hash: Some(block_hash),
+                block_number: Some(format_hex_u64(block_number)),
+                address: log.address,
+                data: log.data.data.clone(),
+                topics: log.data.topics().to_vec(),
+            })
+            .collect();
 
-        rpc_receipts.push(receipt_json);
+        let rpc_receipt = RpcReceipt {
+            transaction_hash: *tx.tx_hash(),
+            transaction_index: Some(format_hex_u64(idx as u64)),
+            block_hash: Some(block_hash),
+            block_number: Some(format_hex_u64(block_number)),
+            cumulative_gas_used: format_hex_u64(receipt.inner.cumulative_gas_used),
+            gas_used: format_hex_u64(gas_used),
+            status: if receipt.inner.status.coerce_status() {
+                "0x1".to_string()
+            } else {
+                "0x0".to_string()
+            },
+            to: None, // Would need to get from transaction
+            logs,
+        };
+
+        rpc_receipts.push(rpc_receipt);
     }
 
-    Ok(Some(Value::Array(rpc_receipts)))
+    Ok(Some(rpc_receipts))
 }

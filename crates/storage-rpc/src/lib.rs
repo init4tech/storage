@@ -107,6 +107,9 @@ pub mod handlers;
 pub mod router;
 pub use router::RpcRouter;
 
+pub mod types;
+pub use types::{BlockTransactions, RpcBlock, RpcLog, RpcReceipt, RpcTransaction};
+
 // Re-export key dependencies for convenience
 pub use ajj;
 pub use signet_storage::UnifiedStorage;

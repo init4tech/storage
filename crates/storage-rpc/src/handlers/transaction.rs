@@ -4,6 +4,7 @@
 //! cold storage.
 
 use crate::error::{RpcError, RpcResult};
+use crate::types::{format_hex_u256, format_hex_u64, RpcTransaction};
 use alloy::{
     consensus::Transaction,
     primitives::{Bytes, B256},
@@ -11,7 +12,6 @@ use alloy::{
 };
 use signet_cold::{ColdStorageReadHandle, TransactionSpecifier};
 use signet_storage_types::TransactionSigned;
-use serde_json::Value;
 
 /// RLP encode a transaction to raw bytes.
 fn encode_raw_tx(tx: &TransactionSigned) -> Bytes {
@@ -26,7 +26,7 @@ fn encode_raw_tx(tx: &TransactionSigned) -> Bytes {
 pub async fn eth_get_transaction_by_hash(
     cold: &ColdStorageReadHandle,
     hash: B256,
-) -> RpcResult<Option<Value>> {
+) -> RpcResult<Option<RpcTransaction>> {
     let tx = cold
         .get_transaction(TransactionSpecifier::Hash(hash))
         .await
@@ -36,17 +36,17 @@ pub async fn eth_get_transaction_by_hash(
         return Ok(None);
     };
 
-    // Build transaction JSON
-    let tx_json = serde_json::json!({
-        "hash": format!("{:?}", tx.tx_hash()),
-        "nonce": format!("{:#x}", tx.nonce()),
-        "to": tx.to().map(|a| format!("{:?}", a)),
-        "value": format!("{:#x}", tx.value()),
-        "gas": format!("{:#x}", tx.gas_limit()),
-        "input": format!("{}", tx.input()),
-    });
+    // Build transaction response
+    let rpc_tx = RpcTransaction {
+        hash: *tx.tx_hash(),
+        nonce: format_hex_u64(tx.nonce()),
+        to: tx.to(),
+        value: format_hex_u256(tx.value()),
+        gas: format_hex_u64(tx.gas_limit()),
+        input: tx.input().clone(),
+    };
 
-    Ok(Some(tx_json))
+    Ok(Some(rpc_tx))
 }
 
 /// Handler for `eth_getRawTransactionByHash`.
