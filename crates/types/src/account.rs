@@ -39,11 +39,10 @@ impl Account {
         Self {
             balance: revm_account.info.balance,
             nonce: revm_account.info.nonce,
-            bytecode_hash: if revm_account.info.code_hash == KECCAK256_EMPTY {
-                None
-            } else {
-                Some(revm_account.info.code_hash)
-            },
+            bytecode_hash: revm_account
+                .info
+                .is_empty_code_hash()
+                .then_some(revm_account.info.code_hash),
         }
     }
 }
@@ -56,11 +55,7 @@ impl From<trevm::revm::state::Account> for Account {
 
 impl From<AccountInfo> for Account {
     fn from(revm_acc: AccountInfo) -> Self {
-        Self {
-            balance: revm_acc.balance,
-            nonce: revm_acc.nonce,
-            bytecode_hash: (!revm_acc.is_empty_code_hash()).then_some(revm_acc.code_hash),
-        }
+        Self::from(&revm_acc)
     }
 }
 

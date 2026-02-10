@@ -21,7 +21,7 @@
 //! the environment. Each time a table is opened, its metadata is checked
 //! against the cached values to ensure consistency.
 //!
-//! Rought Edges:
+//! Rough Edges:
 //! - The cache does not respect dropped transactions. Creating multiple tables
 //!   with the same name but different metadata in different transactions
 //!   may lead to inconsistencies.
