@@ -2,7 +2,7 @@ use bytes::BufMut;
 use core::fmt;
 use roaring::RoaringTreemap;
 
-/// List with transaction numbers.
+/// List with block numbers.
 pub type BlockNumberList = IntegerList;
 
 /// Primitives error type.
@@ -33,9 +33,9 @@ pub enum IntegerListError {
 /// - [`RoaringTreemap`] backing: internally backed by [`RoaringTreemap`], which supports 64-bit
 ///   integers.
 #[derive(Clone, PartialEq, Default)]
-pub struct IntegerList(pub RoaringTreemap);
+pub struct IntegerList(RoaringTreemap);
 
-impl std::ops::Deref for IntegerList {
+impl core::ops::Deref for IntegerList {
     type Target = RoaringTreemap;
 
     fn deref(&self) -> &Self::Target {
@@ -73,10 +73,16 @@ impl IntegerList {
     #[inline]
     #[track_caller]
     pub fn new_pre_sorted(list: impl IntoIterator<Item = u64>) -> Self {
-        Self::new(list).expect("IntegerList must be pre-sorted and non-empty")
+        Self::new(list).expect("IntegerList must be pre-sorted")
     }
 
     /// Appends a list of integers to the current list.
+    ///
+    /// Returns an error if the list is not pre-sorted, with all entries strictly greater than
+    /// existing ones. Any entries of `list` which were added while iterating prior to failure are
+    /// retained in the `IntegerList`.
+    ///
+    /// Returns `Ok` with the number of elements appended to the list on success.
     pub fn append(&mut self, list: impl IntoIterator<Item = u64>) -> Result<u64, IntegerListError> {
         self.0.append(list).map_err(|_| IntegerListError::UnsortedInput)
     }
@@ -92,15 +98,23 @@ impl IntegerList {
     }
 
     /// Serializes an [`IntegerList`] into a sequence of bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any serialization error.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut vec = Vec::with_capacity(self.0.serialized_size());
-        self.0.serialize_into(&mut vec).expect("not able to encode IntegerList");
+        self.0.serialize_into(&mut vec).expect("not able to encode IntegerList to vec");
         vec
     }
 
     /// Serializes an [`IntegerList`] into a sequence of bytes.
-    pub fn to_mut_bytes<B: bytes::BufMut>(&self, buf: &mut B) {
-        self.0.serialize_into(buf.writer()).unwrap();
+    ///
+    /// # Panics
+    ///
+    /// Panics on any serialization error.
+    pub fn to_mut_bytes<B: BufMut>(&self, buf: &mut B) {
+        self.0.serialize_into(buf.writer()).expect("not able to encode IntegerList to buffer");
     }
 
     /// Deserializes a sequence of bytes into a proper [`IntegerList`].

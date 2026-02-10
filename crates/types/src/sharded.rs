@@ -12,12 +12,6 @@ pub struct ShardedKey<T> {
     pub highest_block_number: u64,
 }
 
-impl<T> AsRef<Self> for ShardedKey<T> {
-    fn as_ref(&self) -> &Self {
-        self
-    }
-}
-
 impl ShardedKey<()> {
     /// Number of indices in one shard.
     pub const SHARD_COUNT: usize = 2000;

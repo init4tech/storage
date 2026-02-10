@@ -1890,4 +1890,46 @@ mod tests {
             );
         }
     }
+
+    /// Regression test: FSI must survive a database close/reopen cycle.
+    ///
+    /// This exercises the `store_fsi` / `read_fsi_from_table` path with an empty cache.
+    #[test]
+    #[serial]
+    fn fsi_survives_cold_reopen() {
+        use crate::FixedSizeInfo;
+
+        let dir = tempdir().unwrap();
+
+        // Phase 1: create tables and write data, then drop the DatabaseEnv.
+        {
+            let args = DatabaseArguments::new();
+            let db = DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, args).unwrap();
+
+            let writer = db.writer().unwrap();
+            writer.queue_create::<tables::PlainStorageState>().unwrap();
+            writer.queue_create::<tables::Headers>().unwrap();
+            writer.raw_commit().unwrap();
+        }
+        // DatabaseEnv (and its in-memory FsiCache) is now dropped.
+
+        // Phase 2: reopen with a fresh DatabaseEnv (empty cache) and verify
+        // FSI can be read back from MDBX correctly.
+        {
+            let args = DatabaseArguments::new();
+            let db = DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, args).unwrap();
+
+            let reader: Tx<Ro> = db.reader().unwrap();
+
+            // PlainStorageState is DUP_FIXED — FSI should decode correctly.
+            let fsi = reader.get_fsi(tables::PlainStorageState::NAME).unwrap();
+            assert!(fsi.is_dup_fixed(), "expected DupFixed, got {fsi:?}");
+            assert!(fsi.key2_size().unwrap() > 0);
+            assert!(fsi.total_size().unwrap() > fsi.key2_size().unwrap());
+
+            // Headers is a plain table — FSI should be None.
+            let fsi_headers = reader.get_fsi(tables::Headers::NAME).unwrap();
+            assert_eq!(fsi_headers, FixedSizeInfo::None);
+        }
+    }
 }

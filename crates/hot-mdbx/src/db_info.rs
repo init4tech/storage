@@ -87,8 +87,8 @@ impl ValSer for FixedSizeInfo {
     where
         Self: Sized,
     {
-        let key2_size = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-        let total_size = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+        let key2_size = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
+        let total_size = u32::from_be_bytes(data[4..8].try_into().unwrap()) as usize;
         if key2_size == 0 {
             Ok(FixedSizeInfo::None)
         } else if total_size == 0 {
@@ -96,5 +96,32 @@ impl ValSer for FixedSizeInfo {
         } else {
             Ok(FixedSizeInfo::DupFixed { key2_size, total_size })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roundtrip(fsi: FixedSizeInfo) {
+        let mut buf = [0u8; 8];
+        fsi.encode_value_to(&mut buf.as_mut_slice());
+        let decoded = FixedSizeInfo::decode_value(&buf).unwrap();
+        assert_eq!(fsi, decoded);
+    }
+
+    #[test]
+    fn fsi_roundtrip_none() {
+        roundtrip(FixedSizeInfo::None);
+    }
+
+    #[test]
+    fn fsi_roundtrip_dupsort() {
+        roundtrip(FixedSizeInfo::DupSort { key2_size: 32 });
+    }
+
+    #[test]
+    fn fsi_roundtrip_dupfixed() {
+        roundtrip(FixedSizeInfo::DupFixed { key2_size: 32, total_size: 64 });
     }
 }

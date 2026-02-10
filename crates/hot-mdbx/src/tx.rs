@@ -41,15 +41,11 @@ impl<K: TransactionKind> Tx<K> {
 
     /// Reads FixedSizeInfo from the metadata table.
     fn read_fsi_from_table(&self, name: &'static str) -> Result<FixedSizeInfo, MdbxError> {
-        let mut key = B256::ZERO;
-        let to_copy = core::cmp::min(32, name.len());
-        key[..to_copy].copy_from_slice(&name.as_bytes()[..to_copy]);
-
         let db = self.inner.open_db(None)?;
 
         let data: [u8; 8] = self
             .inner
-            .get(db.dbi(), key.as_slice())
+            .get(db.dbi(), fsi_name_to_key(name).as_slice())
             .map_err(MdbxError::from)?
             .ok_or(MdbxError::UnknownTable(name))?;
 
@@ -104,18 +100,25 @@ impl<K: TransactionKind + WriteMarker> Tx<K> {
     fn store_fsi(&self, table: &'static str, fsi: FixedSizeInfo) -> Result<(), MdbxError> {
         let db = self.inner.open_db(None)?;
 
-        let mut key_buf = [0u8; MAX_KEY_SIZE];
+        let mut key_buf = B256::ZERO;
         let to_copy = core::cmp::min(32, table.len());
         key_buf[..to_copy].copy_from_slice(&table.as_bytes()[..to_copy]);
 
         let mut value_buf = [0u8; 8];
         fsi.encode_value_to(&mut value_buf.as_mut_slice());
 
-        self.inner.put(db, key_buf, value_buf, WriteFlags::UPSERT)?;
+        self.inner.put(db, fsi_name_to_key(table).as_slice(), value_buf, WriteFlags::UPSERT)?;
         self.fsi_cache.write().insert(table, fsi);
 
         Ok(())
     }
+}
+
+fn fsi_name_to_key(name: &'static str) -> B256 {
+    let mut key = B256::ZERO;
+    let to_copy = core::cmp::min(32, name.len());
+    key[..to_copy].copy_from_slice(&name.as_bytes()[..to_copy]);
+    key
 }
 
 impl<K> HotKvRead for Tx<K>
