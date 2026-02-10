@@ -88,6 +88,12 @@ impl ValSer for FixedSizeInfo {
     where
         Self: Sized,
     {
+        if data.len() < 8 {
+            return Err(signet_hot::DeserError::InsufficientData {
+                needed: 8,
+                available: data.len(),
+            });
+        }
         let mut buf = data;
         let key2_size = buf.get_u32() as usize;
         let total_size = buf.get_u32() as usize;
@@ -125,5 +131,17 @@ mod tests {
     #[test]
     fn fsi_roundtrip_dupfixed() {
         roundtrip(FixedSizeInfo::DupFixed { key2_size: 32, total_size: 64 });
+    }
+
+    #[test]
+    fn fsi_decode_too_short() {
+        let data = [0u8; 7];
+        match FixedSizeInfo::decode_value(&data) {
+            Err(signet_hot::DeserError::InsufficientData { needed, available }) => {
+                assert_eq!(needed, 8);
+                assert_eq!(available, 7);
+            }
+            other => panic!("expected InsufficientData, got: {other:?}"),
+        }
     }
 }
