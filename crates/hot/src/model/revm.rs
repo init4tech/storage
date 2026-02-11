@@ -1,4 +1,5 @@
 use crate::{
+    db::HistoryRead,
     model::{HotKvError, HotKvRead, HotKvWrite},
     tables::{self, Bytecodes, DualKey, PlainAccountState, SingleKey, Table},
 };
@@ -16,14 +17,34 @@ use trevm::revm::{
 impl DBErrorMarker for HotKvError {}
 
 /// Read-only [`Database`] and [`DatabaseRef`] adapter.
+///
+/// When `height` is `Some`, reads return state as it was at that block
+/// height by consulting history and change set tables. When `None`,
+/// reads use the current plain state tables.
 pub struct RevmRead<T: HotKvRead> {
     reader: T,
+    height: Option<u64>,
 }
 
 impl<T: HotKvRead> RevmRead<T> {
-    /// Create a new read adapter
+    /// Create a new read adapter that reads current state.
     pub const fn new(reader: T) -> Self {
-        Self { reader }
+        Self { reader, height: None }
+    }
+
+    /// Create a read adapter that reads state at a specific block height.
+    ///
+    /// **Note:** This constructor does **not** validate `height` against the
+    /// stored block range. Heights past the chain tip silently return
+    /// current state, and heights before the first block return the
+    /// pre-state of the earliest change. Use
+    /// [`HotKv::revm_reader_at_height`] which validates, or call
+    /// [`HistoryRead::check_height`] manually.
+    ///
+    /// [`HotKv::revm_reader_at_height`]: crate::model::HotKv::revm_reader_at_height
+    /// [`HistoryRead::check_height`]: crate::db::HistoryRead::check_height
+    pub const fn at_height(reader: T, height: u64) -> Self {
+        Self { reader, height: Some(height) }
     }
 }
 
@@ -248,13 +269,12 @@ where
     type Error = T::Error;
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        let account_opt = self.reader.get::<PlainAccountState>(&address)?;
-
-        let Some(account) = account_opt else {
+        let Some(account) = self.reader.get_account_at_height(&address, self.height)? else {
             return Ok(None);
         };
 
         let code_hash = account.bytecode_hash.unwrap_or(KECCAK256_EMPTY);
+        // Bytecodes are content-addressed (immutable), no height awareness needed
         let code = if code_hash != KECCAK256_EMPTY {
             self.reader.get::<Bytecodes>(&code_hash)?
         } else {
@@ -279,7 +299,7 @@ where
         address: Address,
         index: StorageKey,
     ) -> Result<StorageValue, Self::Error> {
-        Ok(self.reader.get_dual::<tables::PlainStorageState>(&address, &index)?.unwrap_or_default())
+        Ok(self.reader.get_storage_at_height(&address, &index, self.height)?.unwrap_or_default())
     }
 
     fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
@@ -430,12 +450,13 @@ where
 mod tests {
     use super::*;
     use crate::{
+        db::{HistoryRead, UnsafeDbWrite, UnsafeHistoryWrite},
         mem::MemKv,
         model::{HotKv, HotKvRead, HotKvWrite},
         tables::{Bytecodes, PlainAccountState},
     };
     use alloy::primitives::{Address, B256, U256};
-    use signet_storage_types::Account;
+    use signet_storage_types::{Account, BlockNumberList};
     use trevm::revm::{
         database::{Database, DatabaseRef, TryDatabaseCommit},
         primitives::{HashMap, StorageKey, StorageValue},
@@ -747,5 +768,315 @@ mod tests {
         assert!(account1.is_some());
 
         Ok(())
+    }
+
+    /// Set up a MemKv with history data for height-aware reading tests.
+    ///
+    /// Scenario: account A
+    ///   - Genesis/current state: nonce=10, balance=1000
+    ///   - Block 5 changed account: pre-state was nonce=1, balance=100
+    ///   - Block 10 changed account: pre-state was nonce=5, balance=500
+    ///   - Current (PlainAccountState): nonce=10, balance=1000
+    ///   - History shard: (A, 10) → [5, 10]
+    ///
+    /// Storage slot 0x42 for address A:
+    ///   - Block 5 changed slot: pre-state was 0
+    ///   - Block 10 changed slot: pre-state was 100
+    ///   - Current (PlainStorageState): 200
+    ///   - History shard: (A, ShardedKey(0x42, 10)) → [5, 10]
+    fn setup_history_kv() -> (MemKv, Address) {
+        let mem_kv = MemKv::default();
+        let address = Address::from_slice(&[0x1; 20]);
+        let slot = U256::from(0x42u64);
+
+        let writer = mem_kv.writer().unwrap();
+
+        // Write headers so get_execution_range() returns Some((1, 15))
+        let header1 = alloy::consensus::Header { number: 1, ..Default::default() };
+        writer.put_header_inconsistent(&header1).unwrap();
+
+        let header15 = alloy::consensus::Header { number: 15, ..Default::default() };
+        writer.put_header_inconsistent(&header15).unwrap();
+
+        // Current plain state
+        let current_account =
+            Account { nonce: 10, balance: U256::from(1000u64), bytecode_hash: None };
+        writer.put_account(&address, &current_account).unwrap();
+        writer.put_storage(&address, &slot, &U256::from(200u64)).unwrap();
+
+        // Account history shard: blocks 5 and 10 touched address
+        let history = BlockNumberList::new([5, 10]).unwrap();
+        writer.write_account_history(&address, 10, &history).unwrap();
+
+        // Account change sets (pre-states)
+        let pre_state_5 = Account { nonce: 1, balance: U256::from(100u64), bytecode_hash: None };
+        writer.write_account_prestate(5, address, &pre_state_5).unwrap();
+
+        let pre_state_10 = Account { nonce: 5, balance: U256::from(500u64), bytecode_hash: None };
+        writer.write_account_prestate(10, address, &pre_state_10).unwrap();
+
+        // Storage history shard: blocks 5 and 10 touched (address, slot)
+        let storage_history = BlockNumberList::new([5, 10]).unwrap();
+        writer.write_storage_history(&address, slot, 10, &storage_history).unwrap();
+
+        // Storage change sets (pre-states)
+        writer.write_storage_prestate(5, address, &slot, &U256::ZERO).unwrap();
+        writer.write_storage_prestate(10, address, &slot, &U256::from(100u64)).unwrap();
+
+        writer.raw_commit().unwrap();
+
+        (mem_kv, address)
+    }
+
+    #[test]
+    fn test_account_at_height_before_any_changes() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+
+        // Height 3: before block 5 (first change). Should return pre-state of block 5.
+        let account = reader.get_account_at_height(&address, Some(3)).unwrap().unwrap();
+        assert_eq!(account.nonce, 1);
+        assert_eq!(account.balance, U256::from(100u64));
+    }
+
+    #[test]
+    fn test_account_at_height_between_changes() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+
+        // Height 7: between blocks 5 and 10. Should return pre-state of block 10.
+        let account = reader.get_account_at_height(&address, Some(7)).unwrap().unwrap();
+        assert_eq!(account.nonce, 5);
+        assert_eq!(account.balance, U256::from(500u64));
+    }
+
+    #[test]
+    fn test_account_at_height_after_all_changes() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+
+        // Height 15: after all changes. Should return current plain state.
+        let account = reader.get_account_at_height(&address, Some(15)).unwrap().unwrap();
+        assert_eq!(account.nonce, 10);
+        assert_eq!(account.balance, U256::from(1000u64));
+    }
+
+    #[test]
+    fn test_account_at_height_exactly_at_change() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+
+        // Height 5: exactly at block 5. The change AT block 5 is already applied,
+        // so earliest block > 5 is 10, returning pre-state of block 10.
+        let account = reader.get_account_at_height(&address, Some(5)).unwrap().unwrap();
+        assert_eq!(account.nonce, 5);
+        assert_eq!(account.balance, U256::from(500u64));
+    }
+
+    #[test]
+    fn test_account_at_height_exactly_at_last_change() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+
+        // Height 10: exactly at last change block. No blocks > 10 in history,
+        // so returns current plain state.
+        let account = reader.get_account_at_height(&address, Some(10)).unwrap().unwrap();
+        assert_eq!(account.nonce, 10);
+        assert_eq!(account.balance, U256::from(1000u64));
+    }
+
+    #[test]
+    fn test_storage_at_height_before_any_changes() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+        let slot = U256::from(0x42u64);
+
+        // Height 3: before block 5. Should return pre-state of block 5 (zero).
+        let value = reader.get_storage_at_height(&address, &slot, Some(3)).unwrap();
+        assert_eq!(value, Some(U256::ZERO));
+    }
+
+    #[test]
+    fn test_storage_at_height_between_changes() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+        let slot = U256::from(0x42u64);
+
+        // Height 7: between blocks 5 and 10. Should return pre-state of block 10.
+        let value = reader.get_storage_at_height(&address, &slot, Some(7)).unwrap();
+        assert_eq!(value, Some(U256::from(100u64)));
+    }
+
+    #[test]
+    fn test_storage_at_height_after_all_changes() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+        let slot = U256::from(0x42u64);
+
+        // Height 15: after all changes. Should return current plain state.
+        let value = reader.get_storage_at_height(&address, &slot, Some(15)).unwrap();
+        assert_eq!(value, Some(U256::from(200u64)));
+    }
+
+    #[test]
+    fn test_account_at_height_no_history() {
+        let (mem_kv, _) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+
+        // Unknown address with no history — should return current (None).
+        let unknown = Address::from_slice(&[0xFF; 20]);
+        let result = reader.get_account_at_height(&unknown, Some(5)).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_storage_at_height_no_history() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+
+        // Unknown slot with no history — should return current (None).
+        let unknown_slot = U256::from(0x99u64);
+        let result = reader.get_storage_at_height(&address, &unknown_slot, Some(5)).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_revm_read_at_height() {
+        let (mem_kv, address) = setup_history_kv();
+        let slot = U256::from(0x42u64);
+
+        // Reader at height 3: should see pre-block-5 state
+        let reader = mem_kv.revm_reader_at_height(3).unwrap();
+        let info = reader.basic_ref(address).unwrap().unwrap();
+        assert_eq!(info.nonce, 1);
+        assert_eq!(info.balance, U256::from(100u64));
+
+        let storage = reader.storage_ref(address, StorageKey::from(slot)).unwrap();
+        assert_eq!(storage, U256::ZERO);
+    }
+
+    #[test]
+    fn test_revm_read_at_height_current_state() {
+        let (mem_kv, address) = setup_history_kv();
+        let slot = U256::from(0x42u64);
+
+        // Reader at height 15: after all changes, should see current state
+        let reader = mem_kv.revm_reader_at_height(15).unwrap();
+        let info = reader.basic_ref(address).unwrap().unwrap();
+        assert_eq!(info.nonce, 10);
+        assert_eq!(info.balance, U256::from(1000u64));
+
+        let storage = reader.storage_ref(address, StorageKey::from(slot)).unwrap();
+        assert_eq!(storage, U256::from(200u64));
+    }
+
+    #[test]
+    fn test_revm_read_none_height_uses_current() {
+        let (mem_kv, address) = setup_history_kv();
+        let slot = U256::from(0x42u64);
+
+        // Reader with no height (None) — backward compatible, reads current state
+        let reader = mem_kv.revm_reader().unwrap();
+        let info = reader.basic_ref(address).unwrap().unwrap();
+        assert_eq!(info.nonce, 10);
+        assert_eq!(info.balance, U256::from(1000u64));
+
+        let storage = reader.storage_ref(address, StorageKey::from(slot)).unwrap();
+        assert_eq!(storage, U256::from(200u64));
+    }
+
+    #[test]
+    fn test_revm_reader_at_height_past_tip() {
+        let (mem_kv, _) = setup_history_kv();
+
+        // Height 20 with tip at 15 → HeightOutOfRange
+        let err = mem_kv.revm_reader_at_height(20).unwrap_err();
+        assert!(
+            matches!(err, HotKvError::HeightOutOfRange { height: 20, first: 1, last: 15 }),
+            "expected HeightOutOfRange, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_revm_reader_at_height_before_first_block() {
+        let (mem_kv, _) = setup_history_kv();
+
+        // Height 0 with first block at 1 → HeightOutOfRange
+        let err = mem_kv.revm_reader_at_height(0).unwrap_err();
+        assert!(
+            matches!(err, HotKvError::HeightOutOfRange { height: 0, first: 1, last: 15 }),
+            "expected HeightOutOfRange, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_revm_reader_at_height_empty_db() {
+        let mem_kv = MemKv::default();
+
+        // Empty database → NoBlocks
+        let err = mem_kv.revm_reader_at_height(5).unwrap_err();
+        assert!(matches!(err, HotKvError::NoBlocks), "expected NoBlocks, got {err:?}");
+    }
+
+    #[test]
+    fn test_checked_account_at_height_out_of_range() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+
+        // Height 20 with tip at 15 → HeightOutOfRange
+        let err = reader.get_account_at_height_checked(&address, Some(20)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::db::HistoryError::HeightOutOfRange { height: 20, first: 1, last: 15 }
+            ),
+            "expected HeightOutOfRange, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_checked_storage_at_height_out_of_range() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+        let slot = U256::from(0x42u64);
+
+        // Height 20 with tip at 15 → HeightOutOfRange
+        let err = reader.get_storage_at_height_checked(&address, &slot, Some(20)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::db::HistoryError::HeightOutOfRange { height: 20, first: 1, last: 15 }
+            ),
+            "expected HeightOutOfRange, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_checked_methods_pass_for_valid_height() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+        let slot = U256::from(0x42u64);
+
+        // Height 7 is within range [1, 15] — should succeed and match unchecked
+        let account = reader.get_account_at_height_checked(&address, Some(7)).unwrap().unwrap();
+        assert_eq!(account.nonce, 5);
+
+        let storage =
+            reader.get_storage_at_height_checked(&address, &slot, Some(7)).unwrap().unwrap();
+        assert_eq!(storage, U256::from(100u64));
+    }
+
+    #[test]
+    fn test_checked_methods_none_height() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+        let slot = U256::from(0x42u64);
+
+        // None height — returns current state, no validation error
+        let account = reader.get_account_at_height_checked(&address, None).unwrap().unwrap();
+        assert_eq!(account.nonce, 10);
+
+        let storage = reader.get_storage_at_height_checked(&address, &slot, None).unwrap().unwrap();
+        assert_eq!(storage, U256::from(200u64));
     }
 }

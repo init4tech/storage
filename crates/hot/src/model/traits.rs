@@ -1,4 +1,5 @@
 use crate::{
+    db::HistoryRead,
     model::{
         DualKeyTraverse, DualKeyTraverseMut, DualTableCursor, HotKvError, HotKvReadError,
         KvTraverse, KvTraverseMut, TableCursor,
@@ -42,6 +43,33 @@ pub trait HotKv {
     /// [`DatabaseRef`]: trevm::revm::database::DatabaseRef
     fn revm_reader(&self) -> Result<RevmRead<Self::RoTx>, HotKvError> {
         self.reader().map(RevmRead::new)
+    }
+
+    /// Create a read-only transaction that reads state at a specific block
+    /// height, and wrap it in an adapter for the revm [`DatabaseRef`] trait.
+    ///
+    /// The returned reader uses history and change set tables to
+    /// reconstruct state as it was at `height`. Bytecodes are
+    /// content-addressed and always read from the current table.
+    ///
+    /// # Errors
+    ///
+    /// - [`HotKvError::NoBlocks`] if the database has no blocks.
+    /// - [`HotKvError::HeightOutOfRange`] if `height` is outside the
+    ///   stored block range.
+    ///
+    /// [`DatabaseRef`]: trevm::revm::database::DatabaseRef
+    fn revm_reader_at_height(&self, height: u64) -> Result<RevmRead<Self::RoTx>, HotKvError> {
+        let reader = self.reader()?;
+        let Some((first, last)) =
+            reader.get_execution_range().map_err(|e| e.into_hot_kv_error())?
+        else {
+            return Err(HotKvError::NoBlocks);
+        };
+        if height < first || height > last {
+            return Err(HotKvError::HeightOutOfRange { height, first, last });
+        }
+        Ok(RevmRead::at_height(reader, height))
     }
 
     /// Create a read-write transaction.

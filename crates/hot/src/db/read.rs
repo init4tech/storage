@@ -1,4 +1,4 @@
-use crate::{model::HotKvRead, tables};
+use crate::{db::HistoryError, model::HotKvRead, tables};
 use alloy::{
     consensus::Header,
     primitives::{Address, B256, U256},
@@ -211,6 +211,149 @@ pub trait HistoryRead: HotDbRead {
             return Ok(None);
         };
         Ok(Some((first, last)))
+    }
+
+    /// Get account state, optionally at a specific historical block height.
+    ///
+    /// When `height` is `Some`, reconstructs the account state as it was at
+    /// that block height by consulting history and change set tables. When
+    /// `None`, returns the current value from `PlainAccountState`.
+    ///
+    /// If no changes exist after the given height, the current value is
+    /// returned (the account has not been modified since that height).
+    ///
+    /// # Note
+    ///
+    /// This method does **not** validate `height` against the stored block
+    /// range. Heights past the chain tip silently return current state, and
+    /// heights before the first block return the pre-state of the earliest
+    /// change. Use [`Self::get_account_at_height_checked`] or
+    /// [`HotKv::revm_reader_at_height`] for validated access.
+    ///
+    /// [`HotKv::revm_reader_at_height`]: crate::model::HotKv::revm_reader_at_height
+    fn get_account_at_height(
+        &self,
+        address: &Address,
+        height: Option<u64>,
+    ) -> Result<Option<Account>, Self::Error> {
+        let Some(height) = height else {
+            return self.get_account(address);
+        };
+
+        let mut cursor = self.traverse_dual::<tables::AccountsHistory>()?;
+
+        // Seek to the first shard with key2 >= height + 1
+        let result = cursor.next_dual_above(address, &(height + 1))?;
+
+        // Verify address matches; seek could overshoot to the next address
+        let Some((_, _, list)) = result.filter(|(addr, _, _)| *addr == *address) else {
+            // No history after height — account unchanged, use current value
+            return self.get_account(address);
+        };
+
+        // rank(height) = count of values <= height; select(rank) = first value > height
+        let rank = list.rank(height);
+        let Some(first_change) = list.select(rank) else {
+            // Defensive: shard key2 > height and is in the list, so this
+            // should not happen. Fall back to current value.
+            return self.get_account(address);
+        };
+
+        self.get_account_change(first_change, address)
+    }
+
+    /// Get storage slot value, optionally at a specific historical block
+    /// height.
+    ///
+    /// When `height` is `Some`, reconstructs the storage value as it was at
+    /// that block height by consulting history and change set tables. When
+    /// `None`, returns the current value from `PlainStorageState`.
+    ///
+    /// If no changes exist after the given height, the current value is
+    /// returned (the slot has not been modified since that height).
+    ///
+    /// # Note
+    ///
+    /// This method does **not** validate `height` against the stored block
+    /// range. Heights past the chain tip silently return current state, and
+    /// heights before the first block return the pre-state of the earliest
+    /// change. Use [`Self::get_storage_at_height_checked`] or
+    /// [`HotKv::revm_reader_at_height`] for validated access.
+    ///
+    /// [`HotKv::revm_reader_at_height`]: crate::model::HotKv::revm_reader_at_height
+    fn get_storage_at_height(
+        &self,
+        address: &Address,
+        slot: &U256,
+        height: Option<u64>,
+    ) -> Result<Option<U256>, Self::Error> {
+        let Some(height) = height else {
+            return self.get_storage(address, slot);
+        };
+
+        let mut cursor = self.traverse_dual::<tables::StorageHistory>()?;
+
+        // Seek to first shard with (address, ShardedKey { slot, block >= height+1 })
+        let target = ShardedKey::new(*slot, height + 1);
+        let result = cursor.next_dual_above(address, &target)?;
+
+        // Verify address AND slot match; seek could land on a different slot
+        let Some((_, _, list)) =
+            result.filter(|(addr, sk, _)| *addr == *address && sk.key == *slot)
+        else {
+            // No history after height — slot unchanged, use current value
+            return self.get_storage(address, slot);
+        };
+
+        let rank = list.rank(height);
+        let Some(first_change) = list.select(rank) else {
+            return self.get_storage(address, slot);
+        };
+
+        self.get_storage_change(first_change, address, slot)
+    }
+
+    /// Validate that `height` is within the stored block range.
+    ///
+    /// Returns `Ok(())` if `height` is `None` (current state) or within the
+    /// range of stored blocks. Returns an error if the database has no
+    /// blocks or if the height is out of range.
+    fn check_height(&self, height: Option<u64>) -> Result<(), HistoryError<Self::Error>> {
+        let Some(height) = height else { return Ok(()) };
+        let Some((first, last)) = self.get_execution_range().map_err(HistoryError::Db)? else {
+            return Err(HistoryError::NoBlocks);
+        };
+        if height < first || height > last {
+            return Err(HistoryError::HeightOutOfRange { height, first, last });
+        }
+        Ok(())
+    }
+
+    /// Get account state at a height, with range validation.
+    ///
+    /// Validates that `height` is within the stored block range before
+    /// delegating to [`Self::get_account_at_height`].
+    fn get_account_at_height_checked(
+        &self,
+        address: &Address,
+        height: Option<u64>,
+    ) -> Result<Option<Account>, HistoryError<Self::Error>> {
+        self.check_height(height)?;
+        self.get_account_at_height(address, height).map_err(HistoryError::Db)
+    }
+
+    /// Get storage slot value at a height, with range validation.
+    ///
+    /// Validates that `height` is within the stored block range before
+    /// delegating to [`Self::get_storage_at_height`].
+    fn get_storage_at_height_checked(
+        &self,
+        address: &Address,
+        slot: &U256,
+        height: Option<u64>,
+    ) -> Result<Option<U256>, HistoryError<Self::Error>> {
+        self.check_height(height)?;
+        self.get_storage_at_height(address, slot, height).map_err(HistoryError::Db)
     }
 
     /// Check if a specific block number exists in history.

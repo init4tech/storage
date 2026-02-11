@@ -37,6 +37,21 @@ pub enum HistoryError<E: std::error::Error> {
     #[error("empty header range provided")]
     EmptyRange,
 
+    /// No blocks exist in the database.
+    #[error("no blocks in database")]
+    NoBlocks,
+
+    /// The requested height is outside the stored block range.
+    #[error("height {height} outside stored range {first}..={last}")]
+    HeightOutOfRange {
+        /// The requested height.
+        height: u64,
+        /// The first stored block number.
+        first: u64,
+        /// The last stored block number.
+        last: u64,
+    },
+
     /// Database error.
     #[error("{0}")]
     Db(#[from] E),

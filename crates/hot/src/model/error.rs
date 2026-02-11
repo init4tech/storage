@@ -14,6 +14,21 @@ pub enum HotKvError {
     /// Indicates that a write transaction is already in progress.
     #[error("A write transaction is already in progress")]
     WriteLocked,
+
+    /// No blocks exist in the database.
+    #[error("no blocks in database")]
+    NoBlocks,
+
+    /// The requested height is outside the stored block range.
+    #[error("height {height} outside stored range {first}..={last}")]
+    HeightOutOfRange {
+        /// The requested height.
+        height: u64,
+        /// The first stored block number.
+        first: u64,
+        /// The last stored block number.
+        last: u64,
+    },
 }
 
 impl HotKvError {
