@@ -26,5 +26,11 @@ impl From<ColdStorageError> for StorageError {
     }
 }
 
+impl From<HotKvError> for StorageError {
+    fn from(err: HotKvError) -> Self {
+        Self::Hot(HistoryError::Db(err))
+    }
+}
+
 /// Result type alias for unified storage operations.
 pub type StorageResult<T> = Result<T, StorageError>;

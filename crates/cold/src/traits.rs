@@ -5,7 +5,9 @@
 //! indexing, and keying - the trait is agnostic to these implementation details.
 
 use alloy::{consensus::Header, primitives::BlockNumber};
-use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned};
+use signet_storage_types::{
+    DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, TransactionSigned,
+};
 use std::future::Future;
 
 use super::{
@@ -43,6 +45,18 @@ impl BlockData {
     /// Get the block number of the block.
     pub const fn block_number(&self) -> BlockNumber {
         self.header.number
+    }
+}
+
+impl From<ExecutedBlock> for BlockData {
+    fn from(block: ExecutedBlock) -> Self {
+        Self::new(
+            block.header.into_inner(),
+            block.transactions,
+            block.receipts,
+            block.signet_events,
+            block.zenith_header,
+        )
     }
 }
 
