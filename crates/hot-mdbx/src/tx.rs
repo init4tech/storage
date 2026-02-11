@@ -145,7 +145,7 @@ where
         _key1: &[u8],
         _key2: &[u8],
     ) -> Result<Option<Cow<'a, [u8]>>, Self::Error> {
-        unimplemented!("Use DualTableTraverse for raw_get_dual");
+        Err(MdbxError::RawDualUnsupported)
     }
 
     fn get_dual<T: DualKey>(

@@ -18,7 +18,7 @@
 mod account;
 pub use account::Account;
 mod execution;
-pub use execution::{ExecutedBlock, ExecutedBlockBuilder};
+pub use execution::{ExecutedBlock, ExecutedBlockBuilder, MissingFieldError};
 
 mod alloy;
 pub use alloy::{Receipt, TransactionSigned};

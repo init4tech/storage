@@ -32,7 +32,8 @@
 //!     .bundle(bundle_state)
 //!     .transactions(txs)
 //!     .receipts(receipts)
-//!     .build();
+//!     .build()
+//!     .unwrap();
 //!
 //! // Write to both storages (takes ownership)
 //! storage.append_blocks(vec![block])?;
