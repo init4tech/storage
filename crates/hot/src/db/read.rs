@@ -213,17 +213,23 @@ pub trait HistoryRead: HotDbRead {
         Ok(Some((first, last)))
     }
 
-    /// Get account state at a specific historical block height.
+    /// Get account state, optionally at a specific historical block height.
     ///
-    /// Reconstructs the account state as it was at the given block height
-    /// by consulting history and change set tables. If no changes exist
-    /// after `height`, the current value from `PlainAccountState` is
-    /// returned (the account has not been modified since `height`).
+    /// When `height` is `Some`, reconstructs the account state as it was at
+    /// that block height by consulting history and change set tables. When
+    /// `None`, returns the current value from `PlainAccountState`.
+    ///
+    /// If no changes exist after the given height, the current value is
+    /// returned (the account has not been modified since that height).
     fn get_account_at_height(
         &self,
         address: &Address,
-        height: u64,
+        height: Option<u64>,
     ) -> Result<Option<Account>, Self::Error> {
+        let Some(height) = height else {
+            return self.get_account(address);
+        };
+
         let mut cursor = self.traverse_dual::<tables::AccountsHistory>()?;
 
         // Seek to the first shard with key2 >= height + 1
@@ -246,18 +252,25 @@ pub trait HistoryRead: HotDbRead {
         self.get_account_change(first_change, address)
     }
 
-    /// Get storage slot value at a specific historical block height.
+    /// Get storage slot value, optionally at a specific historical block
+    /// height.
     ///
-    /// Reconstructs the storage value as it was at the given block height
-    /// by consulting history and change set tables. If no changes exist
-    /// after `height`, the current value from `PlainStorageState` is
-    /// returned (the slot has not been modified since `height`).
+    /// When `height` is `Some`, reconstructs the storage value as it was at
+    /// that block height by consulting history and change set tables. When
+    /// `None`, returns the current value from `PlainStorageState`.
+    ///
+    /// If no changes exist after the given height, the current value is
+    /// returned (the slot has not been modified since that height).
     fn get_storage_at_height(
         &self,
         address: &Address,
         slot: &U256,
-        height: u64,
+        height: Option<u64>,
     ) -> Result<Option<U256>, Self::Error> {
+        let Some(height) = height else {
+            return self.get_storage(address, slot);
+        };
+
         let mut cursor = self.traverse_dual::<tables::StorageHistory>()?;
 
         // Seek to first shard with (address, ShardedKey { slot, block >= height+1 })

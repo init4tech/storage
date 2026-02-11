@@ -259,12 +259,7 @@ where
     type Error = T::Error;
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        let account_opt = match self.height {
-            Some(h) => self.reader.get_account_at_height(&address, h)?,
-            None => self.reader.get::<PlainAccountState>(&address)?,
-        };
-
-        let Some(account) = account_opt else {
+        let Some(account) = self.reader.get_account_at_height(&address, self.height)? else {
             return Ok(None);
         };
 
@@ -294,15 +289,7 @@ where
         address: Address,
         index: StorageKey,
     ) -> Result<StorageValue, Self::Error> {
-        match self.height {
-            Some(h) => {
-                Ok(self.reader.get_storage_at_height(&address, &index, h)?.unwrap_or_default())
-            }
-            None => Ok(self
-                .reader
-                .get_dual::<tables::PlainStorageState>(&address, &index)?
-                .unwrap_or_default()),
-        }
+        Ok(self.reader.get_storage_at_height(&address, &index, self.height)?.unwrap_or_default())
     }
 
     fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
@@ -830,7 +817,7 @@ mod tests {
         let reader = mem_kv.reader().unwrap();
 
         // Height 3: before block 5 (first change). Should return pre-state of block 5.
-        let account = reader.get_account_at_height(&address, 3).unwrap().unwrap();
+        let account = reader.get_account_at_height(&address, Some(3)).unwrap().unwrap();
         assert_eq!(account.nonce, 1);
         assert_eq!(account.balance, U256::from(100u64));
     }
@@ -841,7 +828,7 @@ mod tests {
         let reader = mem_kv.reader().unwrap();
 
         // Height 7: between blocks 5 and 10. Should return pre-state of block 10.
-        let account = reader.get_account_at_height(&address, 7).unwrap().unwrap();
+        let account = reader.get_account_at_height(&address, Some(7)).unwrap().unwrap();
         assert_eq!(account.nonce, 5);
         assert_eq!(account.balance, U256::from(500u64));
     }
@@ -852,7 +839,7 @@ mod tests {
         let reader = mem_kv.reader().unwrap();
 
         // Height 15: after all changes. Should return current plain state.
-        let account = reader.get_account_at_height(&address, 15).unwrap().unwrap();
+        let account = reader.get_account_at_height(&address, Some(15)).unwrap().unwrap();
         assert_eq!(account.nonce, 10);
         assert_eq!(account.balance, U256::from(1000u64));
     }
@@ -864,7 +851,7 @@ mod tests {
 
         // Height 5: exactly at block 5. The change AT block 5 is already applied,
         // so earliest block > 5 is 10, returning pre-state of block 10.
-        let account = reader.get_account_at_height(&address, 5).unwrap().unwrap();
+        let account = reader.get_account_at_height(&address, Some(5)).unwrap().unwrap();
         assert_eq!(account.nonce, 5);
         assert_eq!(account.balance, U256::from(500u64));
     }
@@ -876,7 +863,7 @@ mod tests {
 
         // Height 10: exactly at last change block. No blocks > 10 in history,
         // so returns current plain state.
-        let account = reader.get_account_at_height(&address, 10).unwrap().unwrap();
+        let account = reader.get_account_at_height(&address, Some(10)).unwrap().unwrap();
         assert_eq!(account.nonce, 10);
         assert_eq!(account.balance, U256::from(1000u64));
     }
@@ -888,7 +875,7 @@ mod tests {
         let slot = U256::from(0x42u64);
 
         // Height 3: before block 5. Should return pre-state of block 5 (zero).
-        let value = reader.get_storage_at_height(&address, &slot, 3).unwrap();
+        let value = reader.get_storage_at_height(&address, &slot, Some(3)).unwrap();
         assert_eq!(value, Some(U256::ZERO));
     }
 
@@ -899,7 +886,7 @@ mod tests {
         let slot = U256::from(0x42u64);
 
         // Height 7: between blocks 5 and 10. Should return pre-state of block 10.
-        let value = reader.get_storage_at_height(&address, &slot, 7).unwrap();
+        let value = reader.get_storage_at_height(&address, &slot, Some(7)).unwrap();
         assert_eq!(value, Some(U256::from(100u64)));
     }
 
@@ -910,7 +897,7 @@ mod tests {
         let slot = U256::from(0x42u64);
 
         // Height 15: after all changes. Should return current plain state.
-        let value = reader.get_storage_at_height(&address, &slot, 15).unwrap();
+        let value = reader.get_storage_at_height(&address, &slot, Some(15)).unwrap();
         assert_eq!(value, Some(U256::from(200u64)));
     }
 
@@ -921,7 +908,7 @@ mod tests {
 
         // Unknown address with no history — should return current (None).
         let unknown = Address::from_slice(&[0xFF; 20]);
-        let result = reader.get_account_at_height(&unknown, 5).unwrap();
+        let result = reader.get_account_at_height(&unknown, Some(5)).unwrap();
         assert!(result.is_none());
     }
 
@@ -932,7 +919,7 @@ mod tests {
 
         // Unknown slot with no history — should return current (None).
         let unknown_slot = U256::from(0x99u64);
-        let result = reader.get_storage_at_height(&address, &unknown_slot, 5).unwrap();
+        let result = reader.get_storage_at_height(&address, &unknown_slot, Some(5)).unwrap();
         assert!(result.is_none());
     }
 
