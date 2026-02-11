@@ -8,11 +8,11 @@ use crate::{
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::{
-    consensus::Header,
+    consensus::{Header, Sealable},
     primitives::{B256, BlockNumber},
 };
 use signet_storage_types::{
-    ConfirmationMeta, DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned,
+    ConfirmationMeta, DbSignetEvent, DbZenithHeader, Receipt, SealedHeader, TransactionSigned,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -23,8 +23,8 @@ use tokio::sync::RwLock;
 /// Inner storage state.
 #[derive(Default)]
 struct MemColdBackendInner {
-    /// Headers indexed by block number.
-    headers: BTreeMap<BlockNumber, Header>,
+    /// Sealed headers indexed by block number (hash cached on insert).
+    headers: BTreeMap<BlockNumber, SealedHeader>,
     /// Header hash to block number index.
     header_hashes: HashMap<B256, BlockNumber>,
 
@@ -70,30 +70,32 @@ impl std::fmt::Debug for MemColdBackend {
     }
 }
 
-/// Build [`ConfirmationMeta`] from the inner state for a given block and
-/// transaction index. Returns `None` if the block header is not stored.
-fn confirmation_meta(
-    inner: &MemColdBackendInner,
-    block: BlockNumber,
-    index: u64,
-) -> Option<ConfirmationMeta> {
-    inner.headers.get(&block).map(|h| ConfirmationMeta::new(block, h.hash_slow(), index))
+impl MemColdBackendInner {
+    /// Build [`ConfirmationMeta`] for a given block and transaction index.
+    ///
+    /// Uses the cached hash from the [`SealedHeader`] rather than
+    /// recomputing via `hash_slow()`.
+    fn confirmation_meta(&self, block: BlockNumber, index: u64) -> Option<ConfirmationMeta> {
+        self.headers.get(&block).map(|h| ConfirmationMeta::new(block, h.hash(), index))
+    }
 }
 
 impl ColdStorage for MemColdBackend {
     async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<Header>> {
         let inner = self.inner.read().await;
         match spec {
-            HeaderSpecifier::Number(n) => Ok(inner.headers.get(&n).cloned()),
+            HeaderSpecifier::Number(n) => Ok(inner.headers.get(&n).map(|s| Header::clone(s))),
             HeaderSpecifier::Hash(h) => {
                 let block = inner.header_hashes.get(&h).copied();
-                Ok(block.and_then(|n| inner.headers.get(&n).cloned()))
+                Ok(block.and_then(|n| inner.headers.get(&n).map(|s| Header::clone(s))))
             }
             HeaderSpecifier::Tag(tag) => match tag {
-                BlockTag::Latest | BlockTag::Finalized | BlockTag::Safe => {
-                    Ok(inner.latest_block.and_then(|n| inner.headers.get(&n).cloned()))
+                BlockTag::Latest | BlockTag::Finalized | BlockTag::Safe => Ok(inner
+                    .latest_block
+                    .and_then(|n| inner.headers.get(&n).map(|s| Header::clone(s)))),
+                BlockTag::Earliest => {
+                    Ok(inner.headers.first_key_value().map(|(_, s)| Header::clone(s)))
                 }
-                BlockTag::Earliest => Ok(inner.headers.first_key_value().map(|(_, h)| h.clone())),
             },
         }
     }
@@ -125,9 +127,7 @@ impl ColdStorage for MemColdBackend {
             }
         };
         let tx = inner.transactions.get(&block).and_then(|txs| txs.get(index as usize).cloned());
-        Ok(tx
-            .zip(confirmation_meta(&inner, block, index))
-            .map(|(tx, meta)| Confirmed::new(tx, meta)))
+        Ok(tx.zip(inner.confirmation_meta(block, index)).map(|(tx, meta)| Confirmed::new(tx, meta)))
     }
 
     async fn get_transactions_in_block(
@@ -154,7 +154,7 @@ impl ColdStorage for MemColdBackend {
         };
         let receipt = inner.receipts.get(&block).and_then(|rs| rs.get(index as usize).cloned());
         Ok(receipt
-            .zip(confirmation_meta(&inner, block, index))
+            .zip(inner.confirmation_meta(block, index))
             .map(|(r, meta)| Confirmed::new(r, meta)))
     }
 
@@ -221,9 +221,10 @@ impl ColdStorage for MemColdBackend {
 
         let block = data.block_number();
 
-        // Store header and index by hash
-        let header_hash = data.header.hash_slow();
-        inner.headers.insert(block, data.header);
+        // Seal the header (computes hash once) and store
+        let sealed = data.header.seal_slow();
+        let header_hash = sealed.hash();
+        inner.headers.insert(block, sealed);
         inner.header_hashes.insert(header_hash, block);
 
         // Build tx hash list for indexing before moving transactions
@@ -271,8 +272,8 @@ impl ColdStorage for MemColdBackend {
 
         // Remove headers above block
         for k in &to_remove {
-            if let Some(header) = inner.headers.remove(k) {
-                inner.header_hashes.remove(&header.hash_slow());
+            if let Some(sealed) = inner.headers.remove(k) {
+                inner.header_hashes.remove(&sealed.hash());
             }
         }
 
