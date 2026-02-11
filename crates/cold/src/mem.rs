@@ -4,14 +4,16 @@
 //! It is primarily intended for testing and development.
 
 use crate::{
-    BlockData, BlockTag, ColdResult, ColdStorage, HeaderSpecifier, ReceiptSpecifier,
+    BlockData, BlockTag, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, ReceiptSpecifier,
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::{
     consensus::Header,
     primitives::{B256, BlockNumber},
 };
-use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned};
+use signet_storage_types::{
+    ConfirmationMeta, DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned,
+};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
@@ -68,6 +70,16 @@ impl std::fmt::Debug for MemColdBackend {
     }
 }
 
+/// Build [`ConfirmationMeta`] from the inner state for a given block and
+/// transaction index. Returns `None` if the block header is not stored.
+fn confirmation_meta(
+    inner: &MemColdBackendInner,
+    block: BlockNumber,
+    index: u64,
+) -> Option<ConfirmationMeta> {
+    inner.headers.get(&block).map(|h| ConfirmationMeta::new(block, h.hash_slow(), index))
+}
+
 impl ColdStorage for MemColdBackend {
     async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<Header>> {
         let inner = self.inner.read().await;
@@ -97,25 +109,25 @@ impl ColdStorage for MemColdBackend {
     async fn get_transaction(
         &self,
         spec: TransactionSpecifier,
-    ) -> ColdResult<Option<TransactionSigned>> {
+    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
         let inner = self.inner.read().await;
-        match spec {
-            TransactionSpecifier::Hash(h) => {
-                let loc = inner.tx_hashes.get(&h).copied();
-                Ok(loc.and_then(|(block, idx)| {
-                    inner.transactions.get(&block).and_then(|txs| txs.get(idx as usize).cloned())
-                }))
-            }
-            TransactionSpecifier::BlockAndIndex { block, index } => {
-                Ok(inner.transactions.get(&block).and_then(|txs| txs.get(index as usize).cloned()))
-            }
+        let (block, index) = match spec {
+            TransactionSpecifier::Hash(h) => match inner.tx_hashes.get(&h).copied() {
+                Some(loc) => loc,
+                None => return Ok(None),
+            },
+            TransactionSpecifier::BlockAndIndex { block, index } => (block, index),
             TransactionSpecifier::BlockHashAndIndex { block_hash, index } => {
-                let block = inner.header_hashes.get(&block_hash).copied();
-                Ok(block.and_then(|n| {
-                    inner.transactions.get(&n).and_then(|txs| txs.get(index as usize).cloned())
-                }))
+                match inner.header_hashes.get(&block_hash).copied() {
+                    Some(block) => (block, index),
+                    None => return Ok(None),
+                }
             }
-        }
+        };
+        let tx = inner.transactions.get(&block).and_then(|txs| txs.get(index as usize).cloned());
+        Ok(tx
+            .zip(confirmation_meta(&inner, block, index))
+            .map(|(tx, meta)| Confirmed::new(tx, meta)))
     }
 
     async fn get_transactions_in_block(
@@ -131,19 +143,19 @@ impl ColdStorage for MemColdBackend {
         Ok(inner.transactions.get(&block).map(|txs| txs.len() as u64).unwrap_or(0))
     }
 
-    async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<Receipt>> {
+    async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<Confirmed<Receipt>>> {
         let inner = self.inner.read().await;
-        match spec {
-            ReceiptSpecifier::TxHash(h) => {
-                let loc = inner.receipt_tx_hashes.get(&h).copied();
-                Ok(loc.and_then(|(block, idx)| {
-                    inner.receipts.get(&block).and_then(|rs| rs.get(idx as usize).cloned())
-                }))
-            }
-            ReceiptSpecifier::BlockAndIndex { block, index } => {
-                Ok(inner.receipts.get(&block).and_then(|rs| rs.get(index as usize).cloned()))
-            }
-        }
+        let (block, index) = match spec {
+            ReceiptSpecifier::TxHash(h) => match inner.receipt_tx_hashes.get(&h).copied() {
+                Some(loc) => loc,
+                None => return Ok(None),
+            },
+            ReceiptSpecifier::BlockAndIndex { block, index } => (block, index),
+        };
+        let receipt = inner.receipts.get(&block).and_then(|rs| rs.get(index as usize).cloned());
+        Ok(receipt
+            .zip(confirmation_meta(&inner, block, index))
+            .map(|(r, meta)| Confirmed::new(r, meta)))
     }
 
     async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<Receipt>> {

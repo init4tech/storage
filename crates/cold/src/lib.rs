@@ -135,6 +135,8 @@
 #![deny(unused_must_use, rust_2018_idioms)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod confirmed;
+pub use confirmed::Confirmed;
 mod error;
 pub use error::{ColdResult, ColdStorageError};
 

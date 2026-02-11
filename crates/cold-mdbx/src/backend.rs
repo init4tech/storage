@@ -10,7 +10,7 @@ use crate::{
 };
 use alloy::{consensus::Header, primitives::BlockNumber};
 use signet_cold::{
-    BlockData, BlockTag, ColdResult, ColdStorage, HeaderSpecifier, ReceiptSpecifier,
+    BlockData, BlockTag, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, ReceiptSpecifier,
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use signet_hot::{
@@ -19,7 +19,9 @@ use signet_hot::{
     tables::Table,
 };
 use signet_hot_mdbx::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
-use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned, TxLocation};
+use signet_storage_types::{
+    ConfirmationMeta, DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned, TxLocation,
+};
 use std::path::Path;
 
 /// MDBX-based cold storage backend.
@@ -477,11 +479,18 @@ impl ColdStorage for MdbxColdBackend {
     async fn get_transaction(
         &self,
         spec: TransactionSpecifier,
-    ) -> ColdResult<Option<TransactionSigned>> {
+    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
         let Some((block, index)) = self.resolve_tx_spec(spec)? else {
             return Ok(None);
         };
-        Ok(self.get_transaction_by_location(block, index)?)
+        let Some(tx) = self.get_transaction_by_location(block, index)? else {
+            return Ok(None);
+        };
+        let Some(header) = self.get_header_by_number(block)? else {
+            return Ok(None);
+        };
+        let meta = ConfirmationMeta::new(block, header.hash_slow(), index);
+        Ok(Some(Confirmed::new(tx, meta)))
     }
 
     async fn get_transactions_in_block(
@@ -495,11 +504,18 @@ impl ColdStorage for MdbxColdBackend {
         Ok(self.count_transactions_in_block(block)?)
     }
 
-    async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<Receipt>> {
+    async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<Confirmed<Receipt>>> {
         let Some((block, index)) = self.resolve_receipt_spec(spec)? else {
             return Ok(None);
         };
-        Ok(self.get_receipt_by_location(block, index)?)
+        let Some(receipt) = self.get_receipt_by_location(block, index)? else {
+            return Ok(None);
+        };
+        let Some(header) = self.get_header_by_number(block)? else {
+            return Ok(None);
+        };
+        let meta = ConfirmationMeta::new(block, header.hash_slow(), index);
+        Ok(Some(Confirmed::new(receipt, meta)))
     }
 
     async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<Receipt>> {

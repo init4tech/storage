@@ -13,6 +13,7 @@ categories = ["database-implementations"]
 
 [dependencies]
 alloy.workspace = true
+lru = { workspace = true, optional = true }
 signet-storage-types = { version = "0.0.1", path = "../types" }
 thiserror.workspace = true
 tokio.workspace = true
@@ -20,6 +21,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [features]
-default = []
+default = ["cache"]
+cache = ["lru"]
 in-memory = []
 test-utils = ["in-memory"]

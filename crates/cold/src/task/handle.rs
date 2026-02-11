@@ -11,7 +11,7 @@
 
 use crate::{
     AppendBlockRequest, BlockData, ColdReadRequest, ColdResult, ColdStorageError, ColdWriteRequest,
-    HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
+    Confirmed, HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
     ZenithHeaderSpecifier,
 };
 use alloy::{
@@ -97,17 +97,20 @@ impl ColdStorageReadHandle {
     // Transactions
     // ==========================================================================
 
-    /// Get a transaction by specifier.
+    /// Get a transaction by specifier, with block confirmation metadata.
     pub async fn get_transaction(
         &self,
         spec: TransactionSpecifier,
-    ) -> ColdResult<Option<TransactionSigned>> {
+    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetTransaction { spec, resp }, rx).await
     }
 
     /// Get a transaction by hash.
-    pub async fn get_tx_by_hash(&self, hash: B256) -> ColdResult<Option<TransactionSigned>> {
+    pub async fn get_tx_by_hash(
+        &self,
+        hash: B256,
+    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
         self.get_transaction(TransactionSpecifier::Hash(hash)).await
     }
 
@@ -116,7 +119,7 @@ impl ColdStorageReadHandle {
         &self,
         block: BlockNumber,
         index: u64,
-    ) -> ColdResult<Option<TransactionSigned>> {
+    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
         self.get_transaction(TransactionSpecifier::BlockAndIndex { block, index }).await
     }
 
@@ -125,7 +128,7 @@ impl ColdStorageReadHandle {
         &self,
         block_hash: B256,
         index: u64,
-    ) -> ColdResult<Option<TransactionSigned>> {
+    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
         self.get_transaction(TransactionSpecifier::BlockHashAndIndex { block_hash, index }).await
     }
 
@@ -148,14 +151,20 @@ impl ColdStorageReadHandle {
     // Receipts
     // ==========================================================================
 
-    /// Get a receipt by specifier.
-    pub async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<Receipt>> {
+    /// Get a receipt by specifier, with block confirmation metadata.
+    pub async fn get_receipt(
+        &self,
+        spec: ReceiptSpecifier,
+    ) -> ColdResult<Option<Confirmed<Receipt>>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetReceipt { spec, resp }, rx).await
     }
 
     /// Get a receipt by transaction hash.
-    pub async fn get_receipt_by_tx_hash(&self, hash: B256) -> ColdResult<Option<Receipt>> {
+    pub async fn get_receipt_by_tx_hash(
+        &self,
+        hash: B256,
+    ) -> ColdResult<Option<Confirmed<Receipt>>> {
         self.get_receipt(ReceiptSpecifier::TxHash(hash)).await
     }
 
@@ -164,7 +173,7 @@ impl ColdStorageReadHandle {
         &self,
         block: BlockNumber,
         index: u64,
-    ) -> ColdResult<Option<Receipt>> {
+    ) -> ColdResult<Option<Confirmed<Receipt>>> {
         self.get_receipt(ReceiptSpecifier::BlockAndIndex { block, index }).await
     }
 
@@ -360,17 +369,20 @@ impl ColdStorageHandle {
     // Transactions
     // ==========================================================================
 
-    /// Get a transaction by specifier.
+    /// Get a transaction by specifier, with block confirmation metadata.
     pub async fn get_transaction(
         &self,
         spec: TransactionSpecifier,
-    ) -> ColdResult<Option<TransactionSigned>> {
+    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
         let (resp, rx) = oneshot::channel();
         self.send_read(ColdReadRequest::GetTransaction { spec, resp }, rx).await
     }
 
     /// Get a transaction by hash.
-    pub async fn get_tx_by_hash(&self, hash: B256) -> ColdResult<Option<TransactionSigned>> {
+    pub async fn get_tx_by_hash(
+        &self,
+        hash: B256,
+    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
         self.get_transaction(TransactionSpecifier::Hash(hash)).await
     }
 
@@ -379,7 +391,7 @@ impl ColdStorageHandle {
         &self,
         block: BlockNumber,
         index: u64,
-    ) -> ColdResult<Option<TransactionSigned>> {
+    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
         self.get_transaction(TransactionSpecifier::BlockAndIndex { block, index }).await
     }
 
@@ -388,7 +400,7 @@ impl ColdStorageHandle {
         &self,
         block_hash: B256,
         index: u64,
-    ) -> ColdResult<Option<TransactionSigned>> {
+    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
         self.get_transaction(TransactionSpecifier::BlockHashAndIndex { block_hash, index }).await
     }
 
@@ -411,14 +423,20 @@ impl ColdStorageHandle {
     // Receipts
     // ==========================================================================
 
-    /// Get a receipt by specifier.
-    pub async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<Receipt>> {
+    /// Get a receipt by specifier, with block confirmation metadata.
+    pub async fn get_receipt(
+        &self,
+        spec: ReceiptSpecifier,
+    ) -> ColdResult<Option<Confirmed<Receipt>>> {
         let (resp, rx) = oneshot::channel();
         self.send_read(ColdReadRequest::GetReceipt { spec, resp }, rx).await
     }
 
     /// Get a receipt by transaction hash.
-    pub async fn get_receipt_by_tx_hash(&self, hash: B256) -> ColdResult<Option<Receipt>> {
+    pub async fn get_receipt_by_tx_hash(
+        &self,
+        hash: B256,
+    ) -> ColdResult<Option<Confirmed<Receipt>>> {
         self.get_receipt(ReceiptSpecifier::TxHash(hash)).await
     }
 
@@ -427,7 +445,7 @@ impl ColdStorageHandle {
         &self,
         block: BlockNumber,
         index: u64,
-    ) -> ColdResult<Option<Receipt>> {
+    ) -> ColdResult<Option<Confirmed<Receipt>>> {
         self.get_receipt(ReceiptSpecifier::BlockAndIndex { block, index }).await
     }
 

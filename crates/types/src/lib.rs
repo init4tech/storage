@@ -22,6 +22,8 @@ pub use execution::{ExecutedBlock, ExecutedBlockBuilder};
 
 mod alloy;
 pub use alloy::{Receipt, TransactionSigned};
+mod confirmation;
+pub use confirmation::ConfirmationMeta;
 
 mod events;
 pub use events::{DbSignetEvent, DbZenithHeader};
