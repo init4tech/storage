@@ -12,6 +12,17 @@ use std::num::NonZeroUsize;
 /// Default capacity for each LRU cache map.
 const DEFAULT_CACHE_CAPACITY: usize = 128;
 
+/// Evict all entries from an LRU cache whose keys satisfy the predicate.
+fn evict_where<K: Copy + Eq + std::hash::Hash, V>(
+    cache: &mut LruCache<K, V>,
+    predicate: impl Fn(&K) -> bool,
+) {
+    let keys: Vec<_> = cache.iter().filter(|(k, _)| predicate(k)).map(|(k, _)| *k).collect();
+    keys.into_iter().for_each(|k| {
+        cache.pop(&k);
+    });
+}
+
 /// LRU caches for transaction, receipt, and header lookups.
 ///
 /// Keys are `(BlockNumber, tx_index)` for transactions and receipts,
@@ -73,22 +84,8 @@ impl ColdCache {
 
     /// Invalidate all entries with a block number above the given cutoff.
     pub(crate) fn invalidate_above(&mut self, block: u64) {
-        let tx_keys: Vec<_> =
-            self.transactions.iter().filter(|((bn, _), _)| *bn > block).map(|(k, _)| *k).collect();
-        for key in tx_keys {
-            self.transactions.pop(&key);
-        }
-
-        let rx_keys: Vec<_> =
-            self.receipts.iter().filter(|((bn, _), _)| *bn > block).map(|(k, _)| *k).collect();
-        for key in rx_keys {
-            self.receipts.pop(&key);
-        }
-
-        let hdr_keys: Vec<_> =
-            self.headers.iter().filter(|(bn, _)| **bn > block).map(|(k, _)| *k).collect();
-        for key in hdr_keys {
-            self.headers.pop(&key);
-        }
+        evict_where(&mut self.transactions, |(bn, _)| *bn > block);
+        evict_where(&mut self.receipts, |(bn, _)| *bn > block);
+        evict_where(&mut self.headers, |bn| *bn > block);
     }
 }

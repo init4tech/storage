@@ -85,14 +85,16 @@ impl ColdStorage for MemColdBackend {
         let inner = self.inner.read().await;
         match spec {
             HeaderSpecifier::Number(n) => Ok(inner.headers.get(&n).map(|s| Header::clone(s))),
-            HeaderSpecifier::Hash(h) => {
-                let block = inner.header_hashes.get(&h).copied();
-                Ok(block.and_then(|n| inner.headers.get(&n).map(|s| Header::clone(s))))
-            }
+            HeaderSpecifier::Hash(h) => Ok(inner
+                .header_hashes
+                .get(&h)
+                .and_then(|n| inner.headers.get(n))
+                .map(|s| Header::clone(s))),
             HeaderSpecifier::Tag(tag) => match tag {
                 BlockTag::Latest | BlockTag::Finalized | BlockTag::Safe => Ok(inner
                     .latest_block
-                    .and_then(|n| inner.headers.get(&n).map(|s| Header::clone(s)))),
+                    .and_then(|n| inner.headers.get(&n))
+                    .map(|s| Header::clone(s))),
                 BlockTag::Earliest => {
                     Ok(inner.headers.first_key_value().map(|(_, s)| Header::clone(s)))
                 }
@@ -114,16 +116,16 @@ impl ColdStorage for MemColdBackend {
     ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
         let inner = self.inner.read().await;
         let (block, index) = match spec {
-            TransactionSpecifier::Hash(h) => match inner.tx_hashes.get(&h).copied() {
-                Some(loc) => loc,
-                None => return Ok(None),
-            },
+            TransactionSpecifier::Hash(h) => {
+                let Some(loc) = inner.tx_hashes.get(&h).copied() else { return Ok(None) };
+                loc
+            }
             TransactionSpecifier::BlockAndIndex { block, index } => (block, index),
             TransactionSpecifier::BlockHashAndIndex { block_hash, index } => {
-                match inner.header_hashes.get(&block_hash).copied() {
-                    Some(block) => (block, index),
-                    None => return Ok(None),
-                }
+                let Some(block) = inner.header_hashes.get(&block_hash).copied() else {
+                    return Ok(None);
+                };
+                (block, index)
             }
         };
         let tx = inner.transactions.get(&block).and_then(|txs| txs.get(index as usize).cloned());
@@ -146,10 +148,12 @@ impl ColdStorage for MemColdBackend {
     async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<Confirmed<Receipt>>> {
         let inner = self.inner.read().await;
         let (block, index) = match spec {
-            ReceiptSpecifier::TxHash(h) => match inner.receipt_tx_hashes.get(&h).copied() {
-                Some(loc) => loc,
-                None => return Ok(None),
-            },
+            ReceiptSpecifier::TxHash(h) => {
+                let Some(loc) = inner.receipt_tx_hashes.get(&h).copied() else {
+                    return Ok(None);
+                };
+                loc
+            }
             ReceiptSpecifier::BlockAndIndex { block, index } => (block, index),
         };
         let receipt = inner.receipts.get(&block).and_then(|rs| rs.get(index as usize).cloned());
@@ -168,18 +172,16 @@ impl ColdStorage for MemColdBackend {
         spec: SignetEventsSpecifier,
     ) -> ColdResult<Vec<DbSignetEvent>> {
         let inner = self.inner.read().await;
-        match spec {
+        Ok(match spec {
             SignetEventsSpecifier::Block(block) => {
-                Ok(inner.signet_events.get(&block).cloned().unwrap_or_default())
+                inner.signet_events.get(&block).cloned().unwrap_or_default()
             }
-            SignetEventsSpecifier::BlockRange { start, end } => {
-                let mut results = Vec::new();
-                for (_, events) in inner.signet_events.range(start..=end) {
-                    results.extend(events.iter().cloned());
-                }
-                Ok(results)
-            }
-        }
+            SignetEventsSpecifier::BlockRange { start, end } => inner
+                .signet_events
+                .range(start..=end)
+                .flat_map(|(_, e)| e.iter().cloned())
+                .collect(),
+        })
     }
 
     async fn get_zenith_header(
@@ -187,13 +189,10 @@ impl ColdStorage for MemColdBackend {
         spec: ZenithHeaderSpecifier,
     ) -> ColdResult<Option<DbZenithHeader>> {
         let inner = self.inner.read().await;
-        match spec {
-            ZenithHeaderSpecifier::Number(n) => Ok(inner.zenith_headers.get(&n).cloned()),
-            ZenithHeaderSpecifier::Range { start, .. } => {
-                // For single lookup via range, return first in range
-                Ok(inner.zenith_headers.get(&start).cloned())
-            }
-        }
+        Ok(match spec {
+            ZenithHeaderSpecifier::Number(n) => inner.zenith_headers.get(&n).cloned(),
+            ZenithHeaderSpecifier::Range { start, .. } => inner.zenith_headers.get(&start).cloned(),
+        })
     }
 
     async fn get_zenith_headers(
@@ -201,14 +200,14 @@ impl ColdStorage for MemColdBackend {
         spec: ZenithHeaderSpecifier,
     ) -> ColdResult<Vec<DbZenithHeader>> {
         let inner = self.inner.read().await;
-        match spec {
+        Ok(match spec {
             ZenithHeaderSpecifier::Number(n) => {
-                Ok(inner.zenith_headers.get(&n).cloned().into_iter().collect())
+                inner.zenith_headers.get(&n).cloned().into_iter().collect()
             }
             ZenithHeaderSpecifier::Range { start, end } => {
-                Ok(inner.zenith_headers.range(start..=end).map(|(_, h)| *h).collect())
+                inner.zenith_headers.range(start..=end).map(|(_, h)| *h).collect()
             }
-        }
+        })
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
@@ -227,20 +226,14 @@ impl ColdStorage for MemColdBackend {
         inner.headers.insert(block, sealed);
         inner.header_hashes.insert(header_hash, block);
 
-        // Build tx hash list for indexing before moving transactions
+        // Build tx hash index and store both tx and receipt hash mappings
         let tx_hashes: Vec<_> = data.transactions.iter().map(|tx| *tx.hash()).collect();
-
-        // Store transactions and index by hash
-        for (idx, tx_hash) in tx_hashes.iter().enumerate() {
-            inner.tx_hashes.insert(*tx_hash, (block, idx as u64));
+        for (idx, &tx_hash) in tx_hashes.iter().enumerate() {
+            let loc = (block, idx as u64);
+            inner.tx_hashes.insert(tx_hash, loc);
+            inner.receipt_tx_hashes.insert(tx_hash, loc);
         }
-
         inner.transactions.insert(block, data.transactions);
-
-        // Store receipts and index by tx hash
-        for (idx, tx_hash) in tx_hashes.iter().enumerate() {
-            inner.receipt_tx_hashes.insert(*tx_hash, (block, idx as u64));
-        }
         inner.receipts.insert(block, data.receipts);
 
         // Store signet events
@@ -270,37 +263,19 @@ impl ColdStorage for MemColdBackend {
         // Collect keys to remove
         let to_remove: Vec<_> = inner.headers.range((block + 1)..).map(|(k, _)| *k).collect();
 
-        // Remove headers above block
         for k in &to_remove {
             if let Some(sealed) = inner.headers.remove(k) {
                 inner.header_hashes.remove(&sealed.hash());
             }
-        }
-
-        // Remove transactions above block
-        for k in &to_remove {
             if let Some(txs) = inner.transactions.remove(k) {
                 for tx in txs {
                     inner.tx_hashes.remove(tx.hash());
                 }
             }
-        }
-
-        // Remove receipts above block
-        for k in &to_remove {
             if inner.receipts.remove(k).is_some() {
-                // Also remove from receipt_tx_hashes
                 inner.receipt_tx_hashes.retain(|_, (b, _)| *b <= block);
             }
-        }
-
-        // Remove signet events above block
-        for k in &to_remove {
             inner.signet_events.remove(k);
-        }
-
-        // Remove zenith headers above block
-        for k in &to_remove {
             inner.zenith_headers.remove(k);
         }
 
