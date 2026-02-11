@@ -33,6 +33,16 @@ impl<T: HotKvRead> RevmRead<T> {
     }
 
     /// Create a read adapter that reads state at a specific block height.
+    ///
+    /// **Note:** This constructor does **not** validate `height` against the
+    /// stored block range. Heights past the chain tip silently return
+    /// current state, and heights before the first block return the
+    /// pre-state of the earliest change. Use
+    /// [`HotKv::revm_reader_at_height`] which validates, or call
+    /// [`HistoryRead::check_height`] manually.
+    ///
+    /// [`HotKv::revm_reader_at_height`]: crate::model::HotKv::revm_reader_at_height
+    /// [`HistoryRead::check_height`]: crate::db::HistoryRead::check_height
     pub const fn at_height(reader: T, height: u64) -> Self {
         Self { reader, height: Some(height) }
     }
@@ -781,6 +791,13 @@ mod tests {
 
         let writer = mem_kv.writer().unwrap();
 
+        // Write headers so get_execution_range() returns Some((1, 15))
+        let header1 = alloy::consensus::Header { number: 1, ..Default::default() };
+        writer.put_header_inconsistent(&header1).unwrap();
+
+        let header15 = alloy::consensus::Header { number: 15, ..Default::default() };
+        writer.put_header_inconsistent(&header15).unwrap();
+
         // Current plain state
         let current_account =
             Account { nonce: 10, balance: U256::from(1000u64), bytecode_hash: None };
@@ -965,6 +982,101 @@ mod tests {
         assert_eq!(info.balance, U256::from(1000u64));
 
         let storage = reader.storage_ref(address, StorageKey::from(slot)).unwrap();
+        assert_eq!(storage, U256::from(200u64));
+    }
+
+    #[test]
+    fn test_revm_reader_at_height_past_tip() {
+        let (mem_kv, _) = setup_history_kv();
+
+        // Height 20 with tip at 15 → HeightOutOfRange
+        let err = mem_kv.revm_reader_at_height(20).unwrap_err();
+        assert!(
+            matches!(err, HotKvError::HeightOutOfRange { height: 20, first: 1, last: 15 }),
+            "expected HeightOutOfRange, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_revm_reader_at_height_before_first_block() {
+        let (mem_kv, _) = setup_history_kv();
+
+        // Height 0 with first block at 1 → HeightOutOfRange
+        let err = mem_kv.revm_reader_at_height(0).unwrap_err();
+        assert!(
+            matches!(err, HotKvError::HeightOutOfRange { height: 0, first: 1, last: 15 }),
+            "expected HeightOutOfRange, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_revm_reader_at_height_empty_db() {
+        let mem_kv = MemKv::default();
+
+        // Empty database → NoBlocks
+        let err = mem_kv.revm_reader_at_height(5).unwrap_err();
+        assert!(matches!(err, HotKvError::NoBlocks), "expected NoBlocks, got {err:?}");
+    }
+
+    #[test]
+    fn test_checked_account_at_height_out_of_range() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+
+        // Height 20 with tip at 15 → HeightOutOfRange
+        let err = reader.get_account_at_height_checked(&address, Some(20)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::db::HistoryError::HeightOutOfRange { height: 20, first: 1, last: 15 }
+            ),
+            "expected HeightOutOfRange, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_checked_storage_at_height_out_of_range() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+        let slot = U256::from(0x42u64);
+
+        // Height 20 with tip at 15 → HeightOutOfRange
+        let err = reader.get_storage_at_height_checked(&address, &slot, Some(20)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::db::HistoryError::HeightOutOfRange { height: 20, first: 1, last: 15 }
+            ),
+            "expected HeightOutOfRange, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_checked_methods_pass_for_valid_height() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+        let slot = U256::from(0x42u64);
+
+        // Height 7 is within range [1, 15] — should succeed and match unchecked
+        let account = reader.get_account_at_height_checked(&address, Some(7)).unwrap().unwrap();
+        assert_eq!(account.nonce, 5);
+
+        let storage =
+            reader.get_storage_at_height_checked(&address, &slot, Some(7)).unwrap().unwrap();
+        assert_eq!(storage, U256::from(100u64));
+    }
+
+    #[test]
+    fn test_checked_methods_none_height() {
+        let (mem_kv, address) = setup_history_kv();
+        let reader = mem_kv.reader().unwrap();
+        let slot = U256::from(0x42u64);
+
+        // None height — returns current state, no validation error
+        let account = reader.get_account_at_height_checked(&address, None).unwrap().unwrap();
+        assert_eq!(account.nonce, 10);
+
+        let storage = reader.get_storage_at_height_checked(&address, &slot, None).unwrap().unwrap();
         assert_eq!(storage, U256::from(200u64));
     }
 }

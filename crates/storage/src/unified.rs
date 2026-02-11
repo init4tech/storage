@@ -26,6 +26,10 @@ fn map_history_error<E: std::error::Error + Send + Sync + 'static>(
         }
         HistoryError::DbNotEmpty => HistoryError::DbNotEmpty,
         HistoryError::EmptyRange => HistoryError::EmptyRange,
+        HistoryError::NoBlocks => HistoryError::NoBlocks,
+        HistoryError::HeightOutOfRange { height, first, last } => {
+            HistoryError::HeightOutOfRange { height, first, last }
+        }
         HistoryError::Db(e) => HistoryError::Db(HotKvError::from_err(e)),
         HistoryError::IntList(e) => HistoryError::IntList(e),
     }
@@ -146,7 +150,10 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the transaction cannot be created.
+    /// - [`HotKvError::NoBlocks`] if the database has no blocks.
+    /// - [`HotKvError::HeightOutOfRange`] if `height` is outside the
+    ///   stored block range.
+    /// - [`HotKvError::Inner`] if the transaction cannot be created.
     pub fn revm_reader_at_height(&self, height: u64) -> StorageResult<RevmRead<H::RoTx>> {
         self.hot.revm_reader_at_height(height).map_err(|e| StorageError::Hot(HistoryError::Db(e)))
     }
