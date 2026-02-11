@@ -1,13 +1,10 @@
-use alloy::{
-    consensus::Header,
-    primitives::{Address, B256, BlockNumber, U256},
-};
-use signet_storage_types::{Account, BlockNumberList, ShardedKey};
+use alloy::primitives::{Address, B256, BlockNumber, U256};
+use signet_storage_types::{Account, BlockNumberList, SealedHeader, ShardedKey};
 use trevm::revm::bytecode::Bytecode;
 
 table! {
     /// Records recent block Headers, by their number.
-    Headers<BlockNumber => Header> int_key
+    Headers<BlockNumber => SealedHeader> int_key
 }
 
 table! {

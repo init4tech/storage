@@ -144,7 +144,7 @@ pub fn test_queue_clear<T: HotKv>(hot_kv: &T) {
         let writer = hot_kv.writer().unwrap();
         for i in 300u64..310 {
             let header = Header { number: i, gas_limit: 1_000_000, ..Default::default() };
-            writer.put_header_inconsistent(&header).unwrap();
+            writer.put_header_inconsistent(&header.seal_slow()).unwrap();
         }
         writer.commit().unwrap();
     }

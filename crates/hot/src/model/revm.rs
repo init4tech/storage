@@ -455,7 +455,10 @@ mod tests {
         model::{HotKv, HotKvRead, HotKvWrite},
         tables::{Bytecodes, PlainAccountState},
     };
-    use alloy::primitives::{Address, B256, U256};
+    use alloy::{
+        consensus::Sealable,
+        primitives::{Address, B256, U256},
+    };
     use signet_storage_types::{Account, BlockNumberList};
     use trevm::revm::{
         database::{Database, DatabaseRef, TryDatabaseCommit},
@@ -792,10 +795,10 @@ mod tests {
         let writer = mem_kv.writer().unwrap();
 
         // Write headers so get_execution_range() returns Some((1, 15))
-        let header1 = alloy::consensus::Header { number: 1, ..Default::default() };
+        let header1 = alloy::consensus::Header { number: 1, ..Default::default() }.seal_slow();
         writer.put_header_inconsistent(&header1).unwrap();
 
-        let header15 = alloy::consensus::Header { number: 15, ..Default::default() };
+        let header15 = alloy::consensus::Header { number: 15, ..Default::default() }.seal_slow();
         writer.put_header_inconsistent(&header15).unwrap();
 
         // Current plain state

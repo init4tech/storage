@@ -260,14 +260,14 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
         if let Some((block_num, header)) = first_entry
             && block_num <= last_block
         {
-            self.delete_header_number(&header.hash_slow())?;
+            self.delete_header_number(&header.hash())?;
 
             // Continue with remaining entries
             while let Some((block_num, header)) = header_cursor.read_next()? {
                 if block_num > last_block {
                     break;
                 }
-                self.delete_header_number(&header.hash_slow())?;
+                self.delete_header_number(&header.hash())?;
             }
         }
         self.traverse_mut::<tables::Headers>()?.delete_range_inclusive(first_block..=last_block)?;
