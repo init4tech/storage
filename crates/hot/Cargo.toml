@@ -11,6 +11,10 @@ repository.workspace = true
 keywords = ["storage", "key-value", "blockchain", "database"]
 categories = ["database-implementations"]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 signet-storage-types.workspace = true
 signet-zenith.workspace = true

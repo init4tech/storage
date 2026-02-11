@@ -11,14 +11,22 @@ repository.workspace = true
 keywords = ["blockchain", "storage", "cold-storage", "historical"]
 categories = ["database-implementations"]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 alloy.workspace = true
 lru.workspace = true
-signet-storage-types = { version = "0.0.1", path = "../types" }
+signet-storage-types.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+signet-cold = { path = ".", features = ["test-utils"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [features]
 in-memory = []

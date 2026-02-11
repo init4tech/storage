@@ -31,6 +31,13 @@
 //!
 //! Overall, we do NOT recommend using this to open existing databases that
 //! were not created and managed by this implementation.
+//!
+//! # Feature Flags
+//!
+//! - **`test-utils`**: Enables the [`test_utils`] module with MDBX test
+//!   helpers and conformance tests. Adds a `tempfile` dependency.
+//! - **`disable-lock`**: Disables the storage lock file, allowing multiple
+//!   processes to open the same database. Intended for testing scenarios.
 
 #![warn(
     missing_copy_implementations,

@@ -38,6 +38,12 @@
 //! // Write to both storages (takes ownership)
 //! storage.append_blocks(vec![block])?;
 //! ```
+//!
+//! # Feature Flags
+//!
+//! - **`test-utils`**: Propagates `signet-hot/test-utils` and
+//!   `signet-cold/test-utils`, enabling in-memory backends and conformance
+//!   tests for both storage layers.
 
 #![warn(
     missing_copy_implementations,

@@ -11,9 +11,13 @@ repository.workspace = true
 keywords = ["mdbx", "storage", "cold-storage", "blockchain"]
 categories = ["database-implementations"]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 alloy.workspace = true
-signet-cold = { version = "0.0.1", path = "../cold" }
+signet-cold.workspace = true
 signet-hot.workspace = true
 signet-hot-mdbx.workspace = true
 signet-storage-types.workspace = true

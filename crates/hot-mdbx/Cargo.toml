@@ -11,6 +11,10 @@ repository.workspace = true
 keywords = ["mdbx", "storage", "key-value", "blockchain"]
 categories = ["database-implementations"]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 alloy.workspace = true
 bytes.workspace = true
