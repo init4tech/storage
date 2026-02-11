@@ -9,8 +9,8 @@ use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSi
 use std::future::Future;
 
 use super::{
-    ColdResult, HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
-    ZenithHeaderSpecifier,
+    ColdResult, Confirmed, HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier,
+    TransactionSpecifier, ZenithHeaderSpecifier,
 };
 
 /// Data for appending a complete block to cold storage.
@@ -93,11 +93,11 @@ pub trait ColdStorage: Send + Sync + 'static {
 
     // --- Transactions ---
 
-    /// Get a transaction by specifier.
+    /// Get a transaction by specifier, with block confirmation metadata.
     fn get_transaction(
         &self,
         spec: TransactionSpecifier,
-    ) -> impl Future<Output = ColdResult<Option<TransactionSigned>>> + Send;
+    ) -> impl Future<Output = ColdResult<Option<Confirmed<TransactionSigned>>>> + Send;
 
     /// Get all transactions in a block.
     fn get_transactions_in_block(
@@ -113,11 +113,11 @@ pub trait ColdStorage: Send + Sync + 'static {
 
     // --- Receipts ---
 
-    /// Get a receipt by specifier.
+    /// Get a receipt by specifier, with block confirmation metadata.
     fn get_receipt(
         &self,
         spec: ReceiptSpecifier,
-    ) -> impl Future<Output = ColdResult<Option<Receipt>>> + Send;
+    ) -> impl Future<Output = ColdResult<Option<Confirmed<Receipt>>>> + Send;
 
     /// Get all receipts in a block.
     fn get_receipts_in_block(

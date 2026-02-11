@@ -4,11 +4,12 @@
 //! according to the ColdStorage trait contract. To use these tests with
 //! a custom backend, call the test functions with your backend instance.
 
-use crate::{BlockData, BlockTag, ColdResult, ColdStorage, HeaderSpecifier};
+use crate::{BlockData, BlockTag, ColdResult, ColdStorage, HeaderSpecifier, TransactionSpecifier};
 use alloy::{
-    consensus::Header,
-    primitives::{B256, BlockNumber},
+    consensus::{Header, Receipt as AlloyReceipt, Signed, TxLegacy},
+    primitives::{B256, BlockNumber, Signature, TxKind, U256},
 };
+use signet_storage_types::{Receipt, TransactionSigned};
 
 /// Run all conformance tests against a backend.
 ///
@@ -20,6 +21,7 @@ pub async fn conformance<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     test_header_tag_lookup(backend).await?;
     test_transaction_lookups(backend).await?;
     test_receipt_lookups(backend).await?;
+    test_confirmation_metadata(backend).await?;
     test_truncation(backend).await?;
     test_batch_append(backend).await?;
     test_latest_block_tracking(backend).await?;
@@ -33,6 +35,30 @@ pub fn make_test_block(block_number: BlockNumber) -> BlockData {
     let header = Header { number: block_number, ..Default::default() };
 
     BlockData::new(header, vec![], vec![], vec![], None)
+}
+
+/// Create a test transaction with a unique nonce.
+fn make_test_tx(nonce: u64) -> TransactionSigned {
+    let tx = TxLegacy { nonce, to: TxKind::Call(Default::default()), ..Default::default() };
+    let sig = Signature::new(U256::from(nonce + 1), U256::from(nonce + 2), false);
+    alloy::consensus::EthereumTxEnvelope::Legacy(Signed::new_unhashed(tx, sig))
+}
+
+/// Create a test receipt.
+fn make_test_receipt() -> Receipt {
+    Receipt {
+        inner: AlloyReceipt { status: true.into(), ..Default::default() },
+        ..Default::default()
+    }
+}
+
+/// Create test block data with transactions and receipts.
+fn make_test_block_with_txs(block_number: BlockNumber, tx_count: usize) -> BlockData {
+    let header = Header { number: block_number, ..Default::default() };
+    let transactions: Vec<_> =
+        (0..tx_count).map(|i| make_test_tx(block_number * 100 + i as u64)).collect();
+    let receipts: Vec<_> = (0..tx_count).map(|_| make_test_receipt()).collect();
+    BlockData::new(header, transactions, receipts, vec![], None)
 }
 
 /// Test that empty storage returns None/empty for all lookups.
@@ -97,7 +123,6 @@ pub async fn test_header_tag_lookup<B: ColdStorage>(backend: &B) -> ColdResult<(
 
 /// Test transaction lookups by hash and by block+index.
 pub async fn test_transaction_lookups<B: ColdStorage>(backend: &B) -> ColdResult<()> {
-    // Create block with empty transactions for now
     let block_data = make_test_block(200);
 
     backend.append_block(block_data).await?;
@@ -116,8 +141,67 @@ pub async fn test_receipt_lookups<B: ColdStorage>(backend: &B) -> ColdResult<()>
     backend.append_block(block_data).await?;
 
     let receipts = backend.get_receipts_in_block(201).await?;
-    // Empty receipts for now
     assert!(receipts.is_empty());
+
+    Ok(())
+}
+
+/// Test that transaction and receipt lookups return correct confirmation
+/// metadata (block number, block hash, transaction index).
+pub async fn test_confirmation_metadata<B: ColdStorage>(backend: &B) -> ColdResult<()> {
+    let block = make_test_block_with_txs(600, 3);
+    let expected_hash = block.header.hash_slow();
+    let tx_hashes: Vec<_> = block.transactions.iter().map(|tx| *tx.tx_hash()).collect();
+
+    backend.append_block(block).await?;
+
+    // Verify transaction metadata via hash lookup
+    for (idx, tx_hash) in tx_hashes.iter().enumerate() {
+        let confirmed =
+            backend.get_transaction(TransactionSpecifier::Hash(*tx_hash)).await?.unwrap();
+        assert_eq!(confirmed.meta().block_number(), 600);
+        assert_eq!(confirmed.meta().block_hash(), expected_hash);
+        assert_eq!(confirmed.meta().transaction_index(), idx as u64);
+    }
+
+    // Verify transaction metadata via block+index lookup
+    let confirmed = backend
+        .get_transaction(TransactionSpecifier::BlockAndIndex { block: 600, index: 1 })
+        .await?
+        .unwrap();
+    assert_eq!(confirmed.meta().block_number(), 600);
+    assert_eq!(confirmed.meta().block_hash(), expected_hash);
+    assert_eq!(confirmed.meta().transaction_index(), 1);
+
+    // Verify transaction metadata via block_hash+index lookup
+    let confirmed = backend
+        .get_transaction(TransactionSpecifier::BlockHashAndIndex {
+            block_hash: expected_hash,
+            index: 2,
+        })
+        .await?
+        .unwrap();
+    assert_eq!(confirmed.meta().block_number(), 600);
+    assert_eq!(confirmed.meta().transaction_index(), 2);
+
+    // Verify receipt metadata via tx hash lookup
+    let confirmed =
+        backend.get_receipt(crate::ReceiptSpecifier::TxHash(tx_hashes[0])).await?.unwrap();
+    assert_eq!(confirmed.meta().block_number(), 600);
+    assert_eq!(confirmed.meta().block_hash(), expected_hash);
+    assert_eq!(confirmed.meta().transaction_index(), 0);
+
+    // Verify receipt metadata via block+index lookup
+    let confirmed = backend
+        .get_receipt(crate::ReceiptSpecifier::BlockAndIndex { block: 600, index: 2 })
+        .await?
+        .unwrap();
+    assert_eq!(confirmed.meta().block_number(), 600);
+    assert_eq!(confirmed.meta().transaction_index(), 2);
+
+    // Non-existent lookups return None
+    assert!(backend.get_transaction(TransactionSpecifier::Hash(B256::ZERO)).await?.is_none());
+    assert!(backend.get_receipt(crate::ReceiptSpecifier::TxHash(B256::ZERO)).await?.is_none());
 
     Ok(())
 }

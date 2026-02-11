@@ -5,10 +5,19 @@
 //!
 //! - **Reads**: Processed concurrently (up to 64 in flight) via spawned tasks
 //! - **Writes**: Processed sequentially (inline await) to maintain ordering
+//!
+//! Transaction, receipt, and header lookups are served from an LRU cache,
+//! avoiding repeated backend reads for frequently queried items.
 
-use crate::{ColdReadRequest, ColdStorage, ColdStorageHandle, ColdWriteRequest};
+use super::cache::ColdCache;
+use crate::{
+    ColdReadRequest, ColdResult, ColdStorage, ColdStorageHandle, ColdWriteRequest, Confirmed,
+    HeaderSpecifier, ReceiptSpecifier, TransactionSpecifier,
+};
+use alloy::consensus::Header;
+use signet_storage_types::{Receipt, TransactionSigned};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, instrument};
 
@@ -20,6 +29,145 @@ const WRITE_CHANNEL_SIZE: usize = 256;
 
 /// Maximum concurrent read request handlers.
 const MAX_CONCURRENT_READERS: usize = 64;
+
+/// Shared state for the cold storage task, holding the backend and cache.
+///
+/// This is wrapped in an `Arc` so that spawned read handlers can access
+/// the backend and cache without moving ownership.
+struct ColdStorageTaskInner<B> {
+    backend: B,
+    cache: Mutex<ColdCache>,
+}
+
+impl<B: ColdStorage> ColdStorageTaskInner<B> {
+    /// Fetch a header from the backend and cache the result.
+    async fn fetch_and_cache_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<Header>> {
+        let r = self.backend.get_header(spec).await;
+        if let Ok(Some(ref h)) = r {
+            self.cache.lock().await.put_header(h.number, h.clone());
+        }
+        r
+    }
+
+    /// Fetch a transaction from the backend and cache the result.
+    async fn fetch_and_cache_tx(
+        &self,
+        spec: TransactionSpecifier,
+    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
+        let r = self.backend.get_transaction(spec).await;
+        if let Ok(Some(ref c)) = r {
+            let meta = c.meta();
+            self.cache
+                .lock()
+                .await
+                .put_tx((meta.block_number(), meta.transaction_index()), c.clone());
+        }
+        r
+    }
+
+    /// Fetch a receipt from the backend and cache the result.
+    async fn fetch_and_cache_receipt(
+        &self,
+        spec: ReceiptSpecifier,
+    ) -> ColdResult<Option<Confirmed<Receipt>>> {
+        let r = self.backend.get_receipt(spec).await;
+        if let Ok(Some(ref c)) = r {
+            let meta = c.meta();
+            self.cache
+                .lock()
+                .await
+                .put_receipt((meta.block_number(), meta.transaction_index()), c.clone());
+        }
+        r
+    }
+
+    /// Handle a read request, checking the cache first where applicable.
+    async fn handle_read(&self, req: ColdReadRequest) {
+        match req {
+            ColdReadRequest::GetHeader { spec, resp } => {
+                let result = if let HeaderSpecifier::Number(n) = &spec {
+                    if let Some(hit) = self.cache.lock().await.get_header(n) {
+                        Ok(Some(hit))
+                    } else {
+                        self.fetch_and_cache_header(spec).await
+                    }
+                } else {
+                    self.fetch_and_cache_header(spec).await
+                };
+                let _ = resp.send(result);
+            }
+            ColdReadRequest::GetHeaders { specs, resp } => {
+                let _ = resp.send(self.backend.get_headers(specs).await);
+            }
+            ColdReadRequest::GetTransaction { spec, resp } => {
+                let result = if let TransactionSpecifier::BlockAndIndex { block, index } = &spec {
+                    if let Some(hit) = self.cache.lock().await.get_tx(&(*block, *index)) {
+                        Ok(Some(hit))
+                    } else {
+                        self.fetch_and_cache_tx(spec).await
+                    }
+                } else {
+                    self.fetch_and_cache_tx(spec).await
+                };
+                let _ = resp.send(result);
+            }
+            ColdReadRequest::GetTransactionsInBlock { block, resp } => {
+                let _ = resp.send(self.backend.get_transactions_in_block(block).await);
+            }
+            ColdReadRequest::GetTransactionCount { block, resp } => {
+                let _ = resp.send(self.backend.get_transaction_count(block).await);
+            }
+            ColdReadRequest::GetReceipt { spec, resp } => {
+                let result = if let ReceiptSpecifier::BlockAndIndex { block, index } = &spec {
+                    if let Some(hit) = self.cache.lock().await.get_receipt(&(*block, *index)) {
+                        Ok(Some(hit))
+                    } else {
+                        self.fetch_and_cache_receipt(spec).await
+                    }
+                } else {
+                    self.fetch_and_cache_receipt(spec).await
+                };
+                let _ = resp.send(result);
+            }
+            ColdReadRequest::GetReceiptsInBlock { block, resp } => {
+                let _ = resp.send(self.backend.get_receipts_in_block(block).await);
+            }
+            ColdReadRequest::GetSignetEvents { spec, resp } => {
+                let _ = resp.send(self.backend.get_signet_events(spec).await);
+            }
+            ColdReadRequest::GetZenithHeader { spec, resp } => {
+                let _ = resp.send(self.backend.get_zenith_header(spec).await);
+            }
+            ColdReadRequest::GetZenithHeaders { spec, resp } => {
+                let _ = resp.send(self.backend.get_zenith_headers(spec).await);
+            }
+            ColdReadRequest::GetLatestBlock { resp } => {
+                let _ = resp.send(self.backend.get_latest_block().await);
+            }
+        }
+    }
+
+    /// Handle a write request, invalidating the cache on truncation.
+    async fn handle_write(&self, req: ColdWriteRequest) {
+        match req {
+            ColdWriteRequest::AppendBlock(boxed) => {
+                let result = self.backend.append_block(boxed.data).await;
+                let _ = boxed.resp.send(result);
+            }
+            ColdWriteRequest::AppendBlocks { data, resp } => {
+                let result = self.backend.append_blocks(data).await;
+                let _ = resp.send(result);
+            }
+            ColdWriteRequest::TruncateAbove { block, resp } => {
+                let result = self.backend.truncate_above(block).await;
+                if result.is_ok() {
+                    self.cache.lock().await.invalidate_above(block);
+                }
+                let _ = resp.send(result);
+            }
+        }
+    }
+}
 
 /// The cold storage task that processes requests.
 ///
@@ -36,8 +184,14 @@ const MAX_CONCURRENT_READERS: usize = 64;
 ///
 /// This design prioritizes write ordering for correctness while allowing
 /// read throughput to scale with concurrency.
+///
+/// # Caching
+///
+/// Transaction, receipt, and header lookups are served from an LRU cache
+/// when possible. Cache entries are invalidated on
+/// [`truncate_above`](crate::ColdStorage::truncate_above) to handle reorgs.
 pub struct ColdStorageTask<B: ColdStorage> {
-    backend: Arc<B>,
+    inner: Arc<ColdStorageTaskInner<B>>,
     read_receiver: mpsc::Receiver<ColdReadRequest>,
     write_receiver: mpsc::Receiver<ColdWriteRequest>,
     cancel_token: CancellationToken,
@@ -57,7 +211,7 @@ impl<B: ColdStorage> ColdStorageTask<B> {
         let (read_sender, read_receiver) = mpsc::channel(READ_CHANNEL_SIZE);
         let (write_sender, write_receiver) = mpsc::channel(WRITE_CHANNEL_SIZE);
         let task = Self {
-            backend: Arc::new(backend),
+            inner: Arc::new(ColdStorageTaskInner { backend, cache: Mutex::new(ColdCache::new()) }),
             read_receiver,
             write_receiver,
             cancel_token,
@@ -86,50 +240,40 @@ impl<B: ColdStorage> ColdStorageTask<B> {
             tokio::select! {
                 biased;
 
-                // Check for cancellation first
                 _ = self.cancel_token.cancelled() => {
                     debug!("Cold storage task received cancellation signal");
                     break;
                 }
 
-                // Process writes sequentially (inline await, not spawned)
                 maybe_write = self.write_receiver.recv() => {
-                    match maybe_write {
-                        Some(write_req) => {
-                            Self::handle_write(Arc::clone(&self.backend), write_req).await;
-                        }
-                        None => {
-                            debug!("Cold storage write channel closed");
-                            break;
-                        }
-                    }
+                    let Some(req) = maybe_write else {
+                        debug!("Cold storage write channel closed");
+                        break;
+                    };
+                    self.inner.handle_write(req).await;
                 }
 
-                // Process reads concurrently (spawned)
                 maybe_read = self.read_receiver.recv() => {
-                    match maybe_read {
-                        Some(read_req) => {
-                            // Apply backpressure: wait if we've hit the concurrent reader limit
-                            while self.task_tracker.len() >= MAX_CONCURRENT_READERS {
-                                tokio::select! {
-                                    _ = self.cancel_token.cancelled() => {
-                                        debug!("Cancellation while waiting for read task slot");
-                                        break;
-                                    }
-                                    _ = self.task_tracker.wait() => {}
-                                }
-                            }
+                    let Some(req) = maybe_read else {
+                        debug!("Cold storage read channel closed");
+                        break;
+                    };
 
-                            let backend = Arc::clone(&self.backend);
-                            self.task_tracker.spawn(async move {
-                                Self::handle_read(backend, read_req).await;
-                            });
-                        }
-                        None => {
-                            debug!("Cold storage read channel closed");
-                            break;
+                    // Apply backpressure: wait if we've hit the concurrent reader limit
+                    while self.task_tracker.len() >= MAX_CONCURRENT_READERS {
+                        tokio::select! {
+                            _ = self.cancel_token.cancelled() => {
+                                debug!("Cancellation while waiting for read task slot");
+                                break;
+                            }
+                            _ = self.task_tracker.wait() => {}
                         }
                     }
+
+                    let inner = Arc::clone(&self.inner);
+                    self.task_tracker.spawn(async move {
+                        inner.handle_read(req).await;
+                    });
                 }
             }
         }
@@ -139,71 +283,5 @@ impl<B: ColdStorage> ColdStorageTask<B> {
         self.task_tracker.close();
         self.task_tracker.wait().await;
         debug!("Cold storage task shut down gracefully");
-    }
-
-    async fn handle_read(backend: Arc<B>, req: ColdReadRequest) {
-        match req {
-            ColdReadRequest::GetHeader { spec, resp } => {
-                let result = backend.get_header(spec).await;
-                let _ = resp.send(result);
-            }
-            ColdReadRequest::GetHeaders { specs, resp } => {
-                let result = backend.get_headers(specs).await;
-                let _ = resp.send(result);
-            }
-            ColdReadRequest::GetTransaction { spec, resp } => {
-                let result = backend.get_transaction(spec).await;
-                let _ = resp.send(result);
-            }
-            ColdReadRequest::GetTransactionsInBlock { block, resp } => {
-                let result = backend.get_transactions_in_block(block).await;
-                let _ = resp.send(result);
-            }
-            ColdReadRequest::GetTransactionCount { block, resp } => {
-                let result = backend.get_transaction_count(block).await;
-                let _ = resp.send(result);
-            }
-            ColdReadRequest::GetReceipt { spec, resp } => {
-                let result = backend.get_receipt(spec).await;
-                let _ = resp.send(result);
-            }
-            ColdReadRequest::GetReceiptsInBlock { block, resp } => {
-                let result = backend.get_receipts_in_block(block).await;
-                let _ = resp.send(result);
-            }
-            ColdReadRequest::GetSignetEvents { spec, resp } => {
-                let result = backend.get_signet_events(spec).await;
-                let _ = resp.send(result);
-            }
-            ColdReadRequest::GetZenithHeader { spec, resp } => {
-                let result = backend.get_zenith_header(spec).await;
-                let _ = resp.send(result);
-            }
-            ColdReadRequest::GetZenithHeaders { spec, resp } => {
-                let result = backend.get_zenith_headers(spec).await;
-                let _ = resp.send(result);
-            }
-            ColdReadRequest::GetLatestBlock { resp } => {
-                let result = backend.get_latest_block().await;
-                let _ = resp.send(result);
-            }
-        }
-    }
-
-    async fn handle_write(backend: Arc<B>, req: ColdWriteRequest) {
-        match req {
-            ColdWriteRequest::AppendBlock(boxed) => {
-                let result = backend.append_block(boxed.data).await;
-                let _ = boxed.resp.send(result);
-            }
-            ColdWriteRequest::AppendBlocks { data, resp } => {
-                let result = backend.append_blocks(data).await;
-                let _ = resp.send(result);
-            }
-            ColdWriteRequest::TruncateAbove { block, resp } => {
-                let result = backend.truncate_above(block).await;
-                let _ = resp.send(result);
-            }
-        }
     }
 }

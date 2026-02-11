@@ -4,8 +4,8 @@
 //! Reads and writes use separate channels with their own request types.
 
 use crate::{
-    BlockData, ColdStorageError, HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier,
-    TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdStorageError, Confirmed, HeaderSpecifier, ReceiptSpecifier,
+    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::{consensus::Header, primitives::BlockNumber};
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned};
@@ -50,7 +50,7 @@ pub enum ColdReadRequest {
         /// The transaction specifier.
         spec: TransactionSpecifier,
         /// The response channel.
-        resp: Responder<Option<TransactionSigned>>,
+        resp: Responder<Option<Confirmed<TransactionSigned>>>,
     },
     /// Get all transactions in a block.
     GetTransactionsInBlock {
@@ -73,7 +73,7 @@ pub enum ColdReadRequest {
         /// The receipt specifier.
         spec: ReceiptSpecifier,
         /// The response channel.
-        resp: Responder<Option<Receipt>>,
+        resp: Responder<Option<Confirmed<Receipt>>>,
     },
     /// Get all receipts in a block.
     GetReceiptsInBlock {

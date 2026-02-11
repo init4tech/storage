@@ -6,8 +6,8 @@
 //! - [`ColdStorageHandle`] provides full read/write access
 //! - [`ColdStorageReadHandle`] provides read-only access
 
+mod cache;
 mod handle;
 pub use handle::{ColdStorageHandle, ColdStorageReadHandle};
-
 mod runner;
 pub use runner::ColdStorageTask;
