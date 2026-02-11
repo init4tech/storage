@@ -138,6 +138,19 @@ impl<H: HotKv> UnifiedStorage<H> {
         self.hot.revm_reader().map_err(|e| StorageError::Hot(HistoryError::Db(e)))
     }
 
+    /// Create a revm-compatible read-only database adapter that reads state
+    /// at a specific block height.
+    ///
+    /// The returned [`RevmRead`] uses history and change set tables to
+    /// reconstruct state as it was at `height`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction cannot be created.
+    pub fn revm_reader_at_height(&self, height: u64) -> StorageResult<RevmRead<H::RoTx>> {
+        self.hot.revm_reader_at_height(height).map_err(|e| StorageError::Hot(HistoryError::Db(e)))
+    }
+
     /// Append executed blocks to both hot and cold storage.
     ///
     /// This method:

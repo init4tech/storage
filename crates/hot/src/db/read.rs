@@ -213,6 +213,73 @@ pub trait HistoryRead: HotDbRead {
         Ok(Some((first, last)))
     }
 
+    /// Get account state at a specific historical block height.
+    ///
+    /// Reconstructs the account state as it was at the given block height
+    /// by consulting history and change set tables. If no changes exist
+    /// after `height`, the current value from `PlainAccountState` is
+    /// returned (the account has not been modified since `height`).
+    fn get_account_at_height(
+        &self,
+        address: &Address,
+        height: u64,
+    ) -> Result<Option<Account>, Self::Error> {
+        let mut cursor = self.traverse_dual::<tables::AccountsHistory>()?;
+
+        // Seek to the first shard with key2 >= height + 1
+        let result = cursor.next_dual_above(address, &(height + 1))?;
+
+        // Verify address matches; seek could overshoot to the next address
+        let Some((_, _, list)) = result.filter(|(addr, _, _)| *addr == *address) else {
+            // No history after height — account unchanged, use current value
+            return self.get_account(address);
+        };
+
+        // rank(height) = count of values <= height; select(rank) = first value > height
+        let rank = list.rank(height);
+        let Some(first_change) = list.select(rank) else {
+            // Defensive: shard key2 > height and is in the list, so this
+            // should not happen. Fall back to current value.
+            return self.get_account(address);
+        };
+
+        self.get_account_change(first_change, address)
+    }
+
+    /// Get storage slot value at a specific historical block height.
+    ///
+    /// Reconstructs the storage value as it was at the given block height
+    /// by consulting history and change set tables. If no changes exist
+    /// after `height`, the current value from `PlainStorageState` is
+    /// returned (the slot has not been modified since `height`).
+    fn get_storage_at_height(
+        &self,
+        address: &Address,
+        slot: &U256,
+        height: u64,
+    ) -> Result<Option<U256>, Self::Error> {
+        let mut cursor = self.traverse_dual::<tables::StorageHistory>()?;
+
+        // Seek to first shard with (address, ShardedKey { slot, block >= height+1 })
+        let target = ShardedKey::new(*slot, height + 1);
+        let result = cursor.next_dual_above(address, &target)?;
+
+        // Verify address AND slot match; seek could land on a different slot
+        let Some((_, _, list)) =
+            result.filter(|(addr, sk, _)| *addr == *address && sk.key == *slot)
+        else {
+            // No history after height — slot unchanged, use current value
+            return self.get_storage(address, slot);
+        };
+
+        let rank = list.rank(height);
+        let Some(first_change) = list.select(rank) else {
+            return self.get_storage(address, slot);
+        };
+
+        self.get_storage_change(first_change, address, slot)
+    }
+
     /// Check if a specific block number exists in history.
     fn has_block(&self, number: u64) -> Result<bool, Self::Error> {
         self.get_header(number).map(|opt| opt.is_some())

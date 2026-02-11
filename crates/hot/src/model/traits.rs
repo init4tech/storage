@@ -44,6 +44,18 @@ pub trait HotKv {
         self.reader().map(RevmRead::new)
     }
 
+    /// Create a read-only transaction that reads state at a specific block
+    /// height, and wrap it in an adapter for the revm [`DatabaseRef`] trait.
+    ///
+    /// The returned reader uses history and change set tables to
+    /// reconstruct state as it was at `height`. Bytecodes are
+    /// content-addressed and always read from the current table.
+    ///
+    /// [`DatabaseRef`]: trevm::revm::database::DatabaseRef
+    fn revm_reader_at_height(&self, height: u64) -> Result<RevmRead<Self::RoTx>, HotKvError> {
+        self.reader().map(|r| RevmRead::at_height(r, height))
+    }
+
     /// Create a read-write transaction.
     ///
     /// This is allowed to fail with [`Err(HotKvError::WriteLocked)`] if
