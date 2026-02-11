@@ -39,6 +39,7 @@ signet-hot = { version = "0.1.0", path = "./crates/hot" }
 signet-hot-mdbx = { version = "0.1.0", path = "./crates/hot-mdbx" }
 signet-cold = { version = "0.1.0", path = "./crates/cold" }
 signet-cold-mdbx = { version = "0.1.0", path = "./crates/cold-mdbx" }
+signet-cold-sql = { version = "0.1.0", path = "./crates/cold-sql" }
 signet-storage = { version = "0.1.0", path = "./crates/storage" }
 signet-storage-types = { version = "0.1.0", path = "./crates/types" }
 
@@ -69,4 +70,5 @@ tokio = { version = "1.45.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 itertools = "0.14"
 lru = "0.16"
+sqlx = { version = "0.8", default-features = false }
 tracing = "0.1.44"
