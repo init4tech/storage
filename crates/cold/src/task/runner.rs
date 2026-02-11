@@ -144,6 +144,9 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
             ColdReadRequest::GetLatestBlock { resp } => {
                 let _ = resp.send(self.backend.get_latest_block().await);
             }
+            ColdReadRequest::GetReceiptWithContext { spec, resp } => {
+                let _ = resp.send(self.backend.get_receipt_with_context(spec).await);
+            }
         }
     }
 

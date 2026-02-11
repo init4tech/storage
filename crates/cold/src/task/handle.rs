@@ -11,8 +11,8 @@
 
 use crate::{
     AppendBlockRequest, BlockData, ColdReadRequest, ColdResult, ColdStorageError, ColdWriteRequest,
-    Confirmed, HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
-    ZenithHeaderSpecifier,
+    Confirmed, HeaderSpecifier, ReceiptContext, ReceiptSpecifier, SignetEventsSpecifier,
+    TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::{
     consensus::Header,
@@ -265,6 +265,22 @@ impl ColdStorageReadHandle {
     pub async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetLatestBlock { resp }, rx).await
+    }
+
+    // ==========================================================================
+    // Composite Queries
+    // ==========================================================================
+
+    /// Get a receipt with all context needed for RPC responses.
+    ///
+    /// Returns the receipt, its transaction, the block header, confirmation
+    /// metadata, and the cumulative gas used by preceding transactions.
+    pub async fn get_receipt_with_context(
+        &self,
+        spec: ReceiptSpecifier,
+    ) -> ColdResult<Option<ReceiptContext>> {
+        let (resp, rx) = oneshot::channel();
+        self.send(ColdReadRequest::GetReceiptWithContext { spec, resp }, rx).await
     }
 }
 

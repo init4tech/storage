@@ -157,7 +157,7 @@ pub use specifier::{
 };
 
 mod traits;
-pub use traits::{BlockData, ColdStorage};
+pub use traits::{BlockData, ColdStorage, ReceiptContext};
 
 /// Task module containing the storage task runner and handles.
 pub mod task;

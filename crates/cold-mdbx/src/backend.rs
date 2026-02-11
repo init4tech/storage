@@ -10,8 +10,8 @@ use crate::{
 };
 use alloy::{consensus::Header, primitives::BlockNumber};
 use signet_cold::{
-    BlockData, BlockTag, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, ReceiptSpecifier,
-    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, BlockTag, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, ReceiptContext,
+    ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use signet_hot::{
     KeySer, MAX_KEY_SIZE, ValSer,
@@ -453,6 +453,33 @@ impl MdbxColdBackend {
         tx.raw_commit()?;
         Ok(())
     }
+
+    fn get_receipt_with_context_inner(
+        &self,
+        spec: ReceiptSpecifier,
+    ) -> Result<Option<ReceiptContext>, MdbxColdError> {
+        let Some((block, index)) = self.resolve_receipt_spec(spec)? else {
+            return Ok(None);
+        };
+        let Some(header) = self.get_header_by_number(block)? else {
+            return Ok(None);
+        };
+        let Some(receipt) = self.get_receipt_by_location(block, index)? else {
+            return Ok(None);
+        };
+        let Some(transaction) = self.get_transaction_by_location(block, index)? else {
+            return Ok(None);
+        };
+
+        let prior_cumulative_gas = index
+            .checked_sub(1)
+            .and_then(|prev| self.get_receipt_by_location(block, prev).ok().flatten())
+            .map(|r| r.inner.cumulative_gas_used)
+            .unwrap_or(0);
+
+        let meta = ConfirmationMeta::new(block, header.hash_slow(), index);
+        Ok(Some(ReceiptContext::new(header, transaction, receipt, meta, prior_cumulative_gas)))
+    }
 }
 
 impl ColdStorage for MdbxColdBackend {
@@ -563,6 +590,13 @@ impl ColdStorage for MdbxColdBackend {
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
         Ok(self.get_metadata(MetadataKey::LatestBlock)?)
+    }
+
+    async fn get_receipt_with_context(
+        &self,
+        spec: ReceiptSpecifier,
+    ) -> ColdResult<Option<ReceiptContext>> {
+        Ok(self.get_receipt_with_context_inner(spec)?)
     }
 
     async fn append_block(&self, data: BlockData) -> ColdResult<()> {

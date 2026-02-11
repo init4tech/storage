@@ -4,7 +4,7 @@
 //! Reads and writes use separate channels with their own request types.
 
 use crate::{
-    BlockData, ColdStorageError, Confirmed, HeaderSpecifier, ReceiptSpecifier,
+    BlockData, ColdStorageError, Confirmed, HeaderSpecifier, ReceiptContext, ReceiptSpecifier,
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::{consensus::Header, primitives::BlockNumber};
@@ -113,6 +113,15 @@ pub enum ColdReadRequest {
     GetLatestBlock {
         /// The response channel.
         resp: Responder<Option<BlockNumber>>,
+    },
+
+    // --- Composite queries ---
+    /// Get a receipt with full context for RPC responses.
+    GetReceiptWithContext {
+        /// The receipt specifier.
+        spec: ReceiptSpecifier,
+        /// The response channel.
+        resp: Responder<Option<ReceiptContext>>,
     },
 }
 

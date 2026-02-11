@@ -4,7 +4,10 @@
 //! according to the ColdStorage trait contract. To use these tests with
 //! a custom backend, call the test functions with your backend instance.
 
-use crate::{BlockData, BlockTag, ColdResult, ColdStorage, HeaderSpecifier, TransactionSpecifier};
+use crate::{
+    BlockData, BlockTag, ColdResult, ColdStorage, HeaderSpecifier, ReceiptSpecifier,
+    TransactionSpecifier,
+};
 use alloy::{
     consensus::{Header, Receipt as AlloyReceipt, Signed, TxLegacy},
     primitives::{B256, BlockNumber, Signature, TxKind, U256},
@@ -25,6 +28,7 @@ pub async fn conformance<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     test_truncation(backend).await?;
     test_batch_append(backend).await?;
     test_latest_block_tracking(backend).await?;
+    test_get_receipt_with_context(backend).await?;
     Ok(())
 }
 
@@ -254,6 +258,47 @@ pub async fn test_latest_block_tracking<B: ColdStorage>(backend: &B) -> ColdResu
 
     backend.append_block(make_test_block(505)).await?;
     assert_eq!(backend.get_latest_block().await?, Some(505));
+
+    Ok(())
+}
+
+/// Test get_receipt_with_context returns complete receipt context.
+pub async fn test_get_receipt_with_context<B: ColdStorage>(backend: &B) -> ColdResult<()> {
+    let block = make_test_block_with_txs(700, 3);
+    let expected_header = block.header.clone();
+    let tx_hash = *block.transactions[1].tx_hash();
+
+    backend.append_block(block).await?;
+
+    // Lookup by block+index
+    let ctx = backend
+        .get_receipt_with_context(ReceiptSpecifier::BlockAndIndex { block: 700, index: 1 })
+        .await?
+        .unwrap();
+    assert_eq!(ctx.header, expected_header);
+    assert_eq!(ctx.meta.block_number(), 700);
+    assert_eq!(ctx.meta.transaction_index(), 1);
+
+    // prior_cumulative_gas should equal receipt[0].cumulative_gas_used
+    let first = backend
+        .get_receipt_with_context(ReceiptSpecifier::BlockAndIndex { block: 700, index: 0 })
+        .await?
+        .unwrap();
+    assert_eq!(first.prior_cumulative_gas, 0);
+    assert_eq!(ctx.prior_cumulative_gas, first.receipt.inner.cumulative_gas_used);
+
+    // Lookup by tx hash
+    let by_hash =
+        backend.get_receipt_with_context(ReceiptSpecifier::TxHash(tx_hash)).await?.unwrap();
+    assert_eq!(by_hash.meta.transaction_index(), 1);
+
+    // Non-existent returns None
+    assert!(
+        backend
+            .get_receipt_with_context(ReceiptSpecifier::BlockAndIndex { block: 999, index: 0 })
+            .await?
+            .is_none()
+    );
 
     Ok(())
 }

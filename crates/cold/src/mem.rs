@@ -4,8 +4,8 @@
 //! It is primarily intended for testing and development.
 
 use crate::{
-    BlockData, BlockTag, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, ReceiptSpecifier,
-    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, BlockTag, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, ReceiptContext,
+    ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::{
     consensus::{Header, Sealable},
@@ -213,6 +213,46 @@ impl ColdStorage for MemColdBackend {
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
         let inner = self.inner.read().await;
         Ok(inner.latest_block)
+    }
+
+    async fn get_receipt_with_context(
+        &self,
+        spec: ReceiptSpecifier,
+    ) -> ColdResult<Option<ReceiptContext>> {
+        let inner = self.inner.read().await;
+
+        let (block, index) = match spec {
+            ReceiptSpecifier::TxHash(h) => {
+                let Some(&(block, index)) = inner.receipt_tx_hashes.get(&h) else {
+                    return Ok(None);
+                };
+                (block, index)
+            }
+            ReceiptSpecifier::BlockAndIndex { block, index } => (block, index),
+        };
+
+        let Some(sealed) = inner.headers.get(&block) else {
+            return Ok(None);
+        };
+        let receipts = inner.receipts.get(&block).map(Vec::as_slice).unwrap_or_default();
+        let Some(receipt) = receipts.get(index as usize).cloned() else {
+            return Ok(None);
+        };
+        let txs = inner.transactions.get(&block).map(Vec::as_slice).unwrap_or_default();
+        let Some(transaction) = txs.get(index as usize).cloned() else {
+            return Ok(None);
+        };
+
+        let prior_cumulative_gas = index
+            .checked_sub(1)
+            .and_then(|prev| receipts.get(prev as usize))
+            .map(|r| r.inner.cumulative_gas_used)
+            .unwrap_or(0);
+
+        let meta = ConfirmationMeta::new(block, sealed.hash(), index);
+        let header = Header::clone(sealed);
+
+        Ok(Some(ReceiptContext::new(header, transaction, receipt, meta, prior_cumulative_gas)))
     }
 
     async fn append_block(&self, data: BlockData) -> ColdResult<()> {

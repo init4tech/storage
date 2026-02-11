@@ -6,7 +6,7 @@
 
 use alloy::{consensus::Header, primitives::BlockNumber};
 use signet_storage_types::{
-    DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, TransactionSigned,
+    ConfirmationMeta, DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, TransactionSigned,
 };
 use std::future::Future;
 
@@ -45,6 +45,39 @@ impl BlockData {
     /// Get the block number of the block.
     pub const fn block_number(&self) -> BlockNumber {
         self.header.number
+    }
+}
+
+/// All data needed to build a complete RPC receipt response.
+///
+/// Bundles the receipt with its transaction, block header, confirmation
+/// metadata, and the prior cumulative gas (needed to compute per-tx
+/// `gas_used`).
+#[derive(Debug, Clone)]
+pub struct ReceiptContext {
+    /// The block header.
+    pub header: Header,
+    /// The transaction that produced this receipt.
+    pub transaction: TransactionSigned,
+    /// The receipt.
+    pub receipt: Receipt,
+    /// Block confirmation metadata (block number, block hash, tx index).
+    pub meta: ConfirmationMeta,
+    /// Cumulative gas used by all preceding transactions in the block.
+    /// Zero for the first transaction.
+    pub prior_cumulative_gas: u64,
+}
+
+impl ReceiptContext {
+    /// Create a new receipt context.
+    pub const fn new(
+        header: Header,
+        transaction: TransactionSigned,
+        receipt: Receipt,
+        meta: ConfirmationMeta,
+        prior_cumulative_gas: u64,
+    ) -> Self {
+        Self { header, transaction, receipt, meta, prior_cumulative_gas }
     }
 }
 
@@ -165,6 +198,18 @@ pub trait ColdStorage: Send + Sync + 'static {
 
     /// Get the latest block number in storage.
     fn get_latest_block(&self) -> impl Future<Output = ColdResult<Option<BlockNumber>>> + Send;
+
+    // --- Composite queries ---
+
+    /// Get a receipt with all context needed for RPC responses.
+    ///
+    /// Returns the receipt, its transaction, the block header, confirmation
+    /// metadata, and the cumulative gas used by preceding transactions.
+    /// Returns `None` if the receipt does not exist.
+    fn get_receipt_with_context(
+        &self,
+        spec: ReceiptSpecifier,
+    ) -> impl Future<Output = ColdResult<Option<ReceiptContext>>> + Send;
 
     // --- Write operations ---
 
