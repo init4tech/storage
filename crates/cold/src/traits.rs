@@ -6,7 +6,7 @@
 
 use alloy::{consensus::Header, primitives::BlockNumber};
 use signet_storage_types::{
-    ConfirmationMeta, DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, TransactionSigned,
+    DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, TransactionSigned,
 };
 use std::future::Future;
 
@@ -50,19 +50,16 @@ impl BlockData {
 
 /// All data needed to build a complete RPC receipt response.
 ///
-/// Bundles the receipt with its transaction, block header, confirmation
-/// metadata, and the prior cumulative gas (needed to compute per-tx
-/// `gas_used`).
+/// Bundles a [`Confirmed`] receipt with its transaction, block header,
+/// and the prior cumulative gas (needed to compute per-tx `gas_used`).
 #[derive(Debug, Clone)]
 pub struct ReceiptContext {
     /// The block header.
     pub header: Header,
     /// The transaction that produced this receipt.
     pub transaction: TransactionSigned,
-    /// The receipt.
-    pub receipt: Receipt,
-    /// Block confirmation metadata (block number, block hash, tx index).
-    pub meta: ConfirmationMeta,
+    /// The receipt with block confirmation metadata.
+    pub receipt: Confirmed<Receipt>,
     /// Cumulative gas used by all preceding transactions in the block.
     /// Zero for the first transaction.
     pub prior_cumulative_gas: u64,
@@ -73,11 +70,10 @@ impl ReceiptContext {
     pub const fn new(
         header: Header,
         transaction: TransactionSigned,
-        receipt: Receipt,
-        meta: ConfirmationMeta,
+        receipt: Confirmed<Receipt>,
         prior_cumulative_gas: u64,
     ) -> Self {
-        Self { header, transaction, receipt, meta, prior_cumulative_gas }
+        Self { header, transaction, receipt, prior_cumulative_gas }
     }
 }
 
@@ -206,10 +202,42 @@ pub trait ColdStorage: Send + Sync + 'static {
     /// Returns the receipt, its transaction, the block header, confirmation
     /// metadata, and the cumulative gas used by preceding transactions.
     /// Returns `None` if the receipt does not exist.
+    ///
+    /// The default implementation composes existing trait methods. Backends
+    /// that can serve this more efficiently (e.g., in a single transaction)
+    /// should override.
     fn get_receipt_with_context(
         &self,
         spec: ReceiptSpecifier,
-    ) -> impl Future<Output = ColdResult<Option<ReceiptContext>>> + Send;
+    ) -> impl Future<Output = ColdResult<Option<ReceiptContext>>> + Send {
+        async move {
+            let Some(receipt) = self.get_receipt(spec).await? else {
+                return Ok(None);
+            };
+            let block = receipt.meta().block_number();
+            let index = receipt.meta().transaction_index();
+
+            let Some(header) = self.get_header(HeaderSpecifier::Number(block)).await? else {
+                return Ok(None);
+            };
+            let Some(tx) =
+                self.get_transaction(TransactionSpecifier::BlockAndIndex { block, index }).await?
+            else {
+                return Ok(None);
+            };
+
+            let prior_cumulative_gas = if index > 0 {
+                self.get_receipt(ReceiptSpecifier::BlockAndIndex { block, index: index - 1 })
+                    .await?
+                    .map(|r| r.into_inner().inner.cumulative_gas_used)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+
+            Ok(Some(ReceiptContext::new(header, tx.into_inner(), receipt, prior_cumulative_gas)))
+        }
+    }
 
     // --- Write operations ---
 

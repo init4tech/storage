@@ -256,35 +256,7 @@ impl MdbxColdBackend {
         &self,
         spec: ReceiptSpecifier,
     ) -> Result<Option<Confirmed<Receipt>>, MdbxColdError> {
-        let tx = self.env.tx()?;
-        let (block, index) = match spec {
-            ReceiptSpecifier::TxHash(h) => {
-                let Some(loc) = TableTraverse::<ColdTxHashIndex, _>::exact(
-                    &mut tx.new_cursor::<ColdTxHashIndex>()?,
-                    &h,
-                )?
-                else {
-                    return Ok(None);
-                };
-                (loc.block, loc.index)
-            }
-            ReceiptSpecifier::BlockAndIndex { block, index } => (block, index),
-        };
-        let Some(receipt) = DualTableTraverse::<ColdReceipts, _>::exact_dual(
-            &mut tx.new_cursor::<ColdReceipts>()?,
-            &block,
-            &index,
-        )?
-        else {
-            return Ok(None);
-        };
-        let Some(header) =
-            TableTraverse::<ColdHeaders, _>::exact(&mut tx.new_cursor::<ColdHeaders>()?, &block)?
-        else {
-            return Ok(None);
-        };
-        let meta = ConfirmationMeta::new(block, header.hash_slow(), index);
-        Ok(Some(Confirmed::new(receipt, meta)))
+        Ok(self.get_receipt_with_context_inner(spec)?.map(|ctx| ctx.receipt))
     }
 
     fn get_zenith_header_by_number(
@@ -560,7 +532,8 @@ impl MdbxColdBackend {
             .unwrap_or(0);
 
         let meta = ConfirmationMeta::new(block, header.hash_slow(), index);
-        Ok(Some(ReceiptContext::new(header, transaction, receipt, meta, prior_cumulative_gas)))
+        let confirmed_receipt = Confirmed::new(receipt, meta);
+        Ok(Some(ReceiptContext::new(header, transaction, confirmed_receipt, prior_cumulative_gas)))
     }
 }
 

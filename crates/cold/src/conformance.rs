@@ -276,8 +276,8 @@ pub async fn test_get_receipt_with_context<B: ColdStorage>(backend: &B) -> ColdR
         .await?
         .unwrap();
     assert_eq!(ctx.header, expected_header);
-    assert_eq!(ctx.meta.block_number(), 700);
-    assert_eq!(ctx.meta.transaction_index(), 1);
+    assert_eq!(ctx.receipt.meta().block_number(), 700);
+    assert_eq!(ctx.receipt.meta().transaction_index(), 1);
 
     // prior_cumulative_gas should equal receipt[0].cumulative_gas_used
     let first = backend
@@ -285,12 +285,12 @@ pub async fn test_get_receipt_with_context<B: ColdStorage>(backend: &B) -> ColdR
         .await?
         .unwrap();
     assert_eq!(first.prior_cumulative_gas, 0);
-    assert_eq!(ctx.prior_cumulative_gas, first.receipt.inner.cumulative_gas_used);
+    assert_eq!(ctx.prior_cumulative_gas, first.receipt.inner().inner.cumulative_gas_used);
 
     // Lookup by tx hash
     let by_hash =
         backend.get_receipt_with_context(ReceiptSpecifier::TxHash(tx_hash)).await?.unwrap();
-    assert_eq!(by_hash.meta.transaction_index(), 1);
+    assert_eq!(by_hash.receipt.meta().transaction_index(), 1);
 
     // Non-existent returns None
     assert!(
