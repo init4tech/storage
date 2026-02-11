@@ -1,9 +1,6 @@
 use crate::{db::HistoryError, model::HotKvRead, tables};
-use alloy::{
-    consensus::Header,
-    primitives::{Address, B256, U256},
-};
-use signet_storage_types::{Account, BlockNumberList, ShardedKey};
+use alloy::primitives::{Address, B256, U256};
+use signet_storage_types::{Account, BlockNumberList, SealedHeader, ShardedKey};
 use trevm::revm::bytecode::Bytecode;
 
 /// Trait for database read operations on standard hot tables.
@@ -16,7 +13,7 @@ use trevm::revm::bytecode::Bytecode;
 /// table set.
 pub trait HotDbRead: HotKvRead + super::sealed::Sealed {
     /// Read a block header by its number.
-    fn get_header(&self, number: u64) -> Result<Option<Header>, Self::Error> {
+    fn get_header(&self, number: u64) -> Result<Option<SealedHeader>, Self::Error> {
         self.get::<tables::Headers>(&number)
     }
 
@@ -41,7 +38,7 @@ pub trait HotDbRead: HotKvRead + super::sealed::Sealed {
     }
 
     /// Read a block header by its hash.
-    fn header_by_hash(&self, hash: &B256) -> Result<Option<Header>, Self::Error> {
+    fn header_by_hash(&self, hash: &B256) -> Result<Option<SealedHeader>, Self::Error> {
         let Some(number) = self.get_header_number(hash)? else {
             return Ok(None);
         };
@@ -170,7 +167,7 @@ pub trait HistoryRead: HotDbRead {
 
     /// Get the last (highest) header in the database.
     /// Returns None if the database is empty.
-    fn last_header(&self) -> Result<Option<Header>, Self::Error> {
+    fn last_header(&self) -> Result<Option<SealedHeader>, Self::Error> {
         let mut cursor = self.traverse::<tables::Headers>()?;
         Ok(cursor.last()?.map(|(_, header)| header))
     }
@@ -184,7 +181,7 @@ pub trait HistoryRead: HotDbRead {
 
     /// Get the first (lowest) header in the database.
     /// Returns None if the database is empty.
-    fn first_header(&self) -> Result<Option<Header>, Self::Error> {
+    fn first_header(&self) -> Result<Option<SealedHeader>, Self::Error> {
         let mut cursor = self.traverse::<tables::Headers>()?;
         Ok(cursor.first()?.map(|(_, header)| header))
     }
@@ -196,7 +193,7 @@ pub trait HistoryRead: HotDbRead {
         let Some((number, header)) = cursor.last()? else {
             return Ok(None);
         };
-        let hash = header.hash_slow();
+        let hash = header.hash();
         Ok(Some((number, hash)))
     }
 
@@ -362,7 +359,7 @@ pub trait HistoryRead: HotDbRead {
     }
 
     /// Get headers in a range (inclusive).
-    fn get_headers_range(&self, start: u64, end: u64) -> Result<Vec<Header>, Self::Error> {
+    fn get_headers_range(&self, start: u64, end: u64) -> Result<Vec<SealedHeader>, Self::Error> {
         self.traverse::<tables::Headers>()?
             .iter_from(&start)?
             .take_while(|r| r.as_ref().is_ok_and(|(num, _)| *num <= end))

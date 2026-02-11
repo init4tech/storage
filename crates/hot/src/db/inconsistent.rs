@@ -4,10 +4,7 @@ use crate::{
     tables,
 };
 use ahash::AHashMap;
-use alloy::{
-    consensus::Header,
-    primitives::{Address, B256, BlockNumber, U256},
-};
+use alloy::primitives::{Address, B256, BlockNumber, U256};
 use itertools::Itertools;
 use signet_storage_types::{Account, BlockNumberList, SealedHeader, ShardedKey};
 use std::ops::RangeInclusive;
@@ -37,7 +34,7 @@ pub trait UnsafeDbWrite: HotKvWrite + super::sealed::Sealed {
     /// Write a block header. This will leave the DB in an inconsistent state
     /// until the corresponding header number is also written. Users should
     /// prefer [`Self::put_header`] instead.
-    fn put_header_inconsistent(&self, header: &Header) -> Result<(), Self::Error> {
+    fn put_header_inconsistent(&self, header: &SealedHeader) -> Result<(), Self::Error> {
         self.queue_put::<tables::Headers>(&header.number, header)
     }
 
@@ -46,7 +43,7 @@ pub trait UnsafeDbWrite: HotKvWrite + super::sealed::Sealed {
     /// This will leave the DB in an inconsistent state until the corresponding
     /// header number is also written. Users should prefer [`Self::put_header`]
     /// instead.
-    fn append_header(&self, header: &Header) -> Result<(), Self::Error> {
+    fn append_header(&self, header: &SealedHeader) -> Result<(), Self::Error> {
         self.queue_append::<tables::Headers>(&header.number, header)
     }
 
@@ -91,7 +88,7 @@ pub trait UnsafeDbWrite: HotKvWrite + super::sealed::Sealed {
 
     /// Write a sealed block header (header + number).
     fn put_header(&self, header: &SealedHeader) -> Result<(), Self::Error> {
-        self.put_header_inconsistent(header.as_ref())
+        self.put_header_inconsistent(header)
             .and_then(|_| self.put_header_number_inconsistent(&header.hash(), header.number))
     }
 
@@ -484,7 +481,7 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
         header: &SealedHeader,
         state_changes: &BundleState,
     ) -> Result<(), Self::Error> {
-        self.append_header(header.as_ref())?;
+        self.append_header(header)?;
         self.put_header_number_inconsistent(&header.hash(), header.number)?;
 
         let (state_changes, reverts) =

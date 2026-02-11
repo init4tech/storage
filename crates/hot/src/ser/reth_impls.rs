@@ -14,7 +14,7 @@ use alloy::{
     primitives::{Address, B256, FixedBytes, KECCAK256_EMPTY, Signature, TxKind, U256},
     primitives::{Log, LogData},
 };
-use signet_storage_types::{Account, BlockNumberList, ShardedKey, TransactionSigned};
+use signet_storage_types::{Account, BlockNumberList, SealedHeader, ShardedKey, TransactionSigned};
 use trevm::revm::bytecode::{
     Bytecode, JumpTable, LegacyAnalyzedBytecode, eip7702::Eip7702Bytecode,
 };
@@ -302,6 +302,29 @@ impl ValSer for Header {
             requests_hash,
         );
         Ok(h)
+    }
+}
+
+impl ValSer for SealedHeader {
+    fn encoded_size(&self) -> usize {
+        32 + ValSer::encoded_size(self.as_ref())
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        self.hash().encode_value_to(buf);
+        ValSer::encode_value_to(self.as_ref(), buf);
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        let hash = B256::decode_value(&data[..32])?;
+        let header = Header::decode_value(&data[32..])?;
+        Ok(alloy::consensus::Sealable::seal_unchecked(header, hash))
     }
 }
 
@@ -1433,6 +1456,24 @@ mod tests {
             ..Default::default()
         };
         test_roundtrip(&header);
+    }
+
+    #[test]
+    fn test_sealed_header_roundtrips() {
+        use alloy::consensus::Sealable;
+
+        // Default sealed header
+        test_roundtrip(&Header::default().seal_slow());
+
+        // Sealed header with some values
+        let header = Header {
+            number: 12345,
+            gas_limit: 8000000,
+            timestamp: 1234567890,
+            difficulty: U256::from(1000000u64),
+            ..Default::default()
+        };
+        test_roundtrip(&header.seal_slow());
     }
 
     #[test]

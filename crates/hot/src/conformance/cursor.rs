@@ -6,7 +6,7 @@ use crate::{
     tables,
 };
 use alloy::{
-    consensus::Header,
+    consensus::{Header, Sealable},
     primitives::{U256, address},
 };
 use signet_storage_types::Account;
@@ -57,7 +57,7 @@ pub fn test_cursor_exact_match<T: HotKv>(hot_kv: &T) {
         let writer = hot_kv.writer().unwrap();
         for i in [10u64, 20, 30] {
             let header = Header { number: i, gas_limit: 1_000_000, ..Default::default() };
-            writer.put_header_inconsistent(&header).unwrap();
+            writer.put_header_inconsistent(&header.seal_slow()).unwrap();
         }
         writer.commit().unwrap();
     }
@@ -87,7 +87,7 @@ pub fn test_cursor_backward_iteration<T: HotKv>(hot_kv: &T) {
         let writer = hot_kv.writer().unwrap();
         for i in 100u64..105 {
             let header = Header { number: i, gas_limit: 1_000_000, ..Default::default() };
-            writer.put_header_inconsistent(&header).unwrap();
+            writer.put_header_inconsistent(&header.seal_slow()).unwrap();
         }
         writer.commit().unwrap();
     }

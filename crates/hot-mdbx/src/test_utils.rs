@@ -70,7 +70,7 @@ mod tests {
         tables,
     };
     use signet_libmdbx::{Ro, Rw};
-    use signet_storage_types::Account;
+    use signet_storage_types::{Account, SealedHeader};
     use std::borrow::Cow;
     use trevm::revm::bytecode::Bytecode;
 
@@ -100,7 +100,7 @@ mod tests {
         (hash, code)
     }
 
-    fn create_test_header() -> (BlockNumber, Header) {
+    fn create_test_header() -> (BlockNumber, SealedHeader) {
         let block_number = 12345;
         let header = Header {
             number: block_number,
@@ -110,7 +110,8 @@ mod tests {
             parent_hash: B256::from_slice(&[0x3; 32]),
             state_root: B256::from_slice(&[0x4; 32]),
             ..Default::default()
-        };
+        }
+        .seal_slow();
         (block_number, header)
     }
 
@@ -267,7 +268,8 @@ mod tests {
         // Verify data exists
         {
             let reader: Tx<Ro> = db.reader().unwrap();
-            let read_header: Option<Header> = reader.get::<tables::Headers>(&block_number).unwrap();
+            let read_header: Option<SealedHeader> =
+                reader.get::<tables::Headers>(&block_number).unwrap();
             assert_eq!(read_header, Some(header.clone()));
         }
 
@@ -281,7 +283,8 @@ mod tests {
         // Verify table is empty
         {
             let reader: Tx<Ro> = db.reader().unwrap();
-            let read_header: Option<Header> = reader.get::<tables::Headers>(&block_number).unwrap();
+            let read_header: Option<SealedHeader> =
+                reader.get::<tables::Headers>(&block_number).unwrap();
             assert_eq!(read_header, None);
         }
     }
@@ -450,7 +453,6 @@ mod tests {
     fn test_serialization_roundtrip_inner(db: &DatabaseEnv) {
         // Test various data types
         let (block_number, header) = create_test_header();
-        let header = header.seal_slow();
 
         {
             let writer: Tx<Rw> = db.writer().unwrap();
@@ -465,8 +467,9 @@ mod tests {
             let reader: Tx<Ro> = db.reader().unwrap();
 
             // Read and verify
-            let read_header: Option<Header> = reader.get::<tables::Headers>(&block_number).unwrap();
-            assert_eq!(read_header.as_ref(), Some(header.inner()));
+            let read_header: Option<SealedHeader> =
+                reader.get::<tables::Headers>(&block_number).unwrap();
+            assert_eq!(read_header.as_ref(), Some(&header));
 
             let read_hash: Option<u64> =
                 reader.get::<tables::HeaderNumbers>(&header.hash()).unwrap();

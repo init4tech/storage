@@ -6,10 +6,10 @@ use crate::{
     tables,
 };
 use alloy::{
-    consensus::Header,
+    consensus::{Header, Sealable},
     primitives::{U256, address},
 };
-use signet_storage_types::BlockNumberList;
+use signet_storage_types::{BlockNumberList, SealedHeader};
 use trevm::revm::database::states::PlainStorageChangeset;
 
 /// Test clear_range on a single-keyed table.
@@ -24,7 +24,7 @@ pub fn test_clear_range<T: HotKv>(hot_kv: &T) {
         let writer = hot_kv.writer().unwrap();
         for i in 0u64..15 {
             let header = Header { number: i, gas_limit: 1_000_000, ..Default::default() };
-            writer.put_header_inconsistent(&header).unwrap();
+            writer.put_header_inconsistent(&header.seal_slow()).unwrap();
         }
         writer.commit().unwrap();
     }
@@ -158,9 +158,9 @@ pub fn test_clear_range<T: HotKv>(hot_kv: &T) {
 ///
 /// Similar to clear_range but also returns the removed keys.
 pub fn test_take_range<T: HotKv>(hot_kv: &T) {
-    let headers = (0..10u64)
-        .map(|i| Header { number: i, gas_limit: 1_000_000, ..Default::default() })
-        .collect::<Vec<_>>();
+    let headers: Vec<SealedHeader> = (0..10u64)
+        .map(|i| Header { number: i, gas_limit: 1_000_000, ..Default::default() }.seal_slow())
+        .collect();
 
     // Phase 1: Write 10 headers with block numbers 0-9
     {
