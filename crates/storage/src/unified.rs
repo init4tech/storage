@@ -147,10 +147,14 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// # Errors
     ///
-    /// - [`HotKvError::NoBlocks`] if the database has no blocks.
-    /// - [`HotKvError::HeightOutOfRange`] if `height` is outside the
+    /// - [`NoBlocks`] if the database has no blocks.
+    /// - [`HeightOutOfRange`] if `height` is outside the
     ///   stored block range.
-    /// - [`HotKvError::Inner`] if the transaction cannot be created.
+    /// - [`Inner`] if the transaction cannot be created.
+    ///
+    /// [`NoBlocks`]: signet_hot::model::HotKvError::NoBlocks
+    /// [`HeightOutOfRange`]: signet_hot::model::HotKvError::HeightOutOfRange
+    /// [`Inner`]: signet_hot::model::HotKvError::Inner
     pub fn revm_reader_at_height(&self, height: u64) -> StorageResult<RevmRead<H::RoTx>> {
         self.hot.revm_reader_at_height(height).map_err(Into::into)
     }
@@ -163,8 +167,8 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// # Errors
     ///
-    /// - [`StorageError::Hot`]: Hot storage write failed. No data was written.
-    /// - [`StorageError::Cold`]: Hot storage succeeded but cold dispatch failed.
+    /// - [`Hot`]: Hot storage write failed. No data was written.
+    /// - [`Cold`]: Hot storage succeeded but cold dispatch failed.
     ///   Check the inner [`ColdStorageError`] variant:
     ///   - [`Backpressure`]: Task alive but channel full. May retry or continue.
     ///   - [`TaskTerminated`]: Task stopped. Requires restart.
@@ -172,6 +176,8 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// In both cold error cases, data is safely in hot storage and can be
     /// recovered later via [`replay_to_cold`](Self::replay_to_cold).
     ///
+    /// [`Hot`]: crate::StorageError::Hot
+    /// [`Cold`]: crate::StorageError::Cold
     /// [`Backpressure`]: signet_cold::ColdStorageError::Backpressure
     /// [`TaskTerminated`]: signet_cold::ColdStorageError::TaskTerminated
     pub fn append_blocks(&self, blocks: Vec<ExecutedBlock>) -> StorageResult<()> {
@@ -214,8 +220,8 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// # Errors
     ///
-    /// - [`StorageError::Hot`]: Hot storage unwind failed. State is unchanged.
-    /// - [`StorageError::Cold`]: Hot storage unwound but cold truncate dispatch
+    /// - [`Hot`]: Hot storage unwind failed. State is unchanged.
+    /// - [`Cold`]: Hot storage unwound but cold truncate dispatch
     ///   failed. Check the inner [`ColdStorageError`] variant:
     ///   - [`Backpressure`]: Task alive but channel full.
     ///   - [`TaskTerminated`]: Task stopped.
@@ -223,6 +229,8 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// Cold storage may temporarily contain stale blocks until the truncate is
     /// replayed. This is safe: hot storage is authoritative.
     ///
+    /// [`Hot`]: crate::StorageError::Hot
+    /// [`Cold`]: crate::StorageError::Cold
     /// [`Backpressure`]: signet_cold::ColdStorageError::Backpressure
     /// [`TaskTerminated`]: signet_cold::ColdStorageError::TaskTerminated
     pub fn unwind_above(&self, block: BlockNumber) -> StorageResult<()> {
