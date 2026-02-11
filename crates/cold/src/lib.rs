@@ -122,6 +122,13 @@
 //! ```
 //!
 //! This is a design sketch; no implementation is provided yet.
+//!
+//! # Feature Flags
+//!
+//! - **`in-memory`**: Enables the [`mem`] module, providing an in-memory
+//!   [`ColdStorage`] backend for testing.
+//! - **`test-utils`**: Enables the [`conformance`] module with backend
+//!   conformance tests. Implies `in-memory`.
 
 #![warn(
     missing_copy_implementations,

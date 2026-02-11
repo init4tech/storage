@@ -11,6 +11,10 @@ repository.workspace = true
 keywords = ["blockchain", "storage", "types", "ethereum"]
 categories = ["data-structures"]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 alloy.workspace = true
 bitflags = "2.10.0"

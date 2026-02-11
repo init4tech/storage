@@ -1302,11 +1302,6 @@ mod tests {
                     entries.push(next);
                 }
             }
-
-            eprintln!("\nStorageChangeSets entries ({} total):", entries.len());
-            for ((bn, addr), slot, val) in &entries {
-                eprintln!("  block={}, addr={:?}, slot={}, old_value={}", bn, addr, slot, val);
-            }
         }
 
         // Count PlainStorageState entries before unwind
@@ -1329,10 +1324,6 @@ mod tests {
                 }
             }
 
-            eprintln!("\nPlainStorageState BEFORE unwind ({} total):", entries.len());
-            for (addr, slot, val) in &entries {
-                eprintln!("  addr={:?}, slot={}, value={}", addr, slot, val);
-            }
             assert_eq!(entries.len(), 7, "Expected 7 storage entries before unwind");
         }
 
@@ -1361,11 +1352,6 @@ mod tests {
                 {
                     entries.push(next);
                 }
-            }
-
-            eprintln!("\nPlainStorageState AFTER unwind ({} total):", entries.len());
-            for (addr, slot, val) in &entries {
-                eprintln!("  addr={:?}, slot={}, value={}", addr, slot, val);
             }
 
             // Expected: addr1.slot1=20, addr2.slot1=100 (2 entries)

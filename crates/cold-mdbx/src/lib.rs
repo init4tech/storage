@@ -19,6 +19,11 @@
 //! ## Metadata Tables
 //!
 //! - [`ColdMetadata`]: Storage metadata (latest block, finalized, safe, earliest).
+//!
+//! # Feature Flags
+//!
+//! - **`test-utils`**: Propagates `signet-cold/test-utils` for conformance
+//!   testing against the MDBX backend.
 
 #![warn(
     missing_copy_implementations,
