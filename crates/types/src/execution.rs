@@ -5,6 +5,7 @@
 
 use crate::{DbSignetEvent, DbZenithHeader, Receipt, SealedHeader, TransactionSigned};
 use alloy::primitives::BlockNumber;
+use core::fmt;
 use trevm::revm::database::BundleState;
 
 /// Complete execution output for a block.
@@ -23,7 +24,8 @@ use trevm::revm::database::BundleState;
 /// let block = ExecutedBlockBuilder::new()
 ///     .header(header)
 ///     .bundle(bundle)
-///     .build();
+///     .build()
+///     .unwrap();
 /// # }
 /// ```
 #[derive(Debug, Clone)]
@@ -129,17 +131,30 @@ impl ExecutedBlockBuilder {
 
     /// Build the [`ExecutedBlock`].
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `header` or `bundle` have not been set.
-    pub fn build(self) -> ExecutedBlock {
-        ExecutedBlock {
-            header: self.header.expect("header is required"),
-            bundle: self.bundle.expect("bundle is required"),
+    /// Returns [`MissingFieldError`] if `header` or `bundle` have not been set.
+    pub fn build(self) -> Result<ExecutedBlock, MissingFieldError> {
+        Ok(ExecutedBlock {
+            header: self.header.ok_or(MissingFieldError("header"))?,
+            bundle: self.bundle.ok_or(MissingFieldError("bundle"))?,
             transactions: self.transactions,
             receipts: self.receipts,
             signet_events: self.signet_events,
             zenith_header: self.zenith_header,
-        }
+        })
     }
 }
+
+/// Error returned when building an [`ExecutedBlock`] with missing required
+/// fields.
+#[derive(Debug, Clone, Copy)]
+pub struct MissingFieldError(&'static str);
+
+impl fmt::Display for MissingFieldError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "missing required field: {}", self.0)
+    }
+}
+
+impl std::error::Error for MissingFieldError {}

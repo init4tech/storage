@@ -302,10 +302,8 @@ where
         Ok(self.reader.get_storage_at_height(&address, &index, self.height)?.unwrap_or_default())
     }
 
-    fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
-        // This would need to be implemented based on your block hash storage
-        // For now, return zero hash
-        Ok(B256::ZERO)
+    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+        Ok(self.reader.get::<tables::Headers>(&number)?.map_or(B256::ZERO, |h| h.hash()))
     }
 }
 
@@ -379,10 +377,8 @@ where
         Ok(self.writer.get_dual::<tables::PlainStorageState>(&address, &index)?.unwrap_or_default())
     }
 
-    fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
-        // This would need to be implemented based on your block hash storage
-        // For now, return zero hash
-        Ok(B256::ZERO)
+    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+        Ok(self.writer.get::<tables::Headers>(&number)?.map_or(B256::ZERO, |h| h.hash()))
     }
 }
 
@@ -456,7 +452,7 @@ mod tests {
         tables::{Bytecodes, PlainAccountState},
     };
     use alloy::{
-        consensus::Sealable,
+        consensus::{Header, Sealable},
         primitives::{Address, B256, U256},
     };
     use signet_storage_types::{Account, BlockNumberList};
@@ -519,9 +515,24 @@ mod tests {
             let storage_val = reader.storage_ref(address, StorageKey::from(U256::from(123u64)))?;
             assert_eq!(storage_val, U256::ZERO);
 
-            // Test block_hash_ref
-            let block_hash = reader.block_hash_ref(123)?;
+            // Test block_hash_ref returns ZERO for missing block
+            let block_hash = reader.block_hash_ref(999)?;
             assert_eq!(block_hash, B256::ZERO);
+        }
+
+        // Test block_hash_ref returns correct hash for stored header
+        let header = Header { number: 123, gas_limit: 1_000_000, ..Default::default() };
+        let sealed = header.seal_slow();
+        let expected_hash = sealed.hash();
+        {
+            let writer = mem_kv.writer()?;
+            writer.queue_put::<tables::Headers>(&123u64, &sealed)?;
+            writer.commit()?;
+        }
+        {
+            let reader = mem_kv.revm_reader()?;
+            let block_hash = reader.block_hash_ref(123)?;
+            assert_eq!(block_hash, expected_hash);
         }
 
         Ok(())
@@ -561,9 +572,24 @@ mod tests {
             let storage_val = reader.storage(address, StorageKey::from(U256::from(123u64)))?;
             assert_eq!(storage_val, U256::ZERO);
 
-            // Test block_hash
-            let block_hash = reader.block_hash(123)?;
+            // Test block_hash returns ZERO for missing block
+            let block_hash = reader.block_hash(999)?;
             assert_eq!(block_hash, B256::ZERO);
+        }
+
+        // Test block_hash returns correct hash for stored header
+        let header = Header { number: 456, gas_limit: 1_000_000, ..Default::default() };
+        let sealed = header.seal_slow();
+        let expected_hash = sealed.hash();
+        {
+            let writer = mem_kv.writer()?;
+            writer.queue_put::<tables::Headers>(&456u64, &sealed)?;
+            writer.commit()?;
+        }
+        {
+            let mut reader = mem_kv.revm_reader()?;
+            let block_hash = reader.block_hash(456)?;
+            assert_eq!(block_hash, expected_hash);
         }
 
         Ok(())

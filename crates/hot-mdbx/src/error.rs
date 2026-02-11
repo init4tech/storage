@@ -39,6 +39,11 @@ pub enum MdbxError {
     )]
     UnknownFixedSize,
 
+    /// `raw_get_dual` is not supported by the MDBX backend.
+    /// Use typed `get_dual` method instead, which uses cursor-based lookup.
+    #[error("raw_get_dual is not supported by MDBX; use get_dual instead")]
+    RawDualUnsupported,
+
     /// Table not found
     #[error("table not found: {0}")]
     UnknownTable(&'static str),

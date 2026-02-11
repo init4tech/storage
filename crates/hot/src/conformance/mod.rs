@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 mod cursor;
 mod edge_cases;
 mod history;
@@ -15,13 +13,12 @@ pub use roundtrip::*;
 pub use unwind::*;
 
 use crate::model::HotKv;
-use alloy::{
-    consensus::{Header, Sealable},
-    primitives::B256,
-};
-use signet_storage_types::SealedHeader;
 
 /// Run all conformance tests against a [`HotKv`] implementation.
+///
+/// Tests share the provided store instance. Additional test functions
+/// (cursor, edge-case, history, range) are exported for use in isolation
+/// with a fresh store.
 pub fn conformance<T: HotKv>(hot_kv: &T) {
     test_header_roundtrip(hot_kv);
     test_account_roundtrip(hot_kv);
@@ -33,10 +30,4 @@ pub fn conformance<T: HotKv>(hot_kv: &T) {
     test_account_changes(hot_kv);
     test_storage_changes(hot_kv);
     test_missing_reads(hot_kv);
-}
-
-/// Helper to create a sealed header at a given height with specific parent
-pub(crate) fn make_header(number: u64, parent_hash: B256) -> SealedHeader {
-    let header = Header { number, parent_hash, gas_limit: 1_000_000, ..Default::default() };
-    header.seal_slow()
 }
