@@ -18,6 +18,7 @@ signet-storage-types.workspace = true
 
 alloy.workspace = true
 thiserror.workspace = true
+tokio-util.workspace = true
 
 [features]
 default = []

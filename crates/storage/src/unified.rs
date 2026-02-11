@@ -4,36 +4,18 @@
 //! execution data to both hot storage (for fast state access) and cold storage
 //! (for historical archival).
 
-use crate::{StorageError, StorageResult};
+use crate::StorageResult;
 use alloy::primitives::BlockNumber;
-use signet_cold::{BlockData, ColdStorageError, ColdStorageHandle, ColdStorageReadHandle};
+use signet_cold::{
+    BlockData, ColdStorage, ColdStorageError, ColdStorageHandle, ColdStorageReadHandle,
+    ColdStorageTask,
+};
 use signet_hot::{
-    HistoryError, HistoryRead, HistoryWrite, HotKv,
-    model::{HotKvError, HotKvWrite, RevmRead},
+    HistoryRead, HistoryWrite, HotKv,
+    model::{HotKvReadError, HotKvWrite, RevmRead},
 };
 use signet_storage_types::ExecutedBlock;
-
-/// Helper to convert a `HistoryError<E>` to `HistoryError<HotKvError>`.
-fn map_history_error<E: std::error::Error + Send + Sync + 'static>(
-    err: HistoryError<E>,
-) -> HistoryError<HotKvError> {
-    match err {
-        HistoryError::NonContiguousBlock { expected, got } => {
-            HistoryError::NonContiguousBlock { expected, got }
-        }
-        HistoryError::ParentHashMismatch { expected, got } => {
-            HistoryError::ParentHashMismatch { expected, got }
-        }
-        HistoryError::DbNotEmpty => HistoryError::DbNotEmpty,
-        HistoryError::EmptyRange => HistoryError::EmptyRange,
-        HistoryError::NoBlocks => HistoryError::NoBlocks,
-        HistoryError::HeightOutOfRange { height, first, last } => {
-            HistoryError::HeightOutOfRange { height, first, last }
-        }
-        HistoryError::Db(e) => HistoryError::Db(HotKvError::from_err(e)),
-        HistoryError::IntList(e) => HistoryError::IntList(e),
-    }
-}
+use tokio_util::sync::CancellationToken;
 
 /// Unified storage combining hot and cold backends.
 ///
@@ -103,6 +85,21 @@ impl<H: HotKv> UnifiedStorage<H> {
         Self { hot, cold }
     }
 
+    /// Spawn a unified storage instance from hot and cold backends.
+    ///
+    /// This spawns the [`ColdStorageTask`] internally and returns a
+    /// fully-assembled [`UnifiedStorage`]. The cold storage task runs
+    /// until the cancellation token is triggered or all handles are
+    /// dropped.
+    ///
+    /// Use [`new`](Self::new) instead if you need manual control over
+    /// the cold storage task lifecycle or need to share the
+    /// [`ColdStorageHandle`] before constructing unified storage.
+    pub fn spawn<B: ColdStorage>(hot: H, cold_backend: B, cancel_token: CancellationToken) -> Self {
+        let cold = ColdStorageTask::spawn(cold_backend, cancel_token);
+        Self::new(hot, cold)
+    }
+
     /// Get a reference to the hot storage backend.
     pub const fn hot(&self) -> &H {
         &self.hot
@@ -127,7 +124,7 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// Returns an error if the transaction cannot be created.
     pub fn reader(&self) -> StorageResult<H::RoTx> {
-        self.hot.reader().map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))
+        self.hot.reader().map_err(Into::into)
     }
 
     /// Create a revm-compatible read-only database adapter.
@@ -139,7 +136,7 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// Returns an error if the transaction cannot be created.
     pub fn revm_reader(&self) -> StorageResult<RevmRead<H::RoTx>> {
-        self.hot.revm_reader().map_err(|e| StorageError::Hot(HistoryError::Db(e)))
+        self.hot.revm_reader().map_err(Into::into)
     }
 
     /// Create a revm-compatible read-only database adapter that reads state
@@ -150,12 +147,16 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// # Errors
     ///
-    /// - [`HotKvError::NoBlocks`] if the database has no blocks.
-    /// - [`HotKvError::HeightOutOfRange`] if `height` is outside the
+    /// - [`NoBlocks`] if the database has no blocks.
+    /// - [`HeightOutOfRange`] if `height` is outside the
     ///   stored block range.
-    /// - [`HotKvError::Inner`] if the transaction cannot be created.
+    /// - [`Inner`] if the transaction cannot be created.
+    ///
+    /// [`NoBlocks`]: signet_hot::model::HotKvError::NoBlocks
+    /// [`HeightOutOfRange`]: signet_hot::model::HotKvError::HeightOutOfRange
+    /// [`Inner`]: signet_hot::model::HotKvError::Inner
     pub fn revm_reader_at_height(&self, height: u64) -> StorageResult<RevmRead<H::RoTx>> {
-        self.hot.revm_reader_at_height(height).map_err(|e| StorageError::Hot(HistoryError::Db(e)))
+        self.hot.revm_reader_at_height(height).map_err(Into::into)
     }
 
     /// Append executed blocks to both hot and cold storage.
@@ -166,8 +167,8 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// # Errors
     ///
-    /// - [`StorageError::Hot`]: Hot storage write failed. No data was written.
-    /// - [`StorageError::Cold`]: Hot storage succeeded but cold dispatch failed.
+    /// - [`Hot`]: Hot storage write failed. No data was written.
+    /// - [`Cold`]: Hot storage succeeded but cold dispatch failed.
     ///   Check the inner [`ColdStorageError`] variant:
     ///   - [`Backpressure`]: Task alive but channel full. May retry or continue.
     ///   - [`TaskTerminated`]: Task stopped. Requires restart.
@@ -175,6 +176,8 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// In both cold error cases, data is safely in hot storage and can be
     /// recovered later via [`replay_to_cold`](Self::replay_to_cold).
     ///
+    /// [`Hot`]: crate::StorageError::Hot
+    /// [`Cold`]: crate::StorageError::Cold
     /// [`Backpressure`]: signet_cold::ColdStorageError::Backpressure
     /// [`TaskTerminated`]: signet_cold::ColdStorageError::TaskTerminated
     pub fn append_blocks(&self, blocks: Vec<ExecutedBlock>) -> StorageResult<()> {
@@ -186,25 +189,17 @@ impl<H: HotKv> UnifiedStorage<H> {
         self.write_hot(&blocks)?;
 
         // 2. Dispatch to cold storage (consumes blocks)
-        self.dispatch_cold(blocks)?;
-
-        Ok(())
+        self.dispatch_cold(blocks)
     }
 
     /// Write blocks to hot storage.
     fn write_hot(&self, blocks: &[ExecutedBlock]) -> StorageResult<()> {
-        let writer = self
-            .hot
-            .writer()
-            .map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))?;
+        let writer = self.hot.writer()?;
 
-        // Pass references directly - no cloning
         writer
             .append_blocks(blocks.iter().map(|b| (&b.header, &b.bundle)))
-            .map_err(|e| StorageError::Hot(map_history_error(e)))?;
-        writer
-            .raw_commit()
-            .map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))?;
+            .map_err(|e| e.map_db(|e| e.into_hot_kv_error()))?;
+        writer.raw_commit().map_err(|e| e.into_hot_kv_error())?;
 
         Ok(())
     }
@@ -213,20 +208,8 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// Consumes the blocks to avoid cloning.
     fn dispatch_cold(&self, blocks: Vec<ExecutedBlock>) -> StorageResult<()> {
-        let cold_data: Vec<_> = blocks
-            .into_iter()
-            .map(|b| {
-                BlockData::new(
-                    b.header.into_inner(),
-                    b.transactions,
-                    b.receipts,
-                    b.signet_events,
-                    b.zenith_header,
-                )
-            })
-            .collect();
-
-        self.cold.dispatch_append_blocks(cold_data).map_err(StorageError::Cold)
+        let cold_data: Vec<_> = blocks.into_iter().map(BlockData::from).collect();
+        self.cold.dispatch_append_blocks(cold_data).map_err(Into::into)
     }
 
     /// Unwind storage above the given block number (reorg handling).
@@ -237,8 +220,8 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// # Errors
     ///
-    /// - [`StorageError::Hot`]: Hot storage unwind failed. State is unchanged.
-    /// - [`StorageError::Cold`]: Hot storage unwound but cold truncate dispatch
+    /// - [`Hot`]: Hot storage unwind failed. State is unchanged.
+    /// - [`Cold`]: Hot storage unwound but cold truncate dispatch
     ///   failed. Check the inner [`ColdStorageError`] variant:
     ///   - [`Backpressure`]: Task alive but channel full.
     ///   - [`TaskTerminated`]: Task stopped.
@@ -246,22 +229,19 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// Cold storage may temporarily contain stale blocks until the truncate is
     /// replayed. This is safe: hot storage is authoritative.
     ///
+    /// [`Hot`]: crate::StorageError::Hot
+    /// [`Cold`]: crate::StorageError::Cold
     /// [`Backpressure`]: signet_cold::ColdStorageError::Backpressure
     /// [`TaskTerminated`]: signet_cold::ColdStorageError::TaskTerminated
     pub fn unwind_above(&self, block: BlockNumber) -> StorageResult<()> {
         // 1. Unwind hot storage synchronously
-        let writer = self
-            .hot
-            .writer()
-            .map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))?;
+        let writer = self.hot.writer()?;
 
-        writer.unwind_above(block).map_err(|e| StorageError::Hot(map_history_error(e)))?;
-        writer
-            .raw_commit()
-            .map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))?;
+        writer.unwind_above(block).map_err(|e| e.map_db(|e| e.into_hot_kv_error()))?;
+        writer.raw_commit().map_err(|e| e.into_hot_kv_error())?;
 
         // 2. Truncate cold storage synchronously (non-blocking dispatch)
-        self.cold.dispatch_truncate_above(block).map_err(StorageError::Cold)
+        self.cold.dispatch_truncate_above(block).map_err(Into::into)
     }
 
     /// Check how far behind cold storage is compared to hot storage.
@@ -273,11 +253,9 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// Returns an error if either storage cannot be queried.
     pub async fn cold_lag(&self) -> StorageResult<Option<BlockNumber>> {
         let reader = self.reader()?;
-        let hot_tip = reader
-            .get_chain_tip()
-            .map_err(|e| StorageError::Hot(HistoryError::Db(HotKvError::from_err(e))))?;
+        let hot_tip = reader.get_chain_tip().map_err(|e| e.into_hot_kv_error())?;
 
-        let cold_tip = self.cold.get_latest_block().await.map_err(StorageError::Cold)?;
+        let cold_tip = self.cold.get_latest_block().await?;
 
         match (hot_tip, cold_tip) {
             (Some((hot_num, _)), Some(cold_num)) if cold_num < hot_num => Ok(Some(cold_num + 1)),
@@ -297,19 +275,7 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// Returns an error if cold storage write fails.
     pub async fn replay_to_cold(&self, blocks: Vec<ExecutedBlock>) -> Result<(), ColdStorageError> {
-        let cold_data: Vec<_> = blocks
-            .into_iter()
-            .map(|b| {
-                BlockData::new(
-                    b.header.into_inner(),
-                    b.transactions,
-                    b.receipts,
-                    b.signet_events,
-                    b.zenith_header,
-                )
-            })
-            .collect();
-
+        let cold_data: Vec<_> = blocks.into_iter().map(BlockData::from).collect();
         self.cold.append_blocks(cold_data).await
     }
 }

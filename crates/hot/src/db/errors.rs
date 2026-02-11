@@ -66,4 +66,27 @@ impl<E: std::error::Error> HistoryError<E> {
     pub const fn intlist(err: IntegerListError) -> Self {
         HistoryError::IntList(err)
     }
+
+    /// Map the database error variant to a different error type.
+    ///
+    /// All non-[`Db`](Self::Db) variants are converted directly. The `Db`
+    /// variant is transformed using the provided closure.
+    pub fn map_db<F: std::error::Error>(self, f: impl FnOnce(E) -> F) -> HistoryError<F> {
+        match self {
+            Self::Db(e) => HistoryError::Db(f(e)),
+            Self::IntList(e) => HistoryError::IntList(e),
+            Self::NonContiguousBlock { expected, got } => {
+                HistoryError::NonContiguousBlock { expected, got }
+            }
+            Self::ParentHashMismatch { expected, got } => {
+                HistoryError::ParentHashMismatch { expected, got }
+            }
+            Self::DbNotEmpty => HistoryError::DbNotEmpty,
+            Self::EmptyRange => HistoryError::EmptyRange,
+            Self::NoBlocks => HistoryError::NoBlocks,
+            Self::HeightOutOfRange { height, first, last } => {
+                HistoryError::HeightOutOfRange { height, first, last }
+            }
+        }
+    }
 }
