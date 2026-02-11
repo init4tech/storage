@@ -29,6 +29,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [features]
 default = []
-postgres = ["sqlx/postgres", "sqlx/runtime-tokio-rustls", "dep:alloy", "dep:signet-storage-types", "dep:signet-zenith"]
-sqlite = ["sqlx/sqlite", "sqlx/runtime-tokio-rustls", "dep:alloy", "dep:signet-storage-types", "dep:signet-zenith"]
+postgres = ["sqlx/postgres", "sqlx/any", "sqlx/runtime-tokio-rustls", "dep:alloy", "dep:signet-storage-types", "dep:signet-zenith"]
+sqlite = ["sqlx/sqlite", "sqlx/any", "sqlx/runtime-tokio-rustls", "dep:alloy", "dep:signet-storage-types", "dep:signet-zenith"]
 test-utils = ["signet-cold/test-utils", "sqlite", "postgres"]

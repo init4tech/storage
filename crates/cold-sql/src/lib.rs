@@ -15,7 +15,7 @@
 //!
 //! - **`postgres`**: Enables the PostgreSQL backend.
 //! - **`sqlite`**: Enables the SQLite backend.
-//! - **`test-utils`**: Enables the SQLite backend and propagates
+//! - **`test-utils`**: Enables both backends and propagates
 //!   `signet-cold/test-utils` for conformance testing.
 //!
 //! [`ColdStorage`]: signet_cold::ColdStorage
@@ -38,12 +38,15 @@ pub use error::SqlColdError;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod convert;
 
-#[cfg(feature = "sqlite")]
-mod sqlite;
-#[cfg(feature = "sqlite")]
-pub use sqlite::SqliteColdBackend;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod backend;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use backend::SqlColdBackend;
 
+/// Backward-compatible alias for [`SqlColdBackend`] when using SQLite.
+#[cfg(feature = "sqlite")]
+pub type SqliteColdBackend = SqlColdBackend;
+
+/// Backward-compatible alias for [`SqlColdBackend`] when using PostgreSQL.
 #[cfg(feature = "postgres")]
-mod postgres;
-#[cfg(feature = "postgres")]
-pub use self::postgres::PostgresColdBackend;
+pub type PostgresColdBackend = SqlColdBackend;

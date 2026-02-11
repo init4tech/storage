@@ -1,4 +1,8 @@
-//! PostgreSQL backend for cold storage.
+//! Unified SQL backend for cold storage.
+//!
+//! Supports both PostgreSQL and SQLite via [`sqlx::Any`]. The backend
+//! auto-detects the database type at construction time and runs the
+//! appropriate migration.
 
 use crate::SqlColdError;
 use crate::convert::{
@@ -7,41 +11,78 @@ use crate::convert::{
 };
 use alloy::{consensus::Header, primitives::BlockNumber};
 use signet_cold::{
-    BlockData, BlockTag, ColdResult, ColdStorage, ColdStorageError, Confirmed, HeaderSpecifier,
+    BlockData, ColdResult, ColdStorage, ColdStorageError, Confirmed, HeaderSpecifier,
     ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use signet_storage_types::{
     ConfirmationMeta, DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned,
 };
-use sqlx::{PgPool, Row};
+use sqlx::{AnyPool, Row};
 
-/// PostgreSQL-based cold storage backend.
+/// SQL-based cold storage backend.
 ///
-/// Uses an `sqlx::PgPool` for connection management and connection pooling.
+/// Uses [`sqlx::Any`] for database-agnostic access, supporting both
+/// PostgreSQL and SQLite through a single implementation. The backend
+/// is determined by the connection URL at construction time.
 ///
 /// # Example
 ///
 /// ```no_run
 /// # async fn example() {
-/// use signet_cold_sql::PostgresColdBackend;
-/// use sqlx::PgPool;
+/// use signet_cold_sql::SqlColdBackend;
 ///
-/// let pool = PgPool::connect("postgres://localhost/signet").await.unwrap();
-/// let backend = PostgresColdBackend::new(pool).await.unwrap();
+/// // SQLite (in-memory)
+/// let backend = SqlColdBackend::connect("sqlite::memory:").await.unwrap();
+///
+/// // PostgreSQL
+/// let backend = SqlColdBackend::connect("postgres://localhost/signet").await.unwrap();
 /// # }
 /// ```
 #[derive(Debug, Clone)]
-pub struct PostgresColdBackend {
-    pool: PgPool,
+pub struct SqlColdBackend {
+    pool: AnyPool,
 }
 
-impl PostgresColdBackend {
-    /// Create a new PostgreSQL cold storage backend.
+impl SqlColdBackend {
+    /// Create a new SQL cold storage backend from an existing [`AnyPool`].
     ///
-    /// Creates all tables if they do not already exist.
-    pub async fn new(pool: PgPool) -> Result<Self, SqlColdError> {
-        sqlx::raw_sql(include_str!("../migrations/001_initial_pg.sql")).execute(&pool).await?;
+    /// Auto-detects the database backend and creates all tables if they
+    /// do not already exist. Callers must ensure
+    /// [`sqlx::any::install_default_drivers`] has been called before
+    /// constructing the pool.
+    pub async fn new(pool: AnyPool) -> Result<Self, SqlColdError> {
+        // Detect backend from a pooled connection.
+        let conn = pool.acquire().await?;
+        let backend = conn.backend_name().to_owned();
+        drop(conn);
+
+        let migration = match backend.as_str() {
+            "PostgreSQL" => include_str!("../migrations/001_initial_pg.sql"),
+            "SQLite" => include_str!("../migrations/001_initial.sql"),
+            other => {
+                return Err(SqlColdError::Convert(format!(
+                    "unsupported database backend: {other}"
+                )));
+            }
+        };
+        // Execute via pool to ensure the migration uses the same
+        // connection that subsequent queries will use.
+        sqlx::raw_sql(migration).execute(&pool).await?;
         Ok(Self { pool })
+    }
+
+    /// Connect to a database URL and create the backend.
+    ///
+    /// Installs the default sqlx drivers on the first call. The database
+    /// type is inferred from the URL scheme (`sqlite:` or `postgres:`).
+    ///
+    /// For SQLite in-memory databases (`sqlite::memory:`), the pool is
+    /// limited to one connection to ensure all operations share the same
+    /// database.
+    pub async fn connect(url: &str) -> Result<Self, SqlColdError> {
+        sqlx::any::install_default_drivers();
+        let pool: AnyPool = sqlx::pool::PoolOptions::new().max_connections(1).connect(url).await?;
+        Self::new(pool).await
     }
 
     // ========================================================================
@@ -62,22 +103,7 @@ impl PostgresColdBackend {
                     .await?;
                 Ok(row.map(|r| from_i64(r.get::<i64, _>("block_number"))))
             }
-            HeaderSpecifier::Tag(tag) => self.resolve_tag(tag).await,
         }
-    }
-
-    async fn resolve_tag(&self, tag: BlockTag) -> Result<Option<BlockNumber>, SqlColdError> {
-        let key = match tag {
-            BlockTag::Latest => "latest_block",
-            BlockTag::Finalized => "finalized_block",
-            BlockTag::Safe => "safe_block",
-            BlockTag::Earliest => "earliest_block",
-        };
-        let row = sqlx::query("SELECT block_number FROM metadata WHERE key = $1")
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|r| from_i64(r.get::<i64, _>("block_number"))))
     }
 
     async fn resolve_tx_spec(
@@ -231,7 +257,7 @@ impl PostgresColdBackend {
             block_number: rr.get("block_number"),
             tx_index: rr.get("tx_index"),
             tx_type: rr.get::<i32, _>("tx_type") as i16,
-            success: rr.get::<bool, _>("success"),
+            success: rr.get::<i32, _>("success") != 0,
             cumulative_gas_used: rr.get("cumulative_gas_used"),
         };
 
@@ -329,7 +355,7 @@ impl PostgresColdBackend {
             .bind(tr.tx_index)
             .bind(&tr.tx_hash)
             .bind(tr.tx_type as i32)
-            .bind(tr.sig_y_parity)
+            .bind(tr.sig_y_parity as i32)
             .bind(&tr.sig_r)
             .bind(&tr.sig_s)
             .bind(tr.chain_id)
@@ -359,7 +385,7 @@ impl PostgresColdBackend {
             .bind(rr.block_number)
             .bind(rr.tx_index)
             .bind(rr.tx_type as i32)
-            .bind(rr.success)
+            .bind(rr.success as i32)
             .bind(rr.cumulative_gas_used)
             .execute(&mut *tx)
             .await?;
@@ -468,13 +494,13 @@ impl PostgresColdBackend {
 }
 
 /// Convert a sqlx row to a TxRow.
-fn row_to_tx_row(r: &sqlx::postgres::PgRow) -> TxRow {
+fn row_to_tx_row(r: &sqlx::any::AnyRow) -> TxRow {
     TxRow {
         block_number: r.get("block_number"),
         tx_index: r.get("tx_index"),
         tx_hash: r.get("tx_hash"),
         tx_type: r.get::<i32, _>("tx_type") as i16,
-        sig_y_parity: r.get("sig_y_parity"),
+        sig_y_parity: r.get::<i32, _>("sig_y_parity") != 0,
         sig_r: r.get("sig_r"),
         sig_s: r.get("sig_s"),
         chain_id: r.get("chain_id"),
@@ -493,7 +519,7 @@ fn row_to_tx_row(r: &sqlx::postgres::PgRow) -> TxRow {
     }
 }
 
-fn row_to_signet_event_row(r: &sqlx::postgres::PgRow) -> SignetEventRow {
+fn row_to_signet_event_row(r: &sqlx::any::AnyRow) -> SignetEventRow {
     SignetEventRow {
         block_number: r.get("block_number"),
         event_index: r.get("event_index"),
@@ -512,7 +538,7 @@ fn row_to_signet_event_row(r: &sqlx::postgres::PgRow) -> SignetEventRow {
     }
 }
 
-fn row_to_zenith_header_row(r: &sqlx::postgres::PgRow) -> ZenithHeaderRow {
+fn row_to_zenith_header_row(r: &sqlx::any::AnyRow) -> ZenithHeaderRow {
     ZenithHeaderRow {
         block_number: r.get("block_number"),
         host_block_number: r.get("host_block_number"),
@@ -523,7 +549,7 @@ fn row_to_zenith_header_row(r: &sqlx::postgres::PgRow) -> ZenithHeaderRow {
     }
 }
 
-impl ColdStorage for PostgresColdBackend {
+impl ColdStorage for SqlColdBackend {
     async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<Header>> {
         let Some(block_num) = self.resolve_header_spec(spec).await? else {
             return Ok(None);
@@ -616,7 +642,7 @@ impl ColdStorage for PostgresColdBackend {
                 block_number: rr.get("block_number"),
                 tx_index: tx_idx,
                 tx_type: rr.get::<i32, _>("tx_type") as i16,
-                success: rr.get::<bool, _>("success"),
+                success: rr.get::<i32, _>("success") != 0,
                 cumulative_gas_used: rr.get("cumulative_gas_used"),
             };
 
@@ -738,7 +764,12 @@ impl ColdStorage for PostgresColdBackend {
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
-        self.resolve_tag(BlockTag::Latest).await.map_err(ColdStorageError::from)
+        let row = sqlx::query("SELECT block_number FROM metadata WHERE key = $1")
+            .bind("latest_block")
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(SqlColdError::from)?;
+        Ok(row.map(|r| from_i64(r.get::<i64, _>("block_number"))))
     }
 
     async fn append_block(&self, data: BlockData) -> ColdResult<()> {
@@ -825,13 +856,18 @@ mod tests {
     use signet_cold::conformance::conformance;
 
     #[tokio::test]
-    async fn pg_backend_conformance() {
+    async fn sqlite_conformance() {
+        let backend = SqlColdBackend::connect("sqlite::memory:").await.unwrap();
+        conformance(&backend).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pg_conformance() {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             eprintln!("skipping pg conformance: DATABASE_URL not set");
             return;
         };
-        let pool = PgPool::connect(&url).await.unwrap();
-        let backend = PostgresColdBackend::new(pool).await.unwrap();
+        let backend = SqlColdBackend::connect(&url).await.unwrap();
         conformance(&backend).await.unwrap();
     }
 }

@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     tx_index                  BIGINT NOT NULL,
     tx_hash                   BYTEA NOT NULL,
     tx_type                   INTEGER NOT NULL,
-    sig_y_parity              BOOLEAN NOT NULL,
+    sig_y_parity              INTEGER NOT NULL,
     sig_r                     BYTEA NOT NULL,
     sig_s                     BYTEA NOT NULL,
     chain_id                  BIGINT,
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS receipts (
     block_number              BIGINT NOT NULL,
     tx_index                  BIGINT NOT NULL,
     tx_type                   INTEGER NOT NULL,
-    success                   BOOLEAN NOT NULL,
+    success                   INTEGER NOT NULL,
     cumulative_gas_used       BIGINT NOT NULL,
     PRIMARY KEY (block_number, tx_index)
 );
