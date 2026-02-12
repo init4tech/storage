@@ -5,8 +5,8 @@
 //! database environment from `signet-hot-mdbx`.
 
 use crate::{
-    ColdBlockHashIndex, ColdHeaders, ColdMetadata, ColdReceipts, ColdSignetEvents,
-    ColdTransactions, ColdTxHashIndex, ColdZenithHeaders, MdbxColdError, MetadataKey,
+    ColdBlockHashIndex, ColdHeaders, ColdReceipts, ColdSignetEvents, ColdTransactions,
+    ColdTxHashIndex, ColdZenithHeaders, MdbxColdError,
 };
 use alloy::{consensus::Header, primitives::BlockNumber};
 use signet_cold::{
@@ -93,12 +93,6 @@ impl MdbxColdBackend {
                 ColdTxHashIndex::INT_KEY,
             ),
             (
-                ColdMetadata::NAME,
-                ColdMetadata::DUAL_KEY_SIZE,
-                ColdMetadata::FIXED_VAL_SIZE,
-                ColdMetadata::INT_KEY,
-            ),
-            (
                 ColdTransactions::NAME,
                 ColdTransactions::DUAL_KEY_SIZE,
                 ColdTransactions::FIXED_VAL_SIZE,
@@ -122,11 +116,6 @@ impl MdbxColdBackend {
 
         tx.raw_commit()?;
         Ok(())
-    }
-
-    fn get_metadata(&self, key: MetadataKey) -> Result<Option<BlockNumber>, MdbxColdError> {
-        let tx = self.env.tx()?;
-        Ok(TableTraverse::<ColdMetadata, _>::exact(&mut tx.new_cursor::<ColdMetadata>()?, &key)?)
     }
 
     fn get_header_inner(&self, spec: HeaderSpecifier) -> Result<Option<Header>, MdbxColdError> {
@@ -359,16 +348,6 @@ impl MdbxColdBackend {
             tx.queue_put::<ColdZenithHeaders>(&block, zh)?;
         }
 
-        // Update block bounds
-        let current_latest: Option<BlockNumber> = TableTraverse::<ColdMetadata, _>::exact(
-            &mut tx.new_cursor::<ColdMetadata>()?,
-            &MetadataKey::LatestBlock,
-        )?;
-        tx.queue_put::<ColdMetadata>(
-            &MetadataKey::LatestBlock,
-            &current_latest.map_or(block, |prev| prev.max(block)),
-        )?;
-
         tx.raw_commit()?;
         Ok(())
     }
@@ -418,22 +397,6 @@ impl MdbxColdBackend {
             tx.clear_k1_for::<ColdReceipts>(block_num)?;
             tx.clear_k1_for::<ColdSignetEvents>(block_num)?;
             tx.queue_delete::<ColdZenithHeaders>(block_num)?;
-        }
-
-        // Update latest block
-        {
-            let mut cursor = tx.new_cursor::<ColdHeaders>()?;
-            match KvTraverse::<_>::last(&mut cursor)? {
-                Some((key, _)) => {
-                    tx.queue_put::<ColdMetadata>(
-                        &MetadataKey::LatestBlock,
-                        &BlockNumber::decode_key(&key)?,
-                    )?;
-                }
-                None => {
-                    tx.queue_delete::<ColdMetadata>(&MetadataKey::LatestBlock)?;
-                }
-            }
         }
 
         tx.raw_commit()?;
@@ -575,7 +538,14 @@ impl ColdStorage for MdbxColdBackend {
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
-        Ok(self.get_metadata(MetadataKey::LatestBlock)?)
+        let tx = self.env.tx().map_err(MdbxColdError::from)?;
+        let mut cursor = tx.new_cursor::<ColdHeaders>().map_err(MdbxColdError::from)?;
+        let latest = KvTraverse::<_>::last(&mut cursor)
+            .map_err(MdbxColdError::from)?
+            .map(|(key, _)| BlockNumber::decode_key(&key))
+            .transpose()
+            .map_err(MdbxColdError::from)?;
+        Ok(latest)
     }
 
     async fn get_receipt_with_context(

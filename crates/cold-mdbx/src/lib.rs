@@ -16,10 +16,6 @@
 //! - [`ColdBlockHashIndex`]: Maps block hash to block number.
 //! - [`ColdTxHashIndex`]: Maps transaction hash to (block number, tx index).
 //!
-//! ## Metadata Tables
-//!
-//! - [`ColdMetadata`]: Storage metadata (latest block, finalized, safe, earliest).
-//!
 //! # Feature Flags
 //!
 //! - **`test-utils`**: Propagates `signet-cold/test-utils` for conformance
@@ -42,8 +38,8 @@ pub use error::MdbxColdError;
 
 mod tables;
 pub use tables::{
-    ColdBlockHashIndex, ColdHeaders, ColdMetadata, ColdReceipts, ColdSignetEvents,
-    ColdTransactions, ColdTxHashIndex, ColdZenithHeaders, MetadataKey,
+    ColdBlockHashIndex, ColdHeaders, ColdReceipts, ColdSignetEvents, ColdTransactions,
+    ColdTxHashIndex, ColdZenithHeaders,
 };
 
 mod backend;

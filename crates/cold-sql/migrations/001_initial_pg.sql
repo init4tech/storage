@@ -106,8 +106,3 @@ CREATE TABLE IF NOT EXISTS zenith_headers (
     reward_address            BYTEA NOT NULL,
     block_data_hash           BYTEA NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS metadata (
-    key                       TEXT PRIMARY KEY NOT NULL,
-    block_number              BIGINT NOT NULL
-);
