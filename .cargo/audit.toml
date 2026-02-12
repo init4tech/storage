@@ -11,4 +11,8 @@ ignore = [
 
     # `paste` is unmaintained; transitive dep via revm's `ark-ff` and alloy's `syn-solidity`.
     "RUSTSEC-2024-0436",
+
+    # `rsa` Marvin Attack; transitive dep via `sqlx-macros-core` -> `sqlx-mysql`. The `mysql`
+    # feature is not enabled, so `sqlx-mysql` is never compiled — it only appears in Cargo.lock.
+    "RUSTSEC-2023-0071",
 ]
