@@ -51,7 +51,9 @@ impl BlockData {
 /// All data needed to build a complete RPC receipt response.
 ///
 /// Bundles a [`Confirmed`] receipt with its transaction, block header,
-/// and the prior cumulative gas (needed to compute per-tx `gas_used`).
+/// the prior cumulative gas (needed to compute per-tx `gas_used`),
+/// and the index of this receipt's first log among all logs in the block
+/// (needed for `logIndex` in RPC responses).
 #[derive(Debug, Clone)]
 pub struct ReceiptContext {
     /// The block header.
@@ -63,6 +65,9 @@ pub struct ReceiptContext {
     /// Cumulative gas used by all preceding transactions in the block.
     /// Zero for the first transaction.
     pub prior_cumulative_gas: u64,
+    /// Index of this receipt's first log among all logs in the block.
+    /// Equal to the sum of log counts from all preceding receipts.
+    pub first_log_index: u64,
 }
 
 impl ReceiptContext {
@@ -72,8 +77,9 @@ impl ReceiptContext {
         transaction: TransactionSigned,
         receipt: Confirmed<Receipt>,
         prior_cumulative_gas: u64,
+        first_log_index: u64,
     ) -> Self {
-        Self { header, transaction, receipt, prior_cumulative_gas }
+        Self { header, transaction, receipt, prior_cumulative_gas, first_log_index }
     }
 }
 
@@ -197,7 +203,8 @@ pub trait ColdStorage: Send + Sync + 'static {
     /// Get a receipt with all context needed for RPC responses.
     ///
     /// Returns the receipt, its transaction, the block header, confirmation
-    /// metadata, and the cumulative gas used by preceding transactions.
+    /// metadata, the cumulative gas used by preceding transactions, and the
+    /// index of this receipt's first log among all logs in the block.
     /// Returns `None` if the receipt does not exist.
     ///
     /// The default implementation composes existing trait methods. Backends
@@ -223,16 +230,18 @@ pub trait ColdStorage: Send + Sync + 'static {
                 return Ok(None);
             };
 
-            let prior_cumulative_gas = if index > 0 {
-                self.get_receipt(ReceiptSpecifier::BlockAndIndex { block, index: index - 1 })
-                    .await?
-                    .map(|r| r.into_inner().inner.cumulative_gas_used)
-                    .unwrap_or(0)
-            } else {
-                0
-            };
+            let receipts = self.get_receipts_in_block(block).await?;
+            let prior = &receipts[..index as usize];
+            let prior_cumulative_gas = prior.last().map_or(0, |r| r.inner.cumulative_gas_used);
+            let first_log_index = prior.iter().map(|r| r.inner.logs.len() as u64).sum();
 
-            Ok(Some(ReceiptContext::new(header, tx.into_inner(), receipt, prior_cumulative_gas)))
+            Ok(Some(ReceiptContext::new(
+                header,
+                tx.into_inner(),
+                receipt,
+                prior_cumulative_gas,
+                first_log_index,
+            )))
         }
     }
 
