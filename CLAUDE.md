@@ -44,6 +44,8 @@ Common pattern across crates:
 - ALWAYS run clippy with both `--all-features` and `--no-default-features`.
 - ALWAYS run `cargo +nightly fmt`.
 - Run tests per-crate (`-p <crate>`) before running repo-wide.
+- For `signet-cold-sql`: ALWAYS run `./scripts/test-postgres.sh` to verify
+  the PostgreSQL backend against the conformance suite.
 
 ## Research
 
