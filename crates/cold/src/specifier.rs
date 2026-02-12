@@ -3,7 +3,7 @@
 //! These types define how to locate data in cold storage, supporting
 //! the standard Ethereum JSON-RPC lookup patterns.
 
-use alloy::primitives::{Address, B256, BlockNumber};
+use alloy::primitives::{Address, B256, BlockNumber, Log};
 
 /// Specifier for header lookups.
 #[derive(Debug, Clone, Copy)]
@@ -137,4 +137,20 @@ pub struct LogFilter {
     pub address: Option<Vec<Address>>,
     /// Topic filters for positions 0–3.
     pub topics: [Option<Vec<B256>>; 4],
+}
+
+impl LogFilter {
+    /// Returns `true` if the given log matches this filter's address and
+    /// topic criteria. Block range is **not** checked.
+    pub fn matches_log(&self, log: &Log) -> bool {
+        if let Some(ref addrs) = self.address
+            && !addrs.contains(&log.address)
+        {
+            return false;
+        }
+        self.topics.iter().enumerate().all(|(i, topic_filter)| {
+            let Some(acceptable) = topic_filter else { return true };
+            log.topics().get(i).is_some_and(|actual| acceptable.contains(actual))
+        })
+    }
 }

@@ -150,78 +150,6 @@ impl SqlColdBackend {
         .transpose()
     }
 
-    async fn fetch_block_hash(
-        &self,
-        block_num: BlockNumber,
-    ) -> Result<Option<alloy::primitives::B256>, SqlColdError> {
-        let bn = to_i64(block_num);
-        let row = sqlx::query("SELECT block_hash FROM headers WHERE block_number = $1")
-            .bind(bn)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|r| {
-            let bytes: Vec<u8> = r.get("block_hash");
-            alloy::primitives::B256::from_slice(&bytes)
-        }))
-    }
-
-    async fn fetch_tx_by_location(
-        &self,
-        block: BlockNumber,
-        index: u64,
-    ) -> Result<Option<TransactionSigned>, SqlColdError> {
-        let bn = to_i64(block);
-        let idx = to_i64(index);
-        let row =
-            sqlx::query("SELECT * FROM transactions WHERE block_number = $1 AND tx_index = $2")
-                .bind(bn)
-                .bind(idx)
-                .fetch_optional(&self.pool)
-                .await?;
-
-        row.map(|r| row_to_tx_row(&r).into_tx()).transpose()
-    }
-
-    async fn fetch_receipt_by_location(
-        &self,
-        block: BlockNumber,
-        index: u64,
-    ) -> Result<Option<Receipt>, SqlColdError> {
-        let bn = to_i64(block);
-        let idx = to_i64(index);
-
-        let receipt_row =
-            sqlx::query("SELECT * FROM receipts WHERE block_number = $1 AND tx_index = $2")
-                .bind(bn)
-                .bind(idx)
-                .fetch_optional(&self.pool)
-                .await?;
-
-        let Some(rr) = receipt_row else {
-            return Ok(None);
-        };
-
-        let receipt = ReceiptRow {
-            block_number: rr.get("block_number"),
-            tx_index: rr.get("tx_index"),
-            tx_type: rr.get::<i32, _>("tx_type") as i16,
-            success: rr.get::<i32, _>("success") != 0,
-            cumulative_gas_used: rr.get("cumulative_gas_used"),
-        };
-
-        let log_rows = sqlx::query(
-            "SELECT * FROM logs WHERE block_number = $1 AND tx_index = $2 ORDER BY log_index",
-        )
-        .bind(bn)
-        .bind(idx)
-        .fetch_all(&self.pool)
-        .await?;
-
-        let logs = log_rows.into_iter().map(|r| row_to_log_row(&r)).collect();
-
-        receipt_from_rows(receipt, logs).map(Some)
-    }
-
     // ========================================================================
     // Write helpers
     // ========================================================================
@@ -660,10 +588,7 @@ impl ColdStorage for SqlColdBackend {
         let mut logs_by_tx: std::collections::BTreeMap<i64, Vec<LogRow>> =
             std::collections::BTreeMap::new();
         for r in all_log_rows {
-            logs_by_tx
-                .entry(r.get::<i64, _>("tx_index"))
-                .or_default()
-                .push(row_to_log_row(&r));
+            logs_by_tx.entry(r.get::<i64, _>("tx_index")).or_default().push(row_to_log_row(&r));
         }
 
         receipt_rows

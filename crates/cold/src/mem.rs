@@ -77,19 +77,6 @@ impl MemColdBackendInner {
     }
 }
 
-/// Check whether a log matches the address and topic filters.
-fn matches_log_filter(log: &alloy::primitives::Log, filter: &LogFilter) -> bool {
-    if let Some(ref addrs) = filter.address
-        && !addrs.contains(&log.address)
-    {
-        return false;
-    }
-    filter.topics.iter().enumerate().all(|(i, topic_filter)| {
-        let Some(acceptable) = topic_filter else { return true };
-        log.topics().get(i).is_some_and(|actual| acceptable.contains(actual))
-    })
-}
-
 impl ColdStorage for MemColdBackend {
     async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<Header>> {
         let inner = self.inner.read().await;
@@ -225,7 +212,7 @@ impl ColdStorage for MemColdBackend {
                     txs.and_then(|ts| ts.get(tx_idx)).map(|t| *t.tx_hash()).unwrap_or_default();
 
                 for (log_idx, log) in receipt.inner.logs.iter().enumerate() {
-                    if matches_log_filter(log, &filter) {
+                    if filter.matches_log(log) {
                         results.push(RichLog {
                             log: log.clone(),
                             block_number: block_num,

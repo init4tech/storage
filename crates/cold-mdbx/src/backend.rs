@@ -403,6 +403,62 @@ impl MdbxColdBackend {
         Ok(())
     }
 
+    fn get_logs_inner(
+        &self,
+        filter: signet_cold::LogFilter,
+    ) -> Result<Vec<signet_cold::RichLog>, MdbxColdError> {
+        let tx = self.env.tx()?;
+        let mut results = Vec::new();
+
+        for block_num in filter.from_block..=filter.to_block {
+            let Some(header) = TableTraverse::<ColdHeaders, _>::exact(
+                &mut tx.new_cursor::<ColdHeaders>()?,
+                &block_num,
+            )?
+            else {
+                continue;
+            };
+            let block_hash = header.hash_slow();
+            let mut block_log_index = 0u64;
+
+            // Walk receipts by index using exact_dual lookups.
+            for tx_idx in 0u64.. {
+                let Some(receipt) = DualTableTraverse::<ColdReceipts, _>::exact_dual(
+                    &mut tx.new_cursor::<ColdReceipts>()?,
+                    &block_num,
+                    &tx_idx,
+                )?
+                else {
+                    break;
+                };
+                let tx_hash = DualTableTraverse::<ColdTransactions, _>::exact_dual(
+                    &mut tx.new_cursor::<ColdTransactions>()?,
+                    &block_num,
+                    &tx_idx,
+                )?
+                .map(|t: TransactionSigned| *t.hash())
+                .unwrap_or_default();
+
+                for (log_idx, log) in receipt.inner.logs.iter().enumerate() {
+                    if filter.matches_log(log) {
+                        results.push(signet_cold::RichLog {
+                            log: log.clone(),
+                            block_number: block_num,
+                            block_hash,
+                            tx_hash,
+                            tx_index: tx_idx,
+                            block_log_index: block_log_index + log_idx as u64,
+                            tx_log_index: log_idx as u64,
+                        });
+                    }
+                }
+                block_log_index += receipt.inner.logs.len() as u64;
+            }
+        }
+
+        Ok(results)
+    }
+
     fn get_receipt_with_context_inner(
         &self,
         spec: ReceiptSpecifier,
@@ -540,6 +596,13 @@ impl ColdStorage for MdbxColdBackend {
             }
         };
         Ok(headers)
+    }
+
+    async fn get_logs(
+        &self,
+        filter: signet_cold::LogFilter,
+    ) -> ColdResult<Vec<signet_cold::RichLog>> {
+        Ok(self.get_logs_inner(filter)?)
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
