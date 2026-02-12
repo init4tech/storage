@@ -4,51 +4,9 @@
 //! the [`Table`], [`SingleKey`], and [`DualKey`] traits.
 
 use alloy::{consensus::Header, primitives::B256, primitives::BlockNumber};
-use signet_hot::ser::{DeserError, KeySer, MAX_KEY_SIZE};
+use signet_hot::ser::KeySer;
 use signet_hot::tables::{DualKey, SingleKey, Table};
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned, TxLocation};
-
-// ============================================================================
-// Metadata Key Enum
-// ============================================================================
-
-/// Keys for the cold storage metadata table.
-///
-/// These are used to store semantic block references like "latest" or
-/// "finalized" that need to be resolved to actual block numbers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(u8)]
-pub enum MetadataKey {
-    /// The latest (most recent) block number stored.
-    LatestBlock = 0,
-}
-
-impl TryFrom<u8> for MetadataKey {
-    type Error = DeserError;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::LatestBlock),
-            _ => Err(DeserError::String(format!("Invalid MetadataKey value: {}", value))),
-        }
-    }
-}
-
-impl KeySer for MetadataKey {
-    const SIZE: usize = 1;
-
-    fn encode_key<'a: 'c, 'b: 'c, 'c>(&'a self, buf: &'b mut [u8; MAX_KEY_SIZE]) -> &'c [u8] {
-        buf[0] = *self as u8;
-        &buf[..1]
-    }
-
-    fn decode_key(data: &[u8]) -> Result<Self, DeserError> {
-        if data.is_empty() {
-            return Err(DeserError::InsufficientData { needed: 1, available: 0 });
-        }
-        MetadataKey::try_from(data[0])
-    }
-}
 
 // ============================================================================
 // Primary Data Tables
@@ -189,24 +147,6 @@ impl Table for ColdTxHashIndex {
 
 impl SingleKey for ColdTxHashIndex {}
 
-// ============================================================================
-// Metadata Table
-// ============================================================================
-
-/// Cold storage metadata.
-///
-/// Keys: `LatestBlock(0)`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ColdMetadata;
-
-impl Table for ColdMetadata {
-    const NAME: &'static str = "ColdMetadata";
-    type Key = MetadataKey;
-    type Value = BlockNumber;
-}
-
-impl SingleKey for ColdMetadata {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,7 +160,6 @@ mod tests {
         assert_eq!(ColdZenithHeaders::NAME, "ColdZenithHeaders");
         assert_eq!(ColdBlockHashIndex::NAME, "ColdBlockHashIndex");
         assert_eq!(ColdTxHashIndex::NAME, "ColdTxHashIndex");
-        assert_eq!(ColdMetadata::NAME, "ColdMetadata");
     }
 
     #[test]
@@ -232,7 +171,6 @@ mod tests {
         assert_single_key::<ColdZenithHeaders>();
         assert_single_key::<ColdBlockHashIndex>();
         assert_single_key::<ColdTxHashIndex>();
-        assert_single_key::<ColdMetadata>();
     }
 
     #[test]
@@ -257,7 +195,6 @@ mod tests {
         // Non-int_key tables should have INT_KEY = false
         const { assert!(!ColdBlockHashIndex::INT_KEY) };
         const { assert!(!ColdTxHashIndex::INT_KEY) };
-        const { assert!(!ColdMetadata::INT_KEY) };
     }
 
     #[test]
@@ -268,28 +205,8 @@ mod tests {
         // ColdBlockHashIndex has BlockNumber (u64) = 8 bytes
         assert_eq!(ColdBlockHashIndex::FIXED_VAL_SIZE, Some(8));
 
-        // ColdMetadata also has BlockNumber (u64) = 8 bytes
-        assert_eq!(ColdMetadata::FIXED_VAL_SIZE, Some(8));
-
         // Variable-size value tables should not have fixed value size
         assert_eq!(ColdHeaders::FIXED_VAL_SIZE, None);
         assert_eq!(ColdZenithHeaders::FIXED_VAL_SIZE, None);
-    }
-
-    #[test]
-    fn test_metadata_key_try_from() {
-        assert_eq!(MetadataKey::try_from(0).unwrap(), MetadataKey::LatestBlock);
-        assert!(MetadataKey::try_from(1).is_err());
-        assert!(MetadataKey::try_from(255).is_err());
-    }
-
-    #[test]
-    fn test_metadata_key_ser_roundtrip() {
-        let mut buf = [0u8; MAX_KEY_SIZE];
-        let encoded = MetadataKey::LatestBlock.encode_key(&mut buf);
-        assert_eq!(encoded.len(), 1);
-
-        let decoded = MetadataKey::decode_key(encoded).unwrap();
-        assert_eq!(MetadataKey::LatestBlock, decoded);
     }
 }

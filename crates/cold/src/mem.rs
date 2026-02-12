@@ -43,9 +43,6 @@ struct MemColdBackendInner {
 
     /// Zenith headers indexed by block number.
     zenith_headers: BTreeMap<BlockNumber, DbZenithHeader>,
-
-    /// The latest (highest) block number in storage.
-    latest_block: Option<BlockNumber>,
 }
 
 /// In-memory cold storage backend.
@@ -203,7 +200,7 @@ impl ColdStorage for MemColdBackend {
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
         let inner = self.inner.read().await;
-        Ok(inner.latest_block)
+        Ok(inner.headers.last_key_value().map(|(k, _)| *k))
     }
 
     async fn append_block(&self, data: BlockData) -> ColdResult<()> {
@@ -234,9 +231,6 @@ impl ColdStorage for MemColdBackend {
         if let Some(zh) = data.zenith_header {
             inner.zenith_headers.insert(block, zh);
         }
-
-        // Update latest block
-        inner.latest_block = Some(inner.latest_block.map_or(block, |prev| prev.max(block)));
 
         Ok(())
     }
@@ -269,9 +263,6 @@ impl ColdStorage for MemColdBackend {
             inner.signet_events.remove(k);
             inner.zenith_headers.remove(k);
         }
-
-        // Update latest block
-        inner.latest_block = inner.headers.last_key_value().map(|(k, _)| *k);
 
         Ok(())
     }
