@@ -152,7 +152,7 @@ pub use request::{AppendBlockRequest, ColdReadRequest, ColdWriteRequest, Respond
 
 mod specifier;
 pub use specifier::{
-    BlockTag, HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
+    HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
     ZenithHeaderSpecifier,
 };
 

@@ -116,9 +116,6 @@ impl From<ExecutedBlock> for BlockData {
 ///   A read started before a write completes should not see partial data from
 ///   that write.
 ///
-/// - **Tag resolution**: `HeaderSpecifier::Tag` variants (Latest, Finalized,
-///   Safe, Earliest) must be resolved by the implementation. For simple
-///   backends, Latest/Finalized/Safe may all resolve to the same block.
 pub trait ColdStorage: Send + Sync + 'static {
     // --- Headers ---
 

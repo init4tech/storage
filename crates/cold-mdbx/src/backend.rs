@@ -10,7 +10,7 @@ use crate::{
 };
 use alloy::{consensus::Header, primitives::BlockNumber};
 use signet_cold::{
-    BlockData, BlockTag, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, ReceiptContext,
+    BlockData, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, ReceiptContext,
     ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use signet_hot::{
@@ -143,22 +143,6 @@ impl MdbxColdBackend {
                 };
                 n
             }
-            HeaderSpecifier::Tag(tag) => {
-                let key = match tag {
-                    BlockTag::Latest => MetadataKey::LatestBlock,
-                    BlockTag::Finalized => MetadataKey::FinalizedBlock,
-                    BlockTag::Safe => MetadataKey::SafeBlock,
-                    BlockTag::Earliest => MetadataKey::EarliestBlock,
-                };
-                let Some(n) = TableTraverse::<ColdMetadata, _>::exact(
-                    &mut tx.new_cursor::<ColdMetadata>()?,
-                    &key,
-                )?
-                else {
-                    return Ok(None);
-                };
-                n
-            }
         };
         Ok(TableTraverse::<ColdHeaders, _>::exact(
             &mut tx.new_cursor::<ColdHeaders>()?,
@@ -180,18 +164,6 @@ impl MdbxColdBackend {
                         &mut tx.new_cursor::<ColdBlockHashIndex>()?,
                         &h,
                     )?,
-                    HeaderSpecifier::Tag(tag) => {
-                        let key = match tag {
-                            BlockTag::Latest => MetadataKey::LatestBlock,
-                            BlockTag::Finalized => MetadataKey::FinalizedBlock,
-                            BlockTag::Safe => MetadataKey::SafeBlock,
-                            BlockTag::Earliest => MetadataKey::EarliestBlock,
-                        };
-                        TableTraverse::<ColdMetadata, _>::exact(
-                            &mut tx.new_cursor::<ColdMetadata>()?,
-                            &key,
-                        )?
-                    }
                 };
                 block_num
                     .map(|n| {
@@ -395,15 +367,6 @@ impl MdbxColdBackend {
         tx.queue_put::<ColdMetadata>(
             &MetadataKey::LatestBlock,
             &current_latest.map_or(block, |prev| prev.max(block)),
-        )?;
-
-        let current_earliest: Option<BlockNumber> = TableTraverse::<ColdMetadata, _>::exact(
-            &mut tx.new_cursor::<ColdMetadata>()?,
-            &MetadataKey::EarliestBlock,
-        )?;
-        tx.queue_put::<ColdMetadata>(
-            &MetadataKey::EarliestBlock,
-            &current_earliest.map_or(block, |prev| prev.min(block)),
         )?;
 
         tx.raw_commit()?;

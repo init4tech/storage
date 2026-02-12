@@ -3,23 +3,7 @@
 //! These types define how to locate data in cold storage, supporting
 //! the standard Ethereum JSON-RPC lookup patterns.
 
-use alloy::{
-    primitives::{B256, BlockNumber},
-    rpc::types::eth::BlockNumberOrTag,
-};
-
-/// Block tag for semantic block lookups.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BlockTag {
-    /// The most recent block.
-    Latest,
-    /// The most recent finalized block.
-    Finalized,
-    /// The most recent safe block.
-    Safe,
-    /// The earliest/genesis block.
-    Earliest,
-}
+use alloy::primitives::{B256, BlockNumber};
 
 /// Specifier for header lookups.
 #[derive(Debug, Clone, Copy)]
@@ -28,21 +12,6 @@ pub enum HeaderSpecifier {
     Number(BlockNumber),
     /// Lookup by block hash.
     Hash(B256),
-    /// Lookup by semantic tag.
-    Tag(BlockTag),
-}
-
-impl From<BlockNumberOrTag> for HeaderSpecifier {
-    fn from(value: BlockNumberOrTag) -> Self {
-        match value {
-            BlockNumberOrTag::Number(num) => Self::Number(num),
-            BlockNumberOrTag::Latest => Self::Tag(BlockTag::Latest),
-            BlockNumberOrTag::Finalized => Self::Tag(BlockTag::Finalized),
-            BlockNumberOrTag::Safe => Self::Tag(BlockTag::Safe),
-            BlockNumberOrTag::Earliest => Self::Tag(BlockTag::Earliest),
-            BlockNumberOrTag::Pending => Self::Tag(BlockTag::Latest), // Treat pending as latest
-        }
-    }
 }
 
 impl From<BlockNumber> for HeaderSpecifier {
@@ -54,12 +23,6 @@ impl From<BlockNumber> for HeaderSpecifier {
 impl From<B256> for HeaderSpecifier {
     fn from(hash: B256) -> Self {
         Self::Hash(hash)
-    }
-}
-
-impl From<BlockTag> for HeaderSpecifier {
-    fn from(tag: BlockTag) -> Self {
-        Self::Tag(tag)
     }
 }
 

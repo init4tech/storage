@@ -5,8 +5,7 @@
 //! a custom backend, call the test functions with your backend instance.
 
 use crate::{
-    BlockData, BlockTag, ColdResult, ColdStorage, HeaderSpecifier, ReceiptSpecifier,
-    TransactionSpecifier,
+    BlockData, ColdResult, ColdStorage, HeaderSpecifier, ReceiptSpecifier, TransactionSpecifier,
 };
 use alloy::{
     consensus::{Header, Receipt as AlloyReceipt, Signed, TxLegacy},
@@ -21,7 +20,6 @@ pub async fn conformance<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     test_empty_storage(backend).await?;
     test_append_and_read_header(backend).await?;
     test_header_hash_lookup(backend).await?;
-    test_header_tag_lookup(backend).await?;
     test_transaction_lookups(backend).await?;
     test_receipt_lookups(backend).await?;
     test_confirmation_metadata(backend).await?;
@@ -69,7 +67,6 @@ fn make_test_block_with_txs(block_number: BlockNumber, tx_count: usize) -> Block
 pub async fn test_empty_storage<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     assert!(backend.get_header(HeaderSpecifier::Number(0)).await?.is_none());
     assert!(backend.get_header(HeaderSpecifier::Hash(B256::ZERO)).await?.is_none());
-    assert!(backend.get_header(HeaderSpecifier::Tag(BlockTag::Latest)).await?.is_none());
     assert!(backend.get_latest_block().await?.is_none());
     assert!(backend.get_transactions_in_block(0).await?.is_empty());
     assert!(backend.get_receipts_in_block(0).await?.is_empty());
@@ -104,23 +101,6 @@ pub async fn test_header_hash_lookup<B: ColdStorage>(backend: &B) -> ColdResult<
     // Non-existent hash should return None
     let missing = backend.get_header(HeaderSpecifier::Hash(B256::ZERO)).await?;
     assert!(missing.is_none());
-
-    Ok(())
-}
-
-/// Test header lookup by tag.
-pub async fn test_header_tag_lookup<B: ColdStorage>(backend: &B) -> ColdResult<()> {
-    backend.append_block(make_test_block(50)).await?;
-    backend.append_block(make_test_block(51)).await?;
-    backend.append_block(make_test_block(52)).await?;
-
-    // Latest should return block 52
-    let latest = backend.get_header(HeaderSpecifier::Tag(BlockTag::Latest)).await?;
-    assert!(latest.is_some());
-
-    // Earliest should return block 50
-    let earliest = backend.get_header(HeaderSpecifier::Tag(BlockTag::Earliest)).await?;
-    assert!(earliest.is_some());
 
     Ok(())
 }

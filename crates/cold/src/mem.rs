@@ -4,7 +4,7 @@
 //! It is primarily intended for testing and development.
 
 use crate::{
-    BlockData, BlockTag, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, ReceiptSpecifier,
+    BlockData, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, ReceiptSpecifier,
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::{
@@ -90,15 +90,6 @@ impl ColdStorage for MemColdBackend {
                 .get(&h)
                 .and_then(|n| inner.headers.get(n))
                 .map(|s| Header::clone(s))),
-            HeaderSpecifier::Tag(tag) => match tag {
-                BlockTag::Latest | BlockTag::Finalized | BlockTag::Safe => Ok(inner
-                    .latest_block
-                    .and_then(|n| inner.headers.get(&n))
-                    .map(|s| Header::clone(s))),
-                BlockTag::Earliest => {
-                    Ok(inner.headers.first_key_value().map(|(_, s)| Header::clone(s)))
-                }
-            },
         }
     }
 
