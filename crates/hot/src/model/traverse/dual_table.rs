@@ -182,18 +182,31 @@ where
         let mut key1_buf = [0u8; MAX_KEY_SIZE];
         let key1_bytes = k1.encode_key(&mut key1_buf);
         let entry = DualKeyTraverse::next_dual_above(self, key1_bytes, &[])?;
-        let Some((found_k1, _, _)) = entry else {
+        let Some((found_k1, k2_raw, v_raw)) = entry else {
             return Ok(DualTableK2Iter::<'_, C, T, E> {
                 cursor: self,
                 done: true,
+                first_entry: None,
                 _marker: PhantomData,
             });
         };
-        // Decode the found k1 to check if it matches
         let decoded_k1 = T::decode_key(found_k1)?;
-        // If the found k1 doesn't match, we're done
-        let done = decoded_k1 != *k1;
-        Ok(DualTableK2Iter::<'_, C, T, E> { cursor: self, done, _marker: PhantomData })
+        if decoded_k1 != *k1 {
+            return Ok(DualTableK2Iter::<'_, C, T, E> {
+                cursor: self,
+                done: true,
+                first_entry: None,
+                _marker: PhantomData,
+            });
+        }
+        let k2 = T::decode_key2(k2_raw)?;
+        let v = T::decode_value(v_raw)?;
+        Ok(DualTableK2Iter::<'_, C, T, E> {
+            cursor: self,
+            done: false,
+            first_entry: Some((k2, v)),
+            _marker: PhantomData,
+        })
     }
 }
 

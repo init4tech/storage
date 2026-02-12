@@ -9,6 +9,7 @@ use super::{
 };
 use crate::tables::DualKey;
 use core::marker::PhantomData;
+use std::borrow::Cow;
 
 // ============================================================================
 // Raw Iterator Structs (for base traits)
@@ -110,6 +111,7 @@ where
 pub(crate) struct RawDualKeyK2Iter<'a, C, E> {
     pub(super) cursor: &'a mut C,
     pub(super) done: bool,
+    pub(super) first_entry: Option<(Vec<u8>, Vec<u8>)>,
     pub(super) _marker: PhantomData<fn() -> E>,
 }
 
@@ -123,6 +125,9 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
+        }
+        if let Some((k2, v)) = self.first_entry.take() {
+            return Some(Ok((Cow::Owned(k2), Cow::Owned(v))));
         }
         // SAFETY: Same rationale as RawKvIter
         let result = unsafe {
@@ -160,6 +165,7 @@ where
 {
     pub(super) cursor: &'a mut C,
     pub(super) done: bool,
+    pub(super) first_entry: Option<K2Value<T>>,
     pub(super) _marker: PhantomData<fn() -> (T, E)>,
 }
 
@@ -174,6 +180,9 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
+        }
+        if let Some(entry) = self.first_entry.take() {
+            return Some(Ok(entry));
         }
         match DualTableTraverse::<T, E>::next_k2(self.cursor) {
             Ok(Some((_k1, k2, v))) => Some(Ok((k2, v))),

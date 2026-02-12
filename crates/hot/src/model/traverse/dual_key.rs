@@ -122,12 +122,32 @@ pub trait DualKeyTraverse<E: HotKvReadError> {
     {
         // Position at first entry for this k1 (using empty slice as minimum k2)
         let entry = self.next_dual_above(k1, &[])?;
-        let Some((found_k1, _, _)) = entry else {
-            return Ok(RawDualKeyK2Iter { cursor: self, done: true, _marker: PhantomData });
+        let Some((found_k1, k2, v)) = entry else {
+            return Ok(RawDualKeyK2Iter {
+                cursor: self,
+                done: true,
+                first_entry: None,
+                _marker: PhantomData,
+            });
         };
         // If the found k1 doesn't match, we're done
-        let done = found_k1.as_ref() != k1;
-        Ok(RawDualKeyK2Iter { cursor: self, done, _marker: PhantomData })
+        if found_k1.as_ref() != k1 {
+            return Ok(RawDualKeyK2Iter {
+                cursor: self,
+                done: true,
+                first_entry: None,
+                _marker: PhantomData,
+            });
+        }
+        // Convert to owned before constructing the iterator to release the
+        // mutable borrow on self from `next_dual_above`.
+        let first = (k2.into_owned(), v.into_owned());
+        Ok(RawDualKeyK2Iter {
+            cursor: self,
+            done: false,
+            first_entry: Some(first),
+            _marker: PhantomData,
+        })
     }
 
     /// Position at first entry and return iterator yielding [`DualKeyItem`].

@@ -185,6 +185,60 @@ pub fn test_cursor_dual_navigation<T: HotKv>(hot_kv: &T) {
     assert_eq!(k1, addr2, "previous_k1() from addr3 should go to addr2");
 }
 
+/// Test `iter_k2` returns all entries for a given k1.
+///
+/// Writes 3 storage slots for a single address and verifies that `iter_k2`
+/// yields all 3 entries in order.
+pub fn test_cursor_iter_k2<T: HotKv>(hot_kv: &T) {
+    let addr = address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee01");
+
+    {
+        let writer = hot_kv.writer().unwrap();
+        writer.put_storage(&addr, &U256::from(10), &U256::from(100)).unwrap();
+        writer.put_storage(&addr, &U256::from(20), &U256::from(200)).unwrap();
+        writer.put_storage(&addr, &U256::from(30), &U256::from(300)).unwrap();
+        writer.commit().unwrap();
+    }
+
+    let reader = hot_kv.reader().unwrap();
+    let mut cursor = reader.traverse_dual::<tables::PlainStorageState>().unwrap();
+
+    let entries: Vec<_> = cursor.iter_k2(&addr).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(entries.len(), 3, "iter_k2 should return all 3 entries");
+    assert_eq!(entries[0], (U256::from(10), U256::from(100)));
+    assert_eq!(entries[1], (U256::from(20), U256::from(200)));
+    assert_eq!(entries[2], (U256::from(30), U256::from(300)));
+}
+
+/// Test `iter_k2` returns a single entry when only one exists.
+pub fn test_cursor_iter_k2_single<T: HotKv>(hot_kv: &T) {
+    let addr = address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee02");
+
+    {
+        let writer = hot_kv.writer().unwrap();
+        writer.put_storage(&addr, &U256::from(42), &U256::from(999)).unwrap();
+        writer.commit().unwrap();
+    }
+
+    let reader = hot_kv.reader().unwrap();
+    let mut cursor = reader.traverse_dual::<tables::PlainStorageState>().unwrap();
+
+    let entries: Vec<_> = cursor.iter_k2(&addr).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(entries.len(), 1, "iter_k2 should return the single entry");
+    assert_eq!(entries[0], (U256::from(42), U256::from(999)));
+}
+
+/// Test `iter_k2` returns empty iterator for a nonexistent k1.
+pub fn test_cursor_iter_k2_empty<T: HotKv>(hot_kv: &T) {
+    let missing = address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee03");
+
+    let reader = hot_kv.reader().unwrap();
+    let mut cursor = reader.traverse_dual::<tables::PlainStorageState>().unwrap();
+
+    let entries: Vec<_> = cursor.iter_k2(&missing).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert!(entries.is_empty(), "iter_k2 on nonexistent k1 should return empty");
+}
+
 /// Test cursor on table with single entry.
 pub fn test_cursor_single_entry<T: HotKv>(hot_kv: &T) {
     let addr = address!("0xdddddddddddddddddddddddddddddddddddddd01");

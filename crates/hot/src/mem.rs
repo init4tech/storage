@@ -461,11 +461,16 @@ impl<'a> DualKeyTraverse<MemKvError> for MemKvCursor<'a> {
     }
 
     fn next_k2<'b>(&'b mut self) -> Result<Option<RawDualKeyValue<'b>>, MemKvError> {
-        let current_key = self.current_key();
-        let (current_k1, current_k2) = MemKv::split_dual_key(&current_key);
+        let current_k1 = self.current_k1();
 
-        // scan forward until finding a new k2 for the same k1
-        DualKeyTraverse::next_dual_above(self, &current_k1, &current_k2)
+        // Advance strictly past current entry, then check k1 still matches
+        let Some((k1, k2, v)) = DualKeyTraverse::read_next(self)? else {
+            return Ok(None);
+        };
+        if k1.as_ref() != current_k1.as_slice() {
+            return Ok(None);
+        }
+        Ok(Some((k1, k2, v)))
     }
 
     fn last_of_k1<'b>(
@@ -1029,11 +1034,16 @@ impl<'a> DualKeyTraverse<MemKvError> for MemKvCursorMut<'a> {
     }
 
     fn next_k2<'b>(&'b mut self) -> Result<Option<RawDualKeyValue<'b>>, MemKvError> {
-        let current_key = self.current_key();
-        let (current_k1, current_k2) = MemKv::split_dual_key(&current_key);
+        let current_k1 = self.current_k1();
 
-        // scan forward until finding a new k2 for the same k1
-        DualKeyTraverse::next_dual_above(self, &current_k1, &current_k2)
+        // Advance strictly past current entry, then check k1 still matches
+        let Some((k1, k2, v)) = DualKeyTraverse::read_next(self)? else {
+            return Ok(None);
+        };
+        if k1.as_ref() != current_k1.as_slice() {
+            return Ok(None);
+        }
+        Ok(Some((k1, k2, v)))
     }
 
     fn last_of_k1<'b>(
