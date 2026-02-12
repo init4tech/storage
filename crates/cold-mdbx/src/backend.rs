@@ -443,23 +443,28 @@ impl MdbxColdBackend {
             return Ok(None);
         };
 
-        let prior_cumulative_gas = index
-            .checked_sub(1)
-            .map(|prev| {
-                DualTableTraverse::<ColdReceipts, _>::exact_dual(
-                    &mut tx.new_cursor::<ColdReceipts>()?,
-                    &block,
-                    &prev,
-                )
-            })
-            .transpose()?
-            .flatten()
-            .map(|r: Receipt| r.inner.cumulative_gas_used)
-            .unwrap_or(0);
+        let mut first_log_index = 0u64;
+        let mut prior_cumulative_gas = 0u64;
+        for i in 0..index {
+            if let Some(r) = DualTableTraverse::<ColdReceipts, _>::exact_dual(
+                &mut tx.new_cursor::<ColdReceipts>()?,
+                &block,
+                &i,
+            )? {
+                prior_cumulative_gas = r.inner.cumulative_gas_used;
+                first_log_index += r.inner.logs.len() as u64;
+            }
+        }
 
         let meta = ConfirmationMeta::new(block, header.hash_slow(), index);
         let confirmed_receipt = Confirmed::new(receipt, meta);
-        Ok(Some(ReceiptContext::new(header, transaction, confirmed_receipt, prior_cumulative_gas)))
+        Ok(Some(ReceiptContext::new(
+            header,
+            transaction,
+            confirmed_receipt,
+            prior_cumulative_gas,
+            first_log_index,
+        )))
     }
 }
 

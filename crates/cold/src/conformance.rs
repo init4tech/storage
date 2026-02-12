@@ -9,7 +9,7 @@ use crate::{
 };
 use alloy::{
     consensus::{Header, Receipt as AlloyReceipt, Signed, TxLegacy},
-    primitives::{B256, BlockNumber, Signature, TxKind, U256},
+    primitives::{B256, BlockNumber, Bytes, Log, Signature, TxKind, U256, address},
 };
 use signet_storage_types::{Receipt, TransactionSigned};
 
@@ -50,6 +50,23 @@ fn make_test_tx(nonce: u64) -> TransactionSigned {
 fn make_test_receipt() -> Receipt {
     Receipt {
         inner: AlloyReceipt { status: true.into(), ..Default::default() },
+        ..Default::default()
+    }
+}
+
+/// Create a test receipt with the given number of logs.
+fn make_test_receipt_with_logs(log_count: usize, cumulative_gas: u64) -> Receipt {
+    let logs = (0..log_count)
+        .map(|_| {
+            Log::new_unchecked(
+                address!("0x0000000000000000000000000000000000000001"),
+                vec![],
+                Bytes::new(),
+            )
+        })
+        .collect();
+    Receipt {
+        inner: AlloyReceipt { status: true.into(), cumulative_gas_used: cumulative_gas, logs },
         ..Default::default()
     }
 }
@@ -244,33 +261,53 @@ pub async fn test_latest_block_tracking<B: ColdStorage>(backend: &B) -> ColdResu
 
 /// Test get_receipt_with_context returns complete receipt context.
 pub async fn test_get_receipt_with_context<B: ColdStorage>(backend: &B) -> ColdResult<()> {
-    let block = make_test_block_with_txs(700, 3);
-    let expected_header = block.header.clone();
-    let tx_hash = *block.transactions[1].tx_hash();
+    // Block with 3 receipts having 2, 3, and 1 logs respectively.
+    let header = Header { number: 700, ..Default::default() };
+    let transactions: Vec<_> = (0..3).map(|i| make_test_tx(700 * 100 + i)).collect();
+    let receipts = vec![
+        make_test_receipt_with_logs(2, 21000),
+        make_test_receipt_with_logs(3, 42000),
+        make_test_receipt_with_logs(1, 63000),
+    ];
+    let block = BlockData::new(header.clone(), transactions.clone(), receipts, vec![], None);
+    let tx_hash = *transactions[1].tx_hash();
 
     backend.append_block(block).await?;
 
-    // Lookup by block+index
-    let ctx = backend
-        .get_receipt_with_context(ReceiptSpecifier::BlockAndIndex { block: 700, index: 1 })
-        .await?
-        .unwrap();
-    assert_eq!(ctx.header, expected_header);
-    assert_eq!(ctx.receipt.meta().block_number(), 700);
-    assert_eq!(ctx.receipt.meta().transaction_index(), 1);
-
-    // prior_cumulative_gas should equal receipt[0].cumulative_gas_used
+    // First receipt: prior_cumulative_gas=0, first_log_index=0
     let first = backend
         .get_receipt_with_context(ReceiptSpecifier::BlockAndIndex { block: 700, index: 0 })
         .await?
         .unwrap();
+    assert_eq!(first.header, header);
+    assert_eq!(first.receipt.meta().block_number(), 700);
+    assert_eq!(first.receipt.meta().transaction_index(), 0);
     assert_eq!(first.prior_cumulative_gas, 0);
-    assert_eq!(ctx.prior_cumulative_gas, first.receipt.inner().inner.cumulative_gas_used);
+    assert_eq!(first.first_log_index, 0);
+
+    // Second receipt: prior_cumulative_gas=21000, first_log_index=2
+    let second = backend
+        .get_receipt_with_context(ReceiptSpecifier::BlockAndIndex { block: 700, index: 1 })
+        .await?
+        .unwrap();
+    assert_eq!(second.receipt.meta().transaction_index(), 1);
+    assert_eq!(second.prior_cumulative_gas, 21000);
+    assert_eq!(second.first_log_index, 2);
+
+    // Third receipt: prior_cumulative_gas=42000, first_log_index=5 (2+3)
+    let third = backend
+        .get_receipt_with_context(ReceiptSpecifier::BlockAndIndex { block: 700, index: 2 })
+        .await?
+        .unwrap();
+    assert_eq!(third.receipt.meta().transaction_index(), 2);
+    assert_eq!(third.prior_cumulative_gas, 42000);
+    assert_eq!(third.first_log_index, 5);
 
     // Lookup by tx hash
     let by_hash =
         backend.get_receipt_with_context(ReceiptSpecifier::TxHash(tx_hash)).await?.unwrap();
     assert_eq!(by_hash.receipt.meta().transaction_index(), 1);
+    assert_eq!(by_hash.first_log_index, 2);
 
     // Non-existent returns None
     assert!(
