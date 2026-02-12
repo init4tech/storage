@@ -5,11 +5,14 @@
 //! a custom backend, call the test functions with your backend instance.
 
 use crate::{
-    BlockData, ColdResult, ColdStorage, HeaderSpecifier, ReceiptSpecifier, TransactionSpecifier,
+    BlockData, ColdResult, ColdStorage, HeaderSpecifier, LogFilter, ReceiptSpecifier,
+    TransactionSpecifier,
 };
 use alloy::{
     consensus::{Header, Receipt as AlloyReceipt, Signed, TxLegacy},
-    primitives::{B256, BlockNumber, Bytes, Log, Signature, TxKind, U256, address},
+    primitives::{
+        Address, B256, BlockNumber, Bytes, Log, LogData, Signature, TxKind, U256, address,
+    },
 };
 use signet_storage_types::{Receipt, TransactionSigned};
 
@@ -27,6 +30,7 @@ pub async fn conformance<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     test_batch_append(backend).await?;
     test_latest_block_tracking(backend).await?;
     test_get_receipt_with_context(backend).await?;
+    test_get_logs(backend).await?;
     Ok(())
 }
 
@@ -316,6 +320,180 @@ pub async fn test_get_receipt_with_context<B: ColdStorage>(backend: &B) -> ColdR
             .await?
             .is_none()
     );
+
+    Ok(())
+}
+
+/// Create a test log with the given address and topics.
+fn make_test_log(address: Address, topics: Vec<B256>, data: Vec<u8>) -> Log {
+    Log { address, data: LogData::new_unchecked(topics, Bytes::from(data)) }
+}
+
+/// Create a test receipt from explicit logs.
+fn make_receipt_from_logs(logs: Vec<Log>) -> Receipt {
+    Receipt {
+        inner: AlloyReceipt { status: true.into(), cumulative_gas_used: 21000, logs },
+        ..Default::default()
+    }
+}
+
+/// Create test block data with custom receipts (and matching dummy transactions).
+fn make_test_block_with_receipts(block_number: BlockNumber, receipts: Vec<Receipt>) -> BlockData {
+    let header = Header { number: block_number, ..Default::default() };
+    let transactions: Vec<_> =
+        (0..receipts.len()).map(|i| make_test_tx(block_number * 100 + i as u64)).collect();
+    BlockData::new(header, transactions, receipts, vec![], None)
+}
+
+/// Test get_logs with various filter combinations.
+pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
+    let addr_a = Address::with_last_byte(0xAA);
+    let addr_b = Address::with_last_byte(0xBB);
+    let topic0_transfer = B256::with_last_byte(0x01);
+    let topic0_approval = B256::with_last_byte(0x02);
+    let topic1_sender = B256::with_last_byte(0x10);
+    let topic1_other = B256::with_last_byte(0x11);
+
+    // Block 800: 2 txs, tx0 has 2 logs, tx1 has 1 log
+    let receipts_800 = vec![
+        make_receipt_from_logs(vec![
+            make_test_log(addr_a, vec![topic0_transfer, topic1_sender], vec![1]),
+            make_test_log(addr_b, vec![topic0_approval], vec![2]),
+        ]),
+        make_receipt_from_logs(vec![make_test_log(
+            addr_a,
+            vec![topic0_transfer, topic1_other],
+            vec![3],
+        )]),
+    ];
+    let block_800 = make_test_block_with_receipts(800, receipts_800);
+    let block_800_hash = block_800.header.hash_slow();
+    let tx0_hash_800 = *block_800.transactions[0].tx_hash();
+    let tx1_hash_800 = *block_800.transactions[1].tx_hash();
+
+    // Block 801: 1 tx, 1 log
+    let receipts_801 =
+        vec![make_receipt_from_logs(vec![make_test_log(addr_b, vec![topic0_transfer], vec![4])])];
+    let block_801 = make_test_block_with_receipts(801, receipts_801);
+
+    backend.append_block(block_800).await?;
+    backend.append_block(block_801).await?;
+
+    // --- Empty range returns empty ---
+    let empty = backend
+        .get_logs(LogFilter { from_block: 900, to_block: 999, ..Default::default() })
+        .await?;
+    assert!(empty.is_empty());
+
+    // --- All logs in range 800..=801 (no address/topic filter) ---
+    let all = backend
+        .get_logs(LogFilter { from_block: 800, to_block: 801, ..Default::default() })
+        .await?;
+    assert_eq!(all.len(), 4);
+    // Verify ordering and tx_log_index
+    assert_eq!((all[0].block_number, all[0].tx_index, all[0].tx_log_index), (800, 0, 0));
+    assert_eq!((all[1].block_number, all[1].tx_index, all[1].tx_log_index), (800, 0, 1));
+    assert_eq!((all[2].block_number, all[2].tx_index, all[2].tx_log_index), (800, 1, 0));
+    assert_eq!((all[3].block_number, all[3].tx_index, all[3].tx_log_index), (801, 0, 0));
+
+    // Verify block_log_index (absolute position within block)
+    // Block 800: tx0 has 2 logs (indices 0,1), tx1 has 1 log (index 2)
+    assert_eq!(all[0].block_log_index, 0);
+    assert_eq!(all[1].block_log_index, 1);
+    assert_eq!(all[2].block_log_index, 2);
+    // Block 801: tx0 has 1 log (index 0)
+    assert_eq!(all[3].block_log_index, 0);
+
+    // --- Metadata correctness ---
+    assert_eq!(all[0].block_hash, block_800_hash);
+    assert_eq!(all[0].tx_hash, tx0_hash_800);
+    assert_eq!(all[2].tx_hash, tx1_hash_800);
+
+    // --- Block range filtering ---
+    let only_800 = backend
+        .get_logs(LogFilter { from_block: 800, to_block: 800, ..Default::default() })
+        .await?;
+    assert_eq!(only_800.len(), 3);
+
+    // --- Single address filter ---
+    let addr_a_logs = backend
+        .get_logs(LogFilter {
+            from_block: 800,
+            to_block: 801,
+            address: Some(vec![addr_a]),
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(addr_a_logs.len(), 2);
+    assert!(addr_a_logs.iter().all(|l| l.log.address == addr_a));
+
+    // --- Multi-address filter ---
+    let both_addr = backend
+        .get_logs(LogFilter {
+            from_block: 800,
+            to_block: 801,
+            address: Some(vec![addr_a, addr_b]),
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(both_addr.len(), 4);
+
+    // --- Topic0 filter ---
+    let transfers = backend
+        .get_logs(LogFilter {
+            from_block: 800,
+            to_block: 801,
+            topics: [Some(vec![topic0_transfer]), None, None, None],
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(transfers.len(), 3);
+
+    // --- Topic0 multi-value (OR within position) ---
+    let transfer_or_approval = backend
+        .get_logs(LogFilter {
+            from_block: 800,
+            to_block: 801,
+            topics: [Some(vec![topic0_transfer, topic0_approval]), None, None, None],
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(transfer_or_approval.len(), 4);
+
+    // --- Multi-topic: topic0 AND topic1 ---
+    let specific = backend
+        .get_logs(LogFilter {
+            from_block: 800,
+            to_block: 801,
+            topics: [Some(vec![topic0_transfer]), Some(vec![topic1_sender]), None, None],
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(specific.len(), 1);
+    assert_eq!(specific[0].log.address, addr_a);
+    assert_eq!(specific[0].tx_log_index, 0);
+
+    // --- Topic1 filter with topic0 wildcard ---
+    let by_sender = backend
+        .get_logs(LogFilter {
+            from_block: 800,
+            to_block: 801,
+            topics: [None, Some(vec![topic1_sender]), None, None],
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(by_sender.len(), 1);
+
+    // --- Combined address + topic filter ---
+    let addr_a_transfers = backend
+        .get_logs(LogFilter {
+            from_block: 800,
+            to_block: 801,
+            address: Some(vec![addr_a]),
+            topics: [Some(vec![topic0_transfer]), None, None, None],
+        })
+        .await?;
+    assert_eq!(addr_a_transfers.len(), 2);
 
     Ok(())
 }

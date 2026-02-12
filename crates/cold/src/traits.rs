@@ -11,8 +11,8 @@ use signet_storage_types::{
 use std::future::Future;
 
 use super::{
-    ColdResult, Confirmed, HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier,
-    TransactionSpecifier, ZenithHeaderSpecifier,
+    ColdResult, Confirmed, HeaderSpecifier, LogFilter, ReceiptSpecifier, RichLog,
+    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 
 /// Data for appending a complete block to cold storage.
@@ -197,6 +197,14 @@ pub trait ColdStorage: Send + Sync + 'static {
 
     /// Get the latest block number in storage.
     fn get_latest_block(&self) -> impl Future<Output = ColdResult<Option<BlockNumber>>> + Send;
+
+    // --- Logs ---
+
+    /// Filter logs by block range, address, and topics.
+    ///
+    /// Follows `eth_getLogs` semantics: returns all logs matching the
+    /// filter criteria, ordered by (block_number, tx_index, log_index).
+    fn get_logs(&self, filter: LogFilter) -> impl Future<Output = ColdResult<Vec<RichLog>>> + Send;
 
     // --- Composite queries ---
 

@@ -150,9 +150,11 @@ pub use error::{ColdResult, ColdStorageError};
 mod request;
 pub use request::{AppendBlockRequest, ColdReadRequest, ColdWriteRequest, Responder};
 
+mod rich_log;
+pub use rich_log::RichLog;
 mod specifier;
 pub use specifier::{
-    HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
+    HeaderSpecifier, LogFilter, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
     ZenithHeaderSpecifier,
 };
 

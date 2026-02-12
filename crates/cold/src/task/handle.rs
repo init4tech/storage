@@ -11,8 +11,8 @@
 
 use crate::{
     AppendBlockRequest, BlockData, ColdReadRequest, ColdResult, ColdStorageError, ColdWriteRequest,
-    Confirmed, HeaderSpecifier, ReceiptContext, ReceiptSpecifier, SignetEventsSpecifier,
-    TransactionSpecifier, ZenithHeaderSpecifier,
+    Confirmed, HeaderSpecifier, LogFilter, ReceiptContext, ReceiptSpecifier, RichLog,
+    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::{
     consensus::Header,
@@ -255,6 +255,19 @@ impl ColdStorageReadHandle {
         end: BlockNumber,
     ) -> ColdResult<Vec<DbZenithHeader>> {
         self.get_zenith_headers(ZenithHeaderSpecifier::Range { start, end }).await
+    }
+
+    // ==========================================================================
+    // Logs
+    // ==========================================================================
+
+    /// Filter logs by block range, address, and topics.
+    ///
+    /// Follows `eth_getLogs` semantics. Returns all matching logs ordered
+    /// by (block_number, tx_index, log_index).
+    pub async fn get_logs(&self, filter: LogFilter) -> ColdResult<Vec<RichLog>> {
+        let (resp, rx) = oneshot::channel();
+        self.send(ColdReadRequest::GetLogs { filter, resp }, rx).await
     }
 
     // ==========================================================================

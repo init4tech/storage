@@ -4,8 +4,8 @@
 //! Reads and writes use separate channels with their own request types.
 
 use crate::{
-    BlockData, ColdStorageError, Confirmed, HeaderSpecifier, ReceiptContext, ReceiptSpecifier,
-    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdStorageError, Confirmed, HeaderSpecifier, LogFilter, ReceiptContext,
+    ReceiptSpecifier, RichLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::{consensus::Header, primitives::BlockNumber};
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned};
@@ -106,6 +106,15 @@ pub enum ColdReadRequest {
         spec: ZenithHeaderSpecifier,
         /// The response channel.
         resp: Responder<Vec<DbZenithHeader>>,
+    },
+
+    // --- Logs ---
+    /// Filter logs by block range, address, and topics.
+    GetLogs {
+        /// The log filter.
+        filter: LogFilter,
+        /// The response channel.
+        resp: Responder<Vec<RichLog>>,
     },
 
     // --- Metadata ---

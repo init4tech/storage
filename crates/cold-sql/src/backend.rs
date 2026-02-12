@@ -11,8 +11,8 @@ use crate::convert::{
 };
 use alloy::{consensus::Header, primitives::BlockNumber};
 use signet_cold::{
-    BlockData, ColdResult, ColdStorage, ColdStorageError, Confirmed, HeaderSpecifier,
-    ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdResult, ColdStorage, ColdStorageError, Confirmed, HeaderSpecifier, LogFilter,
+    ReceiptSpecifier, RichLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use signet_storage_types::{
     ConfirmationMeta, DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned,
@@ -148,6 +148,78 @@ impl SqlColdBackend {
             .into_header()
         })
         .transpose()
+    }
+
+    async fn fetch_block_hash(
+        &self,
+        block_num: BlockNumber,
+    ) -> Result<Option<alloy::primitives::B256>, SqlColdError> {
+        let bn = to_i64(block_num);
+        let row = sqlx::query("SELECT block_hash FROM headers WHERE block_number = $1")
+            .bind(bn)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| {
+            let bytes: Vec<u8> = r.get("block_hash");
+            alloy::primitives::B256::from_slice(&bytes)
+        }))
+    }
+
+    async fn fetch_tx_by_location(
+        &self,
+        block: BlockNumber,
+        index: u64,
+    ) -> Result<Option<TransactionSigned>, SqlColdError> {
+        let bn = to_i64(block);
+        let idx = to_i64(index);
+        let row =
+            sqlx::query("SELECT * FROM transactions WHERE block_number = $1 AND tx_index = $2")
+                .bind(bn)
+                .bind(idx)
+                .fetch_optional(&self.pool)
+                .await?;
+
+        row.map(|r| row_to_tx_row(&r).into_tx()).transpose()
+    }
+
+    async fn fetch_receipt_by_location(
+        &self,
+        block: BlockNumber,
+        index: u64,
+    ) -> Result<Option<Receipt>, SqlColdError> {
+        let bn = to_i64(block);
+        let idx = to_i64(index);
+
+        let receipt_row =
+            sqlx::query("SELECT * FROM receipts WHERE block_number = $1 AND tx_index = $2")
+                .bind(bn)
+                .bind(idx)
+                .fetch_optional(&self.pool)
+                .await?;
+
+        let Some(rr) = receipt_row else {
+            return Ok(None);
+        };
+
+        let receipt = ReceiptRow {
+            block_number: rr.get("block_number"),
+            tx_index: rr.get("tx_index"),
+            tx_type: rr.get::<i32, _>("tx_type") as i16,
+            success: rr.get::<i32, _>("success") != 0,
+            cumulative_gas_used: rr.get("cumulative_gas_used"),
+        };
+
+        let log_rows = sqlx::query(
+            "SELECT * FROM logs WHERE block_number = $1 AND tx_index = $2 ORDER BY log_index",
+        )
+        .bind(bn)
+        .bind(idx)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let logs = log_rows.into_iter().map(|r| row_to_log_row(&r)).collect();
+
+        receipt_from_rows(receipt, logs).map(Some)
     }
 
     // ========================================================================
@@ -370,6 +442,20 @@ fn row_to_signet_event_row(r: &sqlx::any::AnyRow) -> SignetEventRow {
     }
 }
 
+fn row_to_log_row(r: &sqlx::any::AnyRow) -> LogRow {
+    LogRow {
+        block_number: r.get("block_number"),
+        tx_index: r.get("tx_index"),
+        log_index: r.get("log_index"),
+        address: r.get("address"),
+        topic0: r.get("topic0"),
+        topic1: r.get("topic1"),
+        topic2: r.get("topic2"),
+        topic3: r.get("topic3"),
+        data: r.get("data"),
+    }
+}
+
 fn row_to_zenith_header_row(r: &sqlx::any::AnyRow) -> ZenithHeaderRow {
     ZenithHeaderRow {
         block_number: r.get("block_number"),
@@ -574,18 +660,10 @@ impl ColdStorage for SqlColdBackend {
         let mut logs_by_tx: std::collections::BTreeMap<i64, Vec<LogRow>> =
             std::collections::BTreeMap::new();
         for r in all_log_rows {
-            let tx_idx: i64 = r.get("tx_index");
-            logs_by_tx.entry(tx_idx).or_default().push(LogRow {
-                block_number: r.get("block_number"),
-                tx_index: tx_idx,
-                log_index: r.get("log_index"),
-                address: r.get("address"),
-                topic0: r.get("topic0"),
-                topic1: r.get("topic1"),
-                topic2: r.get("topic2"),
-                topic3: r.get("topic3"),
-                data: r.get("data"),
-            });
+            logs_by_tx
+                .entry(r.get::<i64, _>("tx_index"))
+                .or_default()
+                .push(row_to_log_row(&r));
         }
 
         receipt_rows
@@ -690,6 +768,104 @@ impl ColdStorage for SqlColdBackend {
         rows.into_iter()
             .map(|r| row_to_zenith_header_row(&r).into_zenith().map_err(ColdStorageError::from))
             .collect()
+    }
+
+    async fn get_logs(&self, filter: LogFilter) -> ColdResult<Vec<RichLog>> {
+        // Build dynamic SQL with positional $N placeholders.
+        // The correlated subquery computes block_log_index: the absolute
+        // position of each log among all logs in its block, leveraging the
+        // PK index on (block_number, tx_index, log_index).
+        let mut sql = String::from(
+            "SELECT l.*, h.block_hash, t.tx_hash, \
+               (SELECT COUNT(*) FROM logs l2 \
+                WHERE l2.block_number = l.block_number \
+                  AND (l2.tx_index < l.tx_index \
+                       OR (l2.tx_index = l.tx_index AND l2.log_index < l.log_index)) \
+               ) AS block_log_index \
+             FROM logs l \
+             JOIN headers h ON l.block_number = h.block_number \
+             JOIN transactions t ON l.block_number = t.block_number \
+               AND l.tx_index = t.tx_index \
+             WHERE l.block_number >= $1 AND l.block_number <= $2",
+        );
+        let mut params: Vec<Vec<u8>> = Vec::new();
+        let mut idx = 3u32;
+
+        // Address filter
+        if let Some(ref addrs) = filter.address {
+            if addrs.len() == 1 {
+                sql.push_str(&format!(" AND l.address = ${idx}"));
+                params.push(addrs[0].as_slice().to_vec());
+                idx += 1;
+            } else if !addrs.is_empty() {
+                let placeholders: String = addrs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("${}", idx + i as u32))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                sql.push_str(&format!(" AND l.address IN ({placeholders})"));
+                for addr in addrs {
+                    params.push(addr.as_slice().to_vec());
+                }
+                idx += addrs.len() as u32;
+            }
+        }
+
+        // Topic filters
+        let topic_cols = ["l.topic0", "l.topic1", "l.topic2", "l.topic3"];
+        for (i, topic_filter) in filter.topics.iter().enumerate() {
+            let Some(values) = topic_filter else { continue };
+            if values.is_empty() {
+                continue;
+            }
+            if values.len() == 1 {
+                sql.push_str(&format!(" AND {} = ${idx}", topic_cols[i]));
+                params.push(values[0].as_slice().to_vec());
+                idx += 1;
+            } else {
+                let placeholders: String = values
+                    .iter()
+                    .enumerate()
+                    .map(|(j, _)| format!("${}", idx + j as u32))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                sql.push_str(&format!(" AND {} IN ({placeholders})", topic_cols[i]));
+                for v in values {
+                    params.push(v.as_slice().to_vec());
+                }
+                idx += values.len() as u32;
+            }
+        }
+
+        sql.push_str(" ORDER BY l.block_number, l.tx_index, l.log_index");
+
+        // Bind parameters and execute.
+        let mut query =
+            sqlx::query(&sql).bind(to_i64(filter.from_block)).bind(to_i64(filter.to_block));
+        for param in &params {
+            query = query.bind(param.as_slice());
+        }
+
+        let rows = query.fetch_all(&self.pool).await.map_err(SqlColdError::from)?;
+
+        rows.into_iter()
+            .map(|r| {
+                let log = row_to_log_row(&r).into_log();
+                let block_number = from_i64(r.get::<i64, _>("block_number"));
+                let block_hash_bytes: Vec<u8> = r.get("block_hash");
+                let tx_hash_bytes: Vec<u8> = r.get("tx_hash");
+                Ok(RichLog {
+                    log,
+                    block_number,
+                    block_hash: alloy::primitives::B256::from_slice(&block_hash_bytes),
+                    tx_hash: alloy::primitives::B256::from_slice(&tx_hash_bytes),
+                    tx_index: from_i64(r.get::<i64, _>("tx_index")),
+                    block_log_index: from_i64(r.get::<i64, _>("block_log_index")),
+                    tx_log_index: from_i64(r.get::<i64, _>("log_index")),
+                })
+            })
+            .collect::<ColdResult<Vec<_>>>()
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {

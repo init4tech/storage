@@ -4,8 +4,8 @@
 //! It is primarily intended for testing and development.
 
 use crate::{
-    BlockData, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, ReceiptSpecifier,
-    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, LogFilter, ReceiptSpecifier,
+    RichLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::{
     consensus::{Header, Sealable},
@@ -75,6 +75,19 @@ impl MemColdBackendInner {
     fn confirmation_meta(&self, block: BlockNumber, index: u64) -> Option<ConfirmationMeta> {
         self.headers.get(&block).map(|h| ConfirmationMeta::new(block, h.hash(), index))
     }
+}
+
+/// Check whether a log matches the address and topic filters.
+fn matches_log_filter(log: &alloy::primitives::Log, filter: &LogFilter) -> bool {
+    if let Some(ref addrs) = filter.address
+        && !addrs.contains(&log.address)
+    {
+        return false;
+    }
+    filter.topics.iter().enumerate().all(|(i, topic_filter)| {
+        let Some(acceptable) = topic_filter else { return true };
+        log.topics().get(i).is_some_and(|actual| acceptable.contains(actual))
+    })
 }
 
 impl ColdStorage for MemColdBackend {
@@ -196,6 +209,39 @@ impl ColdStorage for MemColdBackend {
                 inner.zenith_headers.range(start..=end).map(|(_, h)| *h).collect()
             }
         })
+    }
+
+    async fn get_logs(&self, filter: LogFilter) -> ColdResult<Vec<RichLog>> {
+        let inner = self.inner.read().await;
+        let mut results = Vec::new();
+
+        for (&block_num, receipts) in inner.receipts.range(filter.from_block..=filter.to_block) {
+            let block_hash = inner.headers.get(&block_num).map(|h| h.hash()).unwrap_or_default();
+            let txs = inner.transactions.get(&block_num);
+            let mut first_log_index = 0u64;
+
+            for (tx_idx, receipt) in receipts.iter().enumerate() {
+                let tx_hash =
+                    txs.and_then(|ts| ts.get(tx_idx)).map(|t| *t.tx_hash()).unwrap_or_default();
+
+                for (log_idx, log) in receipt.inner.logs.iter().enumerate() {
+                    if matches_log_filter(log, &filter) {
+                        results.push(RichLog {
+                            log: log.clone(),
+                            block_number: block_num,
+                            block_hash,
+                            tx_hash,
+                            tx_index: tx_idx as u64,
+                            block_log_index: first_log_index + log_idx as u64,
+                            tx_log_index: log_idx as u64,
+                        });
+                    }
+                }
+                first_log_index += receipt.inner.logs.len() as u64;
+            }
+        }
+
+        Ok(results)
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
