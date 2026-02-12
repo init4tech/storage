@@ -21,12 +21,6 @@ use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSi
 pub enum MetadataKey {
     /// The latest (most recent) block number stored.
     LatestBlock = 0,
-    /// The finalized block number.
-    FinalizedBlock = 1,
-    /// The safe block number.
-    SafeBlock = 2,
-    /// The earliest block number stored.
-    EarliestBlock = 3,
 }
 
 impl TryFrom<u8> for MetadataKey {
@@ -35,9 +29,6 @@ impl TryFrom<u8> for MetadataKey {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::LatestBlock),
-            1 => Ok(Self::FinalizedBlock),
-            2 => Ok(Self::SafeBlock),
-            3 => Ok(Self::EarliestBlock),
             _ => Err(DeserError::String(format!("Invalid MetadataKey value: {}", value))),
         }
     }
@@ -202,9 +193,9 @@ impl SingleKey for ColdTxHashIndex {}
 // Metadata Table
 // ============================================================================
 
-/// Cold storage metadata with semantic block references.
+/// Cold storage metadata.
 ///
-/// Keys: `LatestBlock(0)`, `FinalizedBlock(1)`, `SafeBlock(2)`, `EarliestBlock(3)`
+/// Keys: `LatestBlock(0)`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ColdMetadata;
 
@@ -286,37 +277,19 @@ mod tests {
     }
 
     #[test]
-    fn test_metadata_key_ordering() {
-        // MetadataKey should have proper ordering for use as a key
-        assert!(MetadataKey::LatestBlock < MetadataKey::FinalizedBlock);
-        assert!(MetadataKey::FinalizedBlock < MetadataKey::SafeBlock);
-        assert!(MetadataKey::SafeBlock < MetadataKey::EarliestBlock);
-    }
-
-    #[test]
     fn test_metadata_key_try_from() {
         assert_eq!(MetadataKey::try_from(0).unwrap(), MetadataKey::LatestBlock);
-        assert_eq!(MetadataKey::try_from(1).unwrap(), MetadataKey::FinalizedBlock);
-        assert_eq!(MetadataKey::try_from(2).unwrap(), MetadataKey::SafeBlock);
-        assert_eq!(MetadataKey::try_from(3).unwrap(), MetadataKey::EarliestBlock);
-        assert!(MetadataKey::try_from(4).is_err());
+        assert!(MetadataKey::try_from(1).is_err());
         assert!(MetadataKey::try_from(255).is_err());
     }
 
     #[test]
     fn test_metadata_key_ser_roundtrip() {
-        for key in [
-            MetadataKey::LatestBlock,
-            MetadataKey::FinalizedBlock,
-            MetadataKey::SafeBlock,
-            MetadataKey::EarliestBlock,
-        ] {
-            let mut buf = [0u8; MAX_KEY_SIZE];
-            let encoded = key.encode_key(&mut buf);
-            assert_eq!(encoded.len(), 1);
+        let mut buf = [0u8; MAX_KEY_SIZE];
+        let encoded = MetadataKey::LatestBlock.encode_key(&mut buf);
+        assert_eq!(encoded.len(), 1);
 
-            let decoded = MetadataKey::decode_key(encoded).unwrap();
-            assert_eq!(key, decoded);
-        }
+        let decoded = MetadataKey::decode_key(encoded).unwrap();
+        assert_eq!(MetadataKey::LatestBlock, decoded);
     }
 }

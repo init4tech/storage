@@ -152,12 +152,12 @@ pub use request::{AppendBlockRequest, ColdReadRequest, ColdWriteRequest, Respond
 
 mod specifier;
 pub use specifier::{
-    BlockTag, HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
+    HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
     ZenithHeaderSpecifier,
 };
 
 mod traits;
-pub use traits::{BlockData, ColdStorage};
+pub use traits::{BlockData, ColdStorage, ReceiptContext};
 
 /// Task module containing the storage task runner and handles.
 pub mod task;
