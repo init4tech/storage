@@ -3,10 +3,10 @@
 //! Caches recently accessed transactions, receipts, and headers to avoid
 //! repeated backend reads for frequently queried items.
 
-use crate::Confirmed;
-use alloy::{consensus::Header, primitives::BlockNumber};
+use crate::{ColdReceipt, Confirmed};
+use alloy::primitives::BlockNumber;
 use lru::LruCache;
-use signet_storage_types::{Receipt, TransactionSigned};
+use signet_storage_types::{SealedHeader, TransactionSigned};
 use std::num::NonZeroUsize;
 
 /// Default capacity for each LRU cache map.
@@ -29,8 +29,8 @@ fn evict_where<K: Copy + Eq + std::hash::Hash, V>(
 /// and `BlockNumber` for headers.
 pub(crate) struct ColdCache {
     transactions: LruCache<(BlockNumber, u64), Confirmed<TransactionSigned>>,
-    receipts: LruCache<(BlockNumber, u64), Confirmed<Receipt>>,
-    headers: LruCache<BlockNumber, Header>,
+    receipts: LruCache<(BlockNumber, u64), ColdReceipt>,
+    headers: LruCache<BlockNumber, SealedHeader>,
 }
 
 impl ColdCache {
@@ -63,22 +63,22 @@ impl ColdCache {
     }
 
     /// Look up a cached receipt by `(block_number, tx_index)`.
-    pub(crate) fn get_receipt(&mut self, key: &(BlockNumber, u64)) -> Option<Confirmed<Receipt>> {
+    pub(crate) fn get_receipt(&mut self, key: &(BlockNumber, u64)) -> Option<ColdReceipt> {
         self.receipts.get(key).cloned()
     }
 
     /// Insert a receipt into the cache.
-    pub(crate) fn put_receipt(&mut self, key: (BlockNumber, u64), val: Confirmed<Receipt>) {
+    pub(crate) fn put_receipt(&mut self, key: (BlockNumber, u64), val: ColdReceipt) {
         self.receipts.put(key, val);
     }
 
     /// Look up a cached header by block number.
-    pub(crate) fn get_header(&mut self, block: &BlockNumber) -> Option<Header> {
+    pub(crate) fn get_header(&mut self, block: &BlockNumber) -> Option<SealedHeader> {
         self.headers.get(block).cloned()
     }
 
     /// Insert a header into the cache.
-    pub(crate) fn put_header(&mut self, block: BlockNumber, header: Header) {
+    pub(crate) fn put_header(&mut self, block: BlockNumber, header: SealedHeader) {
         self.headers.put(block, header);
     }
 

@@ -4,13 +4,11 @@
 //! Reads and writes use separate channels with their own request types.
 
 use crate::{
-    BlockData, ColdStorageError, Confirmed, Filter, HeaderSpecifier, ReceiptContext,
-    ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdReceipt, ColdStorageError, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier,
+    RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
-use alloy::{consensus::Header, primitives::BlockNumber};
-use signet_storage_types::{
-    DbSignetEvent, DbZenithHeader, IndexedReceipt, Receipt, TransactionSigned,
-};
+use alloy::primitives::BlockNumber;
+use signet_storage_types::{DbSignetEvent, DbZenithHeader, SealedHeader, TransactionSigned};
 use tokio::sync::oneshot;
 
 /// Response sender type alias that propagates Result types.
@@ -36,14 +34,14 @@ pub enum ColdReadRequest {
         /// The header specifier.
         spec: HeaderSpecifier,
         /// The response channel.
-        resp: Responder<Option<Header>>,
+        resp: Responder<Option<SealedHeader>>,
     },
     /// Get multiple headers by specifiers.
     GetHeaders {
         /// The header specifiers.
         specs: Vec<HeaderSpecifier>,
         /// The response channel.
-        resp: Responder<Vec<Option<Header>>>,
+        resp: Responder<Vec<Option<SealedHeader>>>,
     },
 
     // --- Transactions ---
@@ -75,14 +73,14 @@ pub enum ColdReadRequest {
         /// The receipt specifier.
         spec: ReceiptSpecifier,
         /// The response channel.
-        resp: Responder<Option<Confirmed<Receipt>>>,
+        resp: Responder<Option<ColdReceipt>>,
     },
-    /// Get all receipts in a block, with precomputed metadata.
+    /// Get all receipts in a block.
     GetReceiptsInBlock {
         /// The block number.
         block: BlockNumber,
         /// The response channel.
-        resp: Responder<Vec<IndexedReceipt>>,
+        resp: Responder<Vec<ColdReceipt>>,
     },
 
     // --- SignetEvents ---
@@ -124,15 +122,6 @@ pub enum ColdReadRequest {
     GetLatestBlock {
         /// The response channel.
         resp: Responder<Option<BlockNumber>>,
-    },
-
-    // --- Composite queries ---
-    /// Get a receipt with full context for RPC responses.
-    GetReceiptWithContext {
-        /// The receipt specifier.
-        spec: ReceiptSpecifier,
-        /// The response channel.
-        resp: Responder<Option<ReceiptContext>>,
     },
 }
 

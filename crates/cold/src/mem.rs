@@ -4,15 +4,12 @@
 //! It is primarily intended for testing and development.
 
 use crate::{
-    BlockData, ColdResult, ColdStorage, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier,
-    RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdReceipt, ColdResult, ColdStorage, Confirmed, Filter, HeaderSpecifier,
+    ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
-use alloy::{
-    consensus::{Header, Sealable},
-    primitives::{B256, BlockNumber},
-};
+use alloy::primitives::{B256, BlockNumber};
 use signet_storage_types::{
-    ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, Receipt, SealedHeader,
+    ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, SealedHeader,
     TransactionSigned,
 };
 use std::{
@@ -79,19 +76,20 @@ impl MemColdBackendInner {
 }
 
 impl ColdStorage for MemColdBackend {
-    async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<Header>> {
+    async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<SealedHeader>> {
         let inner = self.inner.read().await;
         match spec {
-            HeaderSpecifier::Number(n) => Ok(inner.headers.get(&n).map(|s| Header::clone(s))),
-            HeaderSpecifier::Hash(h) => Ok(inner
-                .header_hashes
-                .get(&h)
-                .and_then(|n| inner.headers.get(n))
-                .map(|s| Header::clone(s))),
+            HeaderSpecifier::Number(n) => Ok(inner.headers.get(&n).cloned()),
+            HeaderSpecifier::Hash(h) => {
+                Ok(inner.header_hashes.get(&h).and_then(|n| inner.headers.get(n)).cloned())
+            }
         }
     }
 
-    async fn get_headers(&self, specs: Vec<HeaderSpecifier>) -> ColdResult<Vec<Option<Header>>> {
+    async fn get_headers(
+        &self,
+        specs: Vec<HeaderSpecifier>,
+    ) -> ColdResult<Vec<Option<SealedHeader>>> {
         let mut results = Vec::with_capacity(specs.len());
         for spec in specs {
             results.push(self.get_header(spec).await?);
@@ -134,7 +132,7 @@ impl ColdStorage for MemColdBackend {
         Ok(inner.transactions.get(&block).map(|txs| txs.len() as u64).unwrap_or(0))
     }
 
-    async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<Confirmed<Receipt>>> {
+    async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<ColdReceipt>> {
         let inner = self.inner.read().await;
         let (block, index) = match spec {
             ReceiptSpecifier::TxHash(h) => {
@@ -145,19 +143,27 @@ impl ColdStorage for MemColdBackend {
             }
             ReceiptSpecifier::BlockAndIndex { block, index } => (block, index),
         };
-        let receipt = inner
-            .receipts
-            .get(&block)
-            .and_then(|rs| rs.get(index as usize))
-            .map(|ir| ir.receipt.clone());
-        Ok(receipt
-            .zip(inner.confirmation_meta(block, index))
-            .map(|(r, meta)| Confirmed::new(r, meta)))
+        let ir = inner.receipts.get(&block).and_then(|rs| rs.get(index as usize)).cloned();
+        let header = inner.headers.get(&block);
+        Ok(ir.zip(header).map(|(ir, h)| ColdReceipt::new(ir, h, index)))
     }
 
-    async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<IndexedReceipt>> {
+    async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<ColdReceipt>> {
         let inner = self.inner.read().await;
-        Ok(inner.receipts.get(&block).cloned().unwrap_or_default())
+        let Some(header) = inner.headers.get(&block) else {
+            return Ok(Vec::new());
+        };
+        Ok(inner
+            .receipts
+            .get(&block)
+            .map(|receipts| {
+                receipts
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, ir)| ColdReceipt::new(ir.clone(), header, idx as u64))
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     async fn get_signet_events(
@@ -248,10 +254,9 @@ impl ColdStorage for MemColdBackend {
 
         let block = data.block_number();
 
-        // Seal the header (computes hash once) and store
-        let sealed = data.header.seal_slow();
-        let header_hash = sealed.hash();
-        inner.headers.insert(block, sealed);
+        // Store the sealed header (hash already cached)
+        let header_hash = data.header.hash();
+        inner.headers.insert(block, data.header);
         inner.header_hashes.insert(header_hash, block);
 
         // Build tx hash index and store both tx and receipt hash mappings

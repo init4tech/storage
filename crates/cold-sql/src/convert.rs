@@ -16,7 +16,9 @@ use alloy::{
     },
     primitives::{Address, B256, Bloom, Bytes, Log, LogData, Signature, TxKind, U256},
 };
-use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned};
+use signet_storage_types::{
+    DbSignetEvent, DbZenithHeader, Receipt, SealedHeader, TransactionSigned,
+};
 use signet_zenith::{
     Passage::{Enter, EnterToken},
     Transactor::Transact,
@@ -98,11 +100,11 @@ pub(crate) struct HeaderRow {
 }
 
 impl HeaderRow {
-    /// Convert a header to a SQL row.
-    pub(crate) fn from_header(header: &Header) -> Self {
+    /// Convert a sealed header to a SQL row.
+    pub(crate) fn from_header(header: &SealedHeader) -> Self {
         Self {
             block_number: to_i64(header.number),
-            block_hash: header.hash_slow().as_slice().to_vec(),
+            block_hash: header.hash().as_slice().to_vec(),
             parent_hash: header.parent_hash.as_slice().to_vec(),
             ommers_hash: header.ommers_hash.as_slice().to_vec(),
             beneficiary: header.beneficiary.as_slice().to_vec(),

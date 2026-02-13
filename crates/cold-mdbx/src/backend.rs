@@ -8,14 +8,10 @@ use crate::{
     ColdBlockHashIndex, ColdHeaders, ColdReceipts, ColdSignetEvents, ColdTransactions,
     ColdTxHashIndex, ColdZenithHeaders, MdbxColdError,
 };
-use alloy::{
-    consensus::{Header, Sealable},
-    primitives::BlockNumber,
-};
+use alloy::primitives::BlockNumber;
 use signet_cold::{
-    BlockData, ColdResult, ColdStorage, Confirmed, Filter, HeaderSpecifier, IndexedReceipt,
-    ReceiptContext, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
-    ZenithHeaderSpecifier,
+    BlockData, ColdReceipt, ColdResult, ColdStorage, Confirmed, Filter, HeaderSpecifier,
+    ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use signet_hot::{
     KeySer, MAX_KEY_SIZE, ValSer,
@@ -24,8 +20,8 @@ use signet_hot::{
 };
 use signet_hot_mdbx::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 use signet_storage_types::{
-    ConfirmationMeta, DbSignetEvent, DbZenithHeader, Receipt, SealedHeader, TransactionSigned,
-    TxLocation,
+    ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, SealedHeader,
+    TransactionSigned, TxLocation,
 };
 use std::path::Path;
 
@@ -123,11 +119,7 @@ impl MdbxColdBackend {
         Ok(())
     }
 
-    fn get_header_inner(&self, spec: HeaderSpecifier) -> Result<Option<Header>, MdbxColdError> {
-        Ok(self.get_sealed_header_inner(spec)?.map(|s| s.into_inner()))
-    }
-
-    fn get_sealed_header_inner(
+    fn get_header_inner(
         &self,
         spec: HeaderSpecifier,
     ) -> Result<Option<SealedHeader>, MdbxColdError> {
@@ -147,7 +139,7 @@ impl MdbxColdBackend {
     fn get_headers_inner(
         &self,
         specs: Vec<HeaderSpecifier>,
-    ) -> Result<Vec<Option<Header>>, MdbxColdError> {
+    ) -> Result<Vec<Option<SealedHeader>>, MdbxColdError> {
         let tx = self.env.tx()?;
         specs
             .into_iter()
@@ -157,11 +149,7 @@ impl MdbxColdBackend {
                     HeaderSpecifier::Hash(h) => tx.traverse::<ColdBlockHashIndex>()?.exact(&h)?,
                 };
                 block_num
-                    .map(|n| {
-                        tx.traverse::<ColdHeaders>()?
-                            .exact(&n)
-                            .map(|opt: Option<SealedHeader>| opt.map(|s| s.into_inner()))
-                    })
+                    .map(|n| tx.traverse::<ColdHeaders>()?.exact(&n))
                     .transpose()
                     .map(Option::flatten)
             })
@@ -203,8 +191,24 @@ impl MdbxColdBackend {
     fn get_receipt_inner(
         &self,
         spec: ReceiptSpecifier,
-    ) -> Result<Option<Confirmed<Receipt>>, MdbxColdError> {
-        Ok(self.get_receipt_with_context_inner(spec)?.map(|ctx| ctx.receipt))
+    ) -> Result<Option<ColdReceipt>, MdbxColdError> {
+        let tx = self.env.tx()?;
+        let (block, index) = match spec {
+            ReceiptSpecifier::TxHash(h) => {
+                let Some(loc) = tx.traverse::<ColdTxHashIndex>()?.exact(&h)? else {
+                    return Ok(None);
+                };
+                (loc.block, loc.index)
+            }
+            ReceiptSpecifier::BlockAndIndex { block, index } => (block, index),
+        };
+        let Some(sealed) = tx.traverse::<ColdHeaders>()?.exact(&block)? else {
+            return Ok(None);
+        };
+        let Some(ir) = tx.traverse_dual::<ColdReceipts>()?.exact_dual(&block, &index)? else {
+            return Ok(None);
+        };
+        Ok(Some(ColdReceipt::new(ir, &sealed, index)))
     }
 
     fn get_zenith_header_by_number(
@@ -240,13 +244,18 @@ impl MdbxColdBackend {
     fn collect_receipts_in_block(
         &self,
         block: BlockNumber,
-    ) -> Result<Vec<IndexedReceipt>, MdbxColdError> {
+    ) -> Result<Vec<ColdReceipt>, MdbxColdError> {
         let tx = self.env.tx()?;
+        let Some(sealed) = tx.traverse::<ColdHeaders>()?.exact(&block)? else {
+            return Ok(Vec::new());
+        };
         tx.traverse_dual::<ColdReceipts>()?
             .iter_k2(&block)?
-            .map(|item| item.map(|(_, v)| v))
-            .collect::<Result<_, _>>()
-            .map_err(Into::into)
+            .map(|item| {
+                let (idx, ir) = item?;
+                Ok::<_, MdbxColdError>(ColdReceipt::new(ir, &sealed, idx))
+            })
+            .collect()
     }
 
     fn collect_signet_events_in_block(
@@ -312,10 +321,9 @@ impl MdbxColdBackend {
         let tx = self.env.tx_rw()?;
         let block = data.block_number();
 
-        // Seal the header once (computes hash) and store
-        let sealed = data.header.seal_slow();
-        tx.queue_put::<ColdHeaders>(&block, &sealed)?;
-        tx.queue_put::<ColdBlockHashIndex>(&sealed.hash(), &block)?;
+        // Store the sealed header (hash already cached)
+        tx.queue_put::<ColdHeaders>(&block, &data.header)?;
+        tx.queue_put::<ColdBlockHashIndex>(&data.header.hash(), &block)?;
 
         // Store transactions and build hash index
         let tx_hashes: Vec<_> = data
@@ -440,59 +448,17 @@ impl MdbxColdBackend {
 
         Ok(results)
     }
-
-    fn get_receipt_with_context_inner(
-        &self,
-        spec: ReceiptSpecifier,
-    ) -> Result<Option<ReceiptContext>, MdbxColdError> {
-        let tx = self.env.tx()?;
-        let (block, index) = match spec {
-            ReceiptSpecifier::TxHash(h) => {
-                let Some(loc) = tx.traverse::<ColdTxHashIndex>()?.exact(&h)? else {
-                    return Ok(None);
-                };
-                (loc.block, loc.index)
-            }
-            ReceiptSpecifier::BlockAndIndex { block, index } => (block, index),
-        };
-        let Some(sealed) = tx.traverse::<ColdHeaders>()?.exact(&block)? else {
-            return Ok(None);
-        };
-        let Some(ir) = tx.traverse_dual::<ColdReceipts>()?.exact_dual(&block, &index)? else {
-            return Ok(None);
-        };
-        let Some(transaction) =
-            tx.traverse_dual::<ColdTransactions>()?.exact_dual(&block, &index)?
-        else {
-            return Ok(None);
-        };
-
-        // Read prior receipt (single lookup) for cumulative gas
-        let prior_cumulative_gas = index
-            .checked_sub(1)
-            .and_then(|i| {
-                tx.traverse_dual::<ColdReceipts>().ok()?.exact_dual(&block, &i).ok().flatten()
-            })
-            .map_or(0, |prior: IndexedReceipt| prior.receipt.inner.cumulative_gas_used);
-
-        let meta = ConfirmationMeta::new(block, sealed.hash(), index);
-        let confirmed_receipt = Confirmed::new(ir.receipt, meta);
-        Ok(Some(ReceiptContext::new(
-            sealed.into_inner(),
-            transaction,
-            confirmed_receipt,
-            prior_cumulative_gas,
-            ir.first_log_index,
-        )))
-    }
 }
 
 impl ColdStorage for MdbxColdBackend {
-    async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<Header>> {
+    async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<SealedHeader>> {
         Ok(self.get_header_inner(spec)?)
     }
 
-    async fn get_headers(&self, specs: Vec<HeaderSpecifier>) -> ColdResult<Vec<Option<Header>>> {
+    async fn get_headers(
+        &self,
+        specs: Vec<HeaderSpecifier>,
+    ) -> ColdResult<Vec<Option<SealedHeader>>> {
         Ok(self.get_headers_inner(specs)?)
     }
 
@@ -514,11 +480,11 @@ impl ColdStorage for MdbxColdBackend {
         Ok(self.count_transactions_in_block(block)?)
     }
 
-    async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<Confirmed<Receipt>>> {
+    async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<ColdReceipt>> {
         Ok(self.get_receipt_inner(spec)?)
     }
 
-    async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<IndexedReceipt>> {
+    async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<ColdReceipt>> {
         Ok(self.collect_receipts_in_block(block)?)
     }
 
@@ -575,13 +541,6 @@ impl ColdStorage for MdbxColdBackend {
             .transpose()
             .map_err(MdbxColdError::from)?;
         Ok(latest)
-    }
-
-    async fn get_receipt_with_context(
-        &self,
-        spec: ReceiptSpecifier,
-    ) -> ColdResult<Option<ReceiptContext>> {
-        Ok(self.get_receipt_with_context_inner(spec)?)
     }
 
     async fn append_block(&self, data: BlockData) -> ColdResult<()> {

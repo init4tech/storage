@@ -9,14 +9,15 @@ use crate::convert::{
     HeaderRow, LogRow, ReceiptRow, SignetEventRow, TxRow, ZenithHeaderRow, from_i64,
     receipt_from_rows, to_i64,
 };
-use alloy::{consensus::Header, primitives::BlockNumber};
+use alloy::{consensus::Sealable, primitives::BlockNumber};
 use signet_cold::{
-    BlockData, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter, HeaderSpecifier,
-    IndexedReceipt, ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier,
+    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter,
+    HeaderSpecifier, ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier,
     ZenithHeaderSpecifier,
 };
 use signet_storage_types::{
-    ConfirmationMeta, DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned,
+    ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, SealedHeader,
+    TransactionSigned,
 };
 use sqlx::{AnyPool, Row};
 
@@ -114,7 +115,7 @@ impl SqlColdBackend {
     async fn fetch_header_by_number(
         &self,
         block_num: BlockNumber,
-    ) -> Result<Option<Header>, SqlColdError> {
+    ) -> Result<Option<SealedHeader>, SqlColdError> {
         let bn = to_i64(block_num);
         let row = sqlx::query("SELECT * FROM headers WHERE block_number = $1")
             .bind(bn)
@@ -122,7 +123,7 @@ impl SqlColdBackend {
             .await?;
 
         row.map(|r| {
-            HeaderRow {
+            let header = HeaderRow {
                 block_number: r.get("block_number"),
                 block_hash: r.get("block_hash"),
                 parent_hash: r.get("parent_hash"),
@@ -146,7 +147,8 @@ impl SqlColdBackend {
                 parent_beacon_block_root: r.get("parent_beacon_block_root"),
                 requests_hash: r.get("requests_hash"),
             }
-            .into_header()
+            .into_header()?;
+            Ok(header.seal_slow())
         })
         .transpose()
     }
@@ -397,14 +399,17 @@ fn row_to_zenith_header_row(r: &sqlx::any::AnyRow) -> ZenithHeaderRow {
 }
 
 impl ColdStorage for SqlColdBackend {
-    async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<Header>> {
+    async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<SealedHeader>> {
         let Some(block_num) = self.resolve_header_spec(spec).await? else {
             return Ok(None);
         };
         self.fetch_header_by_number(block_num).await.map_err(ColdStorageError::from)
     }
 
-    async fn get_headers(&self, specs: Vec<HeaderSpecifier>) -> ColdResult<Vec<Option<Header>>> {
+    async fn get_headers(
+        &self,
+        specs: Vec<HeaderSpecifier>,
+    ) -> ColdResult<Vec<Option<SealedHeader>>> {
         let mut results = Vec::with_capacity(specs.len());
         for spec in specs {
             let header = self.get_header(spec).await?;
@@ -493,32 +498,39 @@ impl ColdStorage for SqlColdBackend {
         Ok(from_i64(row.get::<i64, _>("cnt")))
     }
 
-    async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<Confirmed<Receipt>>> {
-        // Fetch receipt + block_hash in one query via JOIN
-        let receipt_row = match spec {
-            ReceiptSpecifier::TxHash(hash) => sqlx::query(
-                "SELECT r.*, h.block_hash
-                     FROM transactions t
-                     JOIN receipts r ON t.block_number = r.block_number AND t.tx_index = r.tx_index
-                     JOIN headers h ON t.block_number = h.block_number
-                     WHERE t.tx_hash = $1",
-            )
-            .bind(hash.as_slice())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(SqlColdError::from)?,
-            ReceiptSpecifier::BlockAndIndex { block, index } => sqlx::query(
-                "SELECT r.*, h.block_hash
-                     FROM receipts r
-                     JOIN headers h ON r.block_number = h.block_number
-                     WHERE r.block_number = $1 AND r.tx_index = $2",
-            )
-            .bind(to_i64(block))
-            .bind(to_i64(index))
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(SqlColdError::from)?,
+    async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<ColdReceipt>> {
+        // Resolve to (block, index)
+        let (block, index) = match spec {
+            ReceiptSpecifier::TxHash(hash) => {
+                let row = sqlx::query(
+                    "SELECT block_number, tx_index FROM transactions WHERE tx_hash = $1",
+                )
+                .bind(hash.as_slice())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(SqlColdError::from)?;
+                let Some(r) = row else { return Ok(None) };
+                (from_i64(r.get::<i64, _>("block_number")), from_i64(r.get::<i64, _>("tx_index")))
+            }
+            ReceiptSpecifier::BlockAndIndex { block, index } => (block, index),
         };
+
+        let Some(header) = self.fetch_header_by_number(block).await? else {
+            return Ok(None);
+        };
+
+        // Fetch receipt + tx_hash
+        let receipt_row = sqlx::query(
+            "SELECT r.*, t.tx_hash
+             FROM receipts r
+             JOIN transactions t ON r.block_number = t.block_number AND r.tx_index = t.tx_index
+             WHERE r.block_number = $1 AND r.tx_index = $2",
+        )
+        .bind(to_i64(block))
+        .bind(to_i64(index))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(SqlColdError::from)?;
 
         let Some(rr) = receipt_row else {
             return Ok(None);
@@ -526,8 +538,8 @@ impl ColdStorage for SqlColdBackend {
 
         let bn: i64 = rr.get("block_number");
         let tx_idx: i64 = rr.get("tx_index");
-        let hash_bytes: Vec<u8> = rr.get("block_hash");
-        let block_hash = alloy::primitives::B256::from_slice(&hash_bytes);
+        let tx_hash_bytes: Vec<u8> = rr.get("tx_hash");
+        let tx_hash = alloy::primitives::B256::from_slice(&tx_hash_bytes);
 
         let receipt = ReceiptRow {
             block_number: bn,
@@ -546,29 +558,40 @@ impl ColdStorage for SqlColdBackend {
         .await
         .map_err(SqlColdError::from)?;
 
-        let logs = log_rows
-            .into_iter()
-            .map(|r| LogRow {
-                block_number: r.get("block_number"),
-                tx_index: r.get("tx_index"),
-                log_index: r.get("log_index"),
-                address: r.get("address"),
-                topic0: r.get("topic0"),
-                topic1: r.get("topic1"),
-                topic2: r.get("topic2"),
-                topic3: r.get("topic3"),
-                data: r.get("data"),
-            })
-            .collect();
+        let logs: Vec<_> = log_rows.into_iter().map(|r| row_to_log_row(&r)).collect();
 
         let built = receipt_from_rows(receipt, logs).map_err(ColdStorageError::from)?;
-        let block = from_i64(bn);
-        let index = from_i64(tx_idx);
-        let meta = ConfirmationMeta::new(block, block_hash, index);
-        Ok(Some(Confirmed::new(built, meta)))
+
+        // Compute gas_used and first_log_index by querying prior receipts
+        let prior = sqlx::query(
+            "SELECT CAST(SUM(
+                (SELECT COUNT(*) FROM logs l WHERE l.block_number = $1 AND l.tx_index = r.tx_index)
+             ) AS bigint) as log_count,
+             CAST(MAX(r.cumulative_gas_used) AS bigint) as prior_gas
+             FROM receipts r WHERE r.block_number = $1 AND r.tx_index < $2",
+        )
+        .bind(to_i64(block))
+        .bind(to_i64(index))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(SqlColdError::from)?;
+
+        let first_log_index: u64 = prior.get::<Option<i64>, _>("log_count").unwrap_or(0) as u64;
+        let prior_cumulative_gas: u64 =
+            prior.get::<Option<i64>, _>("prior_gas").unwrap_or(0) as u64;
+        let gas_used = built.inner.cumulative_gas_used - prior_cumulative_gas;
+
+        let ir = IndexedReceipt { receipt: built, tx_hash, first_log_index, gas_used };
+        Ok(Some(ColdReceipt::new(ir, &header, index)))
     }
 
-    async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<IndexedReceipt>> {
+    async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<ColdReceipt>> {
+        let Some(header) =
+            self.fetch_header_by_number(block).await.map_err(ColdStorageError::from)?
+        else {
+            return Ok(Vec::new());
+        };
+
         let bn = to_i64(block);
 
         // Fetch receipts joined with tx_hash
@@ -602,7 +625,8 @@ impl ColdStorage for SqlColdBackend {
         let mut prior_cumulative_gas = 0u64;
         receipt_rows
             .into_iter()
-            .map(|rr| {
+            .enumerate()
+            .map(|(idx, rr)| {
                 let tx_idx: i64 = rr.get("tx_index");
                 let tx_hash_bytes: Vec<u8> = rr.get("tx_hash");
                 let tx_hash = alloy::primitives::B256::from_slice(&tx_hash_bytes);
@@ -620,7 +644,7 @@ impl ColdStorage for SqlColdBackend {
                 prior_cumulative_gas = receipt.inner.cumulative_gas_used;
                 let ir = IndexedReceipt { receipt, tx_hash, first_log_index, gas_used };
                 first_log_index += ir.receipt.inner.logs.len() as u64;
-                Ok(ir)
+                Ok(ColdReceipt::new(ir, &header, idx as u64))
             })
             .collect()
     }

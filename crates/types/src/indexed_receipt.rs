@@ -15,7 +15,7 @@ use alloy::primitives::B256;
 /// - `first_log_index`: the absolute index of this receipt's first log
 ///   within the block (sum of log counts from all preceding receipts).
 ///   Avoids O(N) iteration over prior receipts when building
-///   `ReceiptContext` or RPC log responses.
+///   `ColdReceipt` or RPC log responses.
 /// - `gas_used`: per-transaction gas consumed. Precomputed from the
 ///   cumulative gas sequence at append time to avoid needing prior
 ///   receipt lookups at query time.

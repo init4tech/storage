@@ -11,11 +11,10 @@
 
 use super::cache::ColdCache;
 use crate::{
-    ColdReadRequest, ColdResult, ColdStorage, ColdStorageHandle, ColdWriteRequest, Confirmed,
-    HeaderSpecifier, ReceiptSpecifier, TransactionSpecifier,
+    ColdReadRequest, ColdReceipt, ColdResult, ColdStorage, ColdStorageHandle, ColdWriteRequest,
+    Confirmed, HeaderSpecifier, ReceiptSpecifier, TransactionSpecifier,
 };
-use alloy::consensus::Header;
-use signet_storage_types::{Receipt, TransactionSigned};
+use signet_storage_types::{SealedHeader, TransactionSigned};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -41,7 +40,10 @@ struct ColdStorageTaskInner<B> {
 
 impl<B: ColdStorage> ColdStorageTaskInner<B> {
     /// Fetch a header from the backend and cache the result.
-    async fn fetch_and_cache_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<Header>> {
+    async fn fetch_and_cache_header(
+        &self,
+        spec: HeaderSpecifier,
+    ) -> ColdResult<Option<SealedHeader>> {
         let r = self.backend.get_header(spec).await;
         if let Ok(Some(ref h)) = r {
             self.cache.lock().await.put_header(h.number, h.clone());
@@ -69,14 +71,10 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
     async fn fetch_and_cache_receipt(
         &self,
         spec: ReceiptSpecifier,
-    ) -> ColdResult<Option<Confirmed<Receipt>>> {
+    ) -> ColdResult<Option<ColdReceipt>> {
         let r = self.backend.get_receipt(spec).await;
         if let Ok(Some(ref c)) = r {
-            let meta = c.meta();
-            self.cache
-                .lock()
-                .await
-                .put_receipt((meta.block_number(), meta.transaction_index()), c.clone());
+            self.cache.lock().await.put_receipt((c.block_number, c.transaction_index), c.clone());
         }
         r
     }
@@ -146,9 +144,6 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
             }
             ColdReadRequest::GetLatestBlock { resp } => {
                 let _ = resp.send(self.backend.get_latest_block().await);
-            }
-            ColdReadRequest::GetReceiptWithContext { spec, resp } => {
-                let _ = resp.send(self.backend.get_receipt_with_context(spec).await);
             }
         }
     }

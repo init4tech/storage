@@ -148,14 +148,16 @@ mod request;
 pub use request::{AppendBlockRequest, ColdReadRequest, ColdWriteRequest, Responder};
 mod specifier;
 pub use alloy::rpc::types::{Filter, Log as RpcLog};
-pub use signet_storage_types::{Confirmed, IndexedReceipt};
+pub use signet_storage_types::Confirmed;
 pub use specifier::{
     HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
     ZenithHeaderSpecifier,
 };
 
+mod cold_receipt;
+pub use cold_receipt::ColdReceipt;
 mod traits;
-pub use traits::{BlockData, ColdStorage, ReceiptContext};
+pub use traits::{BlockData, ColdStorage};
 
 /// Task module containing the storage task runner and handles.
 pub mod task;
