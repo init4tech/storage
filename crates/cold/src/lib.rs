@@ -142,19 +142,14 @@
 #![deny(unused_must_use, rust_2018_idioms)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod confirmed;
-pub use confirmed::Confirmed;
 mod error;
 pub use error::{ColdResult, ColdStorageError};
-
 mod request;
 pub use request::{AppendBlockRequest, ColdReadRequest, ColdWriteRequest, Responder};
-
-mod rich_log;
-pub use rich_log::RichLog;
 mod specifier;
+pub use signet_storage_types::{Confirmed, LogFilter, RichLog};
 pub use specifier::{
-    HeaderSpecifier, LogFilter, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
+    HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
     ZenithHeaderSpecifier,
 };
 

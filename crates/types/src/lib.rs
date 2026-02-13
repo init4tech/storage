@@ -17,6 +17,8 @@
 
 mod account;
 pub use account::Account;
+mod confirmed;
+pub use confirmed::Confirmed;
 mod execution;
 pub use execution::{ExecutedBlock, ExecutedBlockBuilder, MissingFieldError};
 
@@ -30,7 +32,10 @@ pub use events::{DbSignetEvent, DbZenithHeader};
 
 mod int_list;
 pub use int_list::{BlockNumberList, IntegerList, IntegerListError};
-
+mod log_filter;
+pub use log_filter::LogFilter;
+mod rich_log;
+pub use rich_log::RichLog;
 mod sharded;
 pub use sharded::ShardedKey;
 
