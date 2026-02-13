@@ -288,7 +288,7 @@ impl MdbxColdBackend {
         let mut key_buf = [0u8; MAX_KEY_SIZE];
         let key_bytes = start.encode_key(&mut key_buf);
 
-        let Some((key, value)) = KvTraverse::<_>::lower_bound(&mut cursor, key_bytes)? else {
+        let Some((key, value)) = cursor.lower_bound(key_bytes)? else {
             return Ok(headers);
         };
 
@@ -297,7 +297,7 @@ impl MdbxColdBackend {
             headers.push(DbZenithHeader::decode_value(&value)?);
         }
 
-        while let Some((key, value)) = KvTraverse::<_>::read_next(&mut cursor)? {
+        while let Some((key, value)) = cursor.read_next()? {
             let block_num = BlockNumber::decode_key(&key)?;
             if block_num > end {
                 break;
@@ -365,10 +365,10 @@ impl MdbxColdBackend {
             let mut key_buf = [0u8; MAX_KEY_SIZE];
             let key_bytes = start_block.encode_key(&mut key_buf);
 
-            if let Some((key, value)) = KvTraverse::<_>::lower_bound(&mut cursor, key_bytes)? {
+            if let Some((key, value)) = cursor.lower_bound(key_bytes)? {
                 headers.push((BlockNumber::decode_key(&key)?, SealedHeader::decode_value(&value)?));
 
-                while let Some((key, value)) = KvTraverse::<_>::read_next(&mut cursor)? {
+                while let Some((key, value)) = cursor.read_next()? {
                     headers.push((
                         BlockNumber::decode_key(&key)?,
                         SealedHeader::decode_value(&value)?,
@@ -568,7 +568,8 @@ impl ColdStorage for MdbxColdBackend {
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
         let tx = self.env.tx().map_err(MdbxColdError::from)?;
         let mut cursor = tx.new_cursor::<ColdHeaders>().map_err(MdbxColdError::from)?;
-        let latest = KvTraverse::<_>::last(&mut cursor)
+        let latest = cursor
+            .last()
             .map_err(MdbxColdError::from)?
             .map(|(key, _)| BlockNumber::decode_key(&key))
             .transpose()

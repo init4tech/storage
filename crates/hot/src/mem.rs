@@ -437,7 +437,7 @@ impl<'a> DualKeyTraverse<MemKvError> for MemKvCursor<'a> {
         key2: &[u8],
     ) -> Result<Option<RawValue<'b>>, MemKvError> {
         let combined_key = MemKv::dual_key(key1, key2);
-        KvTraverse::exact(self, &combined_key)
+        self.exact(&combined_key)
     }
 
     fn next_dual_above<'b>(
@@ -446,7 +446,7 @@ impl<'a> DualKeyTraverse<MemKvError> for MemKvCursor<'a> {
         key2: &[u8],
     ) -> Result<Option<RawDualKeyValue<'b>>, MemKvError> {
         let combined_key = MemKv::dual_key(key1, key2);
-        let Some((found_key, value)) = KvTraverse::lower_bound(self, &combined_key)? else {
+        let Some((found_key, value)) = self.lower_bound(&combined_key)? else {
             return Ok(None);
         };
         let (k1, k2) = MemKv::split_dual_key(found_key.as_ref());
@@ -457,7 +457,7 @@ impl<'a> DualKeyTraverse<MemKvError> for MemKvCursor<'a> {
         // scan forward until finding a new k1
         let last_k1 = self.current_k1();
 
-        DualKeyTraverse::next_dual_above(self, &last_k1, &[0xffu8; MAX_KEY_SIZE])
+        self.next_dual_above(&last_k1, &[0xffu8; MAX_KEY_SIZE])
     }
 
     fn next_k2<'b>(&'b mut self) -> Result<Option<RawDualKeyValue<'b>>, MemKvError> {
@@ -1009,7 +1009,7 @@ impl<'a> DualKeyTraverse<MemKvError> for MemKvCursorMut<'a> {
         key2: &[u8],
     ) -> Result<Option<RawValue<'b>>, MemKvError> {
         let combined_key = MemKv::dual_key(key1, key2);
-        KvTraverse::exact(self, &combined_key)
+        self.exact(&combined_key)
     }
 
     fn next_dual_above<'b>(
@@ -1018,7 +1018,7 @@ impl<'a> DualKeyTraverse<MemKvError> for MemKvCursorMut<'a> {
         key2: &[u8],
     ) -> Result<Option<RawDualKeyValue<'b>>, MemKvError> {
         let combined_key = MemKv::dual_key(key1, key2);
-        let Some((found_key, value)) = KvTraverse::lower_bound(self, &combined_key)? else {
+        let Some((found_key, value)) = self.lower_bound(&combined_key)? else {
             return Ok(None);
         };
 
@@ -1030,7 +1030,7 @@ impl<'a> DualKeyTraverse<MemKvError> for MemKvCursorMut<'a> {
         // scan forward until finding a new k1
         let last_k1 = self.current_k1();
 
-        DualKeyTraverse::next_dual_above(self, &last_k1, &[0xffu8; MAX_KEY_SIZE])
+        self.next_dual_above(&last_k1, &[0xffu8; MAX_KEY_SIZE])
     }
 
     fn next_k2<'b>(&'b mut self) -> Result<Option<RawDualKeyValue<'b>>, MemKvError> {
