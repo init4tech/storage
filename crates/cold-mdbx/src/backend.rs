@@ -421,16 +421,11 @@ impl MdbxColdBackend {
             let block_hash = header.hash_slow();
             let mut block_log_index = 0u64;
 
-            // Walk receipts by index using exact_dual lookups.
-            for tx_idx in 0u64.. {
-                let Some(receipt) = DualTableTraverse::<ColdReceipts, _>::exact_dual(
-                    &mut tx.new_cursor::<ColdReceipts>()?,
-                    &block_num,
-                    &tx_idx,
-                )?
-                else {
-                    break;
-                };
+            let mut receipt_cursor = tx.new_cursor::<ColdReceipts>()?;
+            for item in
+                DualTableTraverse::<ColdReceipts, _>::iter_k2(&mut receipt_cursor, &block_num)?
+            {
+                let (tx_idx, receipt): (u64, Receipt) = item?;
                 let tx_hash = DualTableTraverse::<ColdTransactions, _>::exact_dual(
                     &mut tx.new_cursor::<ColdTransactions>()?,
                     &block_num,
@@ -439,20 +434,26 @@ impl MdbxColdBackend {
                 .map(|t: TransactionSigned| *t.hash())
                 .unwrap_or_default();
 
-                for (log_idx, log) in receipt.inner.logs.iter().enumerate() {
-                    if filter.matches_log(log) {
-                        results.push(signet_cold::RichLog {
+                let base_log_index = block_log_index;
+                block_log_index += receipt.inner.logs.len() as u64;
+
+                results.extend(
+                    receipt
+                        .inner
+                        .logs
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, log)| filter.matches_log(log))
+                        .map(|(log_idx, log)| signet_cold::RichLog {
                             log: log.clone(),
                             block_number: block_num,
                             block_hash,
                             tx_hash,
                             tx_index: tx_idx,
-                            block_log_index: block_log_index + log_idx as u64,
+                            block_log_index: base_log_index + log_idx as u64,
                             tx_log_index: log_idx as u64,
-                        });
-                    }
-                }
-                block_log_index += receipt.inner.logs.len() as u64;
+                        }),
+                );
             }
         }
 

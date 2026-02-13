@@ -211,20 +211,26 @@ impl ColdStorage for MemColdBackend {
                 let tx_hash =
                     txs.and_then(|ts| ts.get(tx_idx)).map(|t| *t.tx_hash()).unwrap_or_default();
 
-                for (log_idx, log) in receipt.inner.logs.iter().enumerate() {
-                    if filter.matches_log(log) {
-                        results.push(RichLog {
+                let base_log_index = first_log_index;
+                first_log_index += receipt.inner.logs.len() as u64;
+
+                results.extend(
+                    receipt
+                        .inner
+                        .logs
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, log)| filter.matches_log(log))
+                        .map(|(log_idx, log)| RichLog {
                             log: log.clone(),
                             block_number: block_num,
                             block_hash,
                             tx_hash,
                             tx_index: tx_idx as u64,
-                            block_log_index: first_log_index + log_idx as u64,
+                            block_log_index: base_log_index + log_idx as u64,
                             tx_log_index: log_idx as u64,
-                        });
-                    }
-                }
-                first_log_index += receipt.inner.logs.len() as u64;
+                        }),
+                );
             }
         }
 
