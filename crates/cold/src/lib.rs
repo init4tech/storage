@@ -147,7 +147,7 @@ pub use error::{ColdResult, ColdStorageError};
 mod request;
 pub use request::{AppendBlockRequest, ColdReadRequest, ColdWriteRequest, Responder};
 mod specifier;
-pub use signet_storage_types::{Confirmed, LogFilter, RichLog};
+pub use signet_storage_types::{Confirmed, IndexedReceipt, LogFilter, RichLog};
 pub use specifier::{
     HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
     ZenithHeaderSpecifier,

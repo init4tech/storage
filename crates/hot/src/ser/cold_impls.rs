@@ -5,7 +5,7 @@
 
 use alloy::primitives::{Address, Bytes, FixedBytes, U256};
 use bytes::BufMut;
-use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TxLocation};
+use signet_storage_types::{DbSignetEvent, DbZenithHeader, IndexedReceipt, Receipt, TxLocation};
 use signet_zenith::{
     Passage::{Enter, EnterToken},
     Transactor::Transact,
@@ -385,6 +385,37 @@ impl ValSer for Receipt {
             tx_type,
             inner: AlloyReceipt { status: status.into(), cumulative_gas_used, logs },
         })
+    }
+}
+
+impl ValSer for IndexedReceipt {
+    fn encoded_size(&self) -> usize {
+        // tx_hash: 32 bytes
+        // first_log_index: 8 bytes
+        // receipt: variable
+        32 + 8 + self.receipt.encoded_size()
+    }
+
+    fn encode_value_to<B>(&self, buf: &mut B)
+    where
+        B: BufMut + AsMut<[u8]>,
+    {
+        buf.put_slice(self.tx_hash.as_slice());
+        buf.put_u64(self.first_log_index);
+        self.receipt.encode_value_to(buf);
+    }
+
+    fn decode_value(data: &[u8]) -> Result<Self, DeserError>
+    where
+        Self: Sized,
+    {
+        if data.len() < 40 {
+            return Err(DeserError::InsufficientData { needed: 40, available: data.len() });
+        }
+        let tx_hash = FixedBytes::from_slice(&data[..32]);
+        let first_log_index = u64::from_be_bytes(data[32..40].try_into().unwrap());
+        let receipt = Receipt::decode_value(&data[40..])?;
+        Ok(Self { receipt, tx_hash, first_log_index })
     }
 }
 

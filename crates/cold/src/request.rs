@@ -8,7 +8,9 @@ use crate::{
     ReceiptSpecifier, RichLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::{consensus::Header, primitives::BlockNumber};
-use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned};
+use signet_storage_types::{
+    DbSignetEvent, DbZenithHeader, IndexedReceipt, Receipt, TransactionSigned,
+};
 use tokio::sync::oneshot;
 
 /// Response sender type alias that propagates Result types.
@@ -75,12 +77,12 @@ pub enum ColdReadRequest {
         /// The response channel.
         resp: Responder<Option<Confirmed<Receipt>>>,
     },
-    /// Get all receipts in a block.
+    /// Get all receipts in a block, with precomputed metadata.
     GetReceiptsInBlock {
         /// The block number.
         block: BlockNumber,
         /// The response channel.
-        resp: Responder<Vec<Receipt>>,
+        resp: Responder<Vec<IndexedReceipt>>,
     },
 
     // --- SignetEvents ---

@@ -12,7 +12,8 @@ use alloy::{
     primitives::{B256, BlockNumber},
 };
 use signet_storage_types::{
-    ConfirmationMeta, DbSignetEvent, DbZenithHeader, Receipt, SealedHeader, TransactionSigned,
+    ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, Receipt, SealedHeader,
+    TransactionSigned,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -33,8 +34,8 @@ struct MemColdBackendInner {
     /// Transaction hash to (block number, tx index) index.
     tx_hashes: HashMap<B256, (BlockNumber, u64)>,
 
-    /// Receipts indexed by block number.
-    receipts: BTreeMap<BlockNumber, Vec<Receipt>>,
+    /// Indexed receipts (with precomputed tx_hash and first_log_index).
+    receipts: BTreeMap<BlockNumber, Vec<IndexedReceipt>>,
     /// Transaction hash to (block number, receipt index) index for receipts.
     receipt_tx_hashes: HashMap<B256, (BlockNumber, u64)>,
 
@@ -144,13 +145,17 @@ impl ColdStorage for MemColdBackend {
             }
             ReceiptSpecifier::BlockAndIndex { block, index } => (block, index),
         };
-        let receipt = inner.receipts.get(&block).and_then(|rs| rs.get(index as usize).cloned());
+        let receipt = inner
+            .receipts
+            .get(&block)
+            .and_then(|rs| rs.get(index as usize))
+            .map(|ir| ir.receipt.clone());
         Ok(receipt
             .zip(inner.confirmation_meta(block, index))
             .map(|(r, meta)| Confirmed::new(r, meta)))
     }
 
-    async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<Receipt>> {
+    async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<IndexedReceipt>> {
         let inner = self.inner.read().await;
         Ok(inner.receipts.get(&block).cloned().unwrap_or_default())
     }
@@ -204,18 +209,10 @@ impl ColdStorage for MemColdBackend {
 
         for (&block_num, receipts) in inner.receipts.range(filter.from_block..=filter.to_block) {
             let block_hash = inner.headers.get(&block_num).map(|h| h.hash()).unwrap_or_default();
-            let txs = inner.transactions.get(&block_num);
-            let mut first_log_index = 0u64;
 
-            for (tx_idx, receipt) in receipts.iter().enumerate() {
-                let tx_hash =
-                    txs.and_then(|ts| ts.get(tx_idx)).map(|t| *t.tx_hash()).unwrap_or_default();
-
-                let base_log_index = first_log_index;
-                first_log_index += receipt.inner.logs.len() as u64;
-
+            for (tx_idx, ir) in receipts.iter().enumerate() {
                 results.extend(
-                    receipt
+                    ir.receipt
                         .inner
                         .logs
                         .iter()
@@ -225,9 +222,9 @@ impl ColdStorage for MemColdBackend {
                             log: log.clone(),
                             block_number: block_num,
                             block_hash,
-                            tx_hash,
+                            tx_hash: ir.tx_hash,
                             tx_index: tx_idx as u64,
-                            block_log_index: base_log_index + log_idx as u64,
+                            block_log_index: ir.first_log_index + log_idx as u64,
                             tx_log_index: log_idx as u64,
                         }),
                 );
@@ -261,7 +258,20 @@ impl ColdStorage for MemColdBackend {
             inner.receipt_tx_hashes.insert(tx_hash, loc);
         }
         inner.transactions.insert(block, data.transactions);
-        inner.receipts.insert(block, data.receipts);
+
+        // Compute IndexedReceipt with precomputed first_log_index and tx_hash
+        let mut first_log_index = 0u64;
+        let indexed_receipts = data
+            .receipts
+            .into_iter()
+            .zip(tx_hashes)
+            .map(|(receipt, tx_hash)| {
+                let ir = IndexedReceipt { receipt, tx_hash, first_log_index };
+                first_log_index += ir.receipt.inner.logs.len() as u64;
+                ir
+            })
+            .collect();
+        inner.receipts.insert(block, indexed_receipts);
 
         // Store signet events
         inner.signet_events.insert(block, data.signet_events);

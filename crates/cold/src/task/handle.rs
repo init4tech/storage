@@ -18,7 +18,9 @@ use alloy::{
     consensus::Header,
     primitives::{B256, BlockNumber},
 };
-use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned};
+use signet_storage_types::{
+    DbSignetEvent, DbZenithHeader, IndexedReceipt, Receipt, TransactionSigned,
+};
 use tokio::sync::{mpsc, oneshot};
 
 /// Map a [`mpsc::error::TrySendError`] to the appropriate
@@ -186,8 +188,11 @@ impl ColdStorageReadHandle {
         self.get_receipt(ReceiptSpecifier::BlockAndIndex { block, index }).await
     }
 
-    /// Get all receipts in a block.
-    pub async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<Receipt>> {
+    /// Get all receipts in a block, with precomputed metadata.
+    pub async fn get_receipts_in_block(
+        &self,
+        block: BlockNumber,
+    ) -> ColdResult<Vec<IndexedReceipt>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetReceiptsInBlock { block, resp }, rx).await
     }

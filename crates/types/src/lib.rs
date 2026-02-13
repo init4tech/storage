@@ -29,7 +29,8 @@ pub use confirmation::ConfirmationMeta;
 
 mod events;
 pub use events::{DbSignetEvent, DbZenithHeader};
-
+mod indexed_receipt;
+pub use indexed_receipt::IndexedReceipt;
 mod int_list;
 pub use int_list::{BlockNumberList, IntegerList, IntegerListError};
 mod log_filter;

@@ -3,10 +3,12 @@
 //! This module defines all tables used by cold storage by manually implementing
 //! the [`Table`], [`SingleKey`], and [`DualKey`] traits.
 
-use alloy::{consensus::Header, primitives::B256, primitives::BlockNumber};
+use alloy::primitives::{B256, BlockNumber};
 use signet_hot::ser::KeySer;
 use signet_hot::tables::{DualKey, SingleKey, Table};
-use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned, TxLocation};
+use signet_storage_types::{
+    DbSignetEvent, DbZenithHeader, IndexedReceipt, SealedHeader, TransactionSigned, TxLocation,
+};
 
 // ============================================================================
 // Primary Data Tables
@@ -22,7 +24,7 @@ impl Table for ColdHeaders {
     const NAME: &'static str = "ColdHeaders";
     const INT_KEY: bool = true;
     type Key = BlockNumber;
-    type Value = Header;
+    type Value = SealedHeader;
 }
 
 impl SingleKey for ColdHeaders {}
@@ -64,7 +66,7 @@ impl Table for ColdReceipts {
     const INT_KEY: bool = true;
     const DUAL_KEY_SIZE: Option<usize> = Some(<u64 as KeySer>::SIZE);
     type Key = BlockNumber;
-    type Value = Receipt;
+    type Value = IndexedReceipt;
 }
 
 impl DualKey for ColdReceipts {

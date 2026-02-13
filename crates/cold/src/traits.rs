@@ -6,7 +6,7 @@
 
 use alloy::{consensus::Header, primitives::BlockNumber};
 use signet_storage_types::{
-    DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, TransactionSigned,
+    DbSignetEvent, DbZenithHeader, ExecutedBlock, IndexedReceipt, Receipt, TransactionSigned,
 };
 use std::future::Future;
 
@@ -165,11 +165,11 @@ pub trait ColdStorage: Send + Sync + 'static {
         spec: ReceiptSpecifier,
     ) -> impl Future<Output = ColdResult<Option<Confirmed<Receipt>>>> + Send;
 
-    /// Get all receipts in a block.
+    /// Get all receipts in a block, with precomputed metadata.
     fn get_receipts_in_block(
         &self,
         block: BlockNumber,
-    ) -> impl Future<Output = ColdResult<Vec<Receipt>>> + Send;
+    ) -> impl Future<Output = ColdResult<Vec<IndexedReceipt>>> + Send;
 
     // --- SignetEvents ---
 
@@ -239,9 +239,12 @@ pub trait ColdStorage: Send + Sync + 'static {
             };
 
             let receipts = self.get_receipts_in_block(block).await?;
-            let prior = &receipts[..index as usize];
-            let prior_cumulative_gas = prior.last().map_or(0, |r| r.inner.cumulative_gas_used);
-            let first_log_index = prior.iter().map(|r| r.inner.logs.len() as u64).sum();
+            let idx = index as usize;
+            let first_log_index = receipts.get(idx).map_or(0, |r| r.first_log_index);
+            let prior_cumulative_gas = idx
+                .checked_sub(1)
+                .and_then(|i| receipts.get(i))
+                .map_or(0, |r| r.receipt.inner.cumulative_gas_used);
 
             Ok(Some(ReceiptContext::new(
                 header,

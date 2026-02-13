@@ -11,8 +11,9 @@ use crate::convert::{
 };
 use alloy::{consensus::Header, primitives::BlockNumber};
 use signet_cold::{
-    BlockData, ColdResult, ColdStorage, ColdStorageError, Confirmed, HeaderSpecifier, LogFilter,
-    ReceiptSpecifier, RichLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdResult, ColdStorage, ColdStorageError, Confirmed, HeaderSpecifier,
+    IndexedReceipt, LogFilter, ReceiptSpecifier, RichLog, SignetEventsSpecifier,
+    TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use signet_storage_types::{
     ConfirmationMeta, DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned,
@@ -567,15 +568,21 @@ impl ColdStorage for SqlColdBackend {
         Ok(Some(Confirmed::new(built, meta)))
     }
 
-    async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<Receipt>> {
+    async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<IndexedReceipt>> {
         let bn = to_i64(block);
 
-        let receipt_rows =
-            sqlx::query("SELECT * FROM receipts WHERE block_number = $1 ORDER BY tx_index")
-                .bind(bn)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(SqlColdError::from)?;
+        // Fetch receipts joined with tx_hash
+        let receipt_rows = sqlx::query(
+            "SELECT r.*, t.tx_hash
+             FROM receipts r
+             JOIN transactions t ON r.block_number = t.block_number AND r.tx_index = t.tx_index
+             WHERE r.block_number = $1
+             ORDER BY r.tx_index",
+        )
+        .bind(bn)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(SqlColdError::from)?;
 
         let all_log_rows =
             sqlx::query("SELECT * FROM logs WHERE block_number = $1 ORDER BY tx_index, log_index")
@@ -591,11 +598,14 @@ impl ColdStorage for SqlColdBackend {
             logs_by_tx.entry(r.get::<i64, _>("tx_index")).or_default().push(row_to_log_row(&r));
         }
 
+        let mut first_log_index = 0u64;
         receipt_rows
             .into_iter()
             .map(|rr| {
                 let tx_idx: i64 = rr.get("tx_index");
-                let receipt = ReceiptRow {
+                let tx_hash_bytes: Vec<u8> = rr.get("tx_hash");
+                let tx_hash = alloy::primitives::B256::from_slice(&tx_hash_bytes);
+                let receipt_row = ReceiptRow {
                     block_number: rr.get("block_number"),
                     tx_index: tx_idx,
                     tx_type: rr.get::<i32, _>("tx_type") as i16,
@@ -603,7 +613,11 @@ impl ColdStorage for SqlColdBackend {
                     cumulative_gas_used: rr.get("cumulative_gas_used"),
                 };
                 let logs = logs_by_tx.remove(&tx_idx).unwrap_or_default();
-                receipt_from_rows(receipt, logs).map_err(ColdStorageError::from)
+                let receipt =
+                    receipt_from_rows(receipt_row, logs).map_err(ColdStorageError::from)?;
+                let ir = IndexedReceipt { receipt, tx_hash, first_log_index };
+                first_log_index += ir.receipt.inner.logs.len() as u64;
+                Ok(ir)
             })
             .collect()
     }
