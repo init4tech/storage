@@ -393,8 +393,9 @@ impl ValSer for IndexedReceipt {
         // tx_hash: 32 bytes
         // first_log_index: 8 bytes
         // gas_used: 8 bytes
+        // sender: 20 bytes
         // receipt: variable
-        32 + 8 + 8 + self.receipt.encoded_size()
+        32 + 8 + 8 + 20 + self.receipt.encoded_size()
     }
 
     fn encode_value_to<B>(&self, buf: &mut B)
@@ -404,6 +405,7 @@ impl ValSer for IndexedReceipt {
         buf.put_slice(self.tx_hash.as_slice());
         buf.put_u64(self.first_log_index);
         buf.put_u64(self.gas_used);
+        buf.put_slice(self.sender.as_slice());
         self.receipt.encode_value_to(buf);
     }
 
@@ -411,14 +413,15 @@ impl ValSer for IndexedReceipt {
     where
         Self: Sized,
     {
-        if data.len() < 48 {
-            return Err(DeserError::InsufficientData { needed: 48, available: data.len() });
+        if data.len() < 68 {
+            return Err(DeserError::InsufficientData { needed: 68, available: data.len() });
         }
         let tx_hash = FixedBytes::from_slice(&data[..32]);
         let first_log_index = u64::from_be_bytes(data[32..40].try_into().unwrap());
         let gas_used = u64::from_be_bytes(data[40..48].try_into().unwrap());
-        let receipt = Receipt::decode_value(&data[48..])?;
-        Ok(Self { receipt, tx_hash, first_log_index, gas_used })
+        let sender = Address::from_slice(&data[48..68]);
+        let receipt = Receipt::decode_value(&data[68..])?;
+        Ok(Self { receipt, tx_hash, first_log_index, gas_used, sender })
     }
 }
 

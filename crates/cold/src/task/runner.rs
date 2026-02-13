@@ -14,7 +14,7 @@ use crate::{
     ColdReadRequest, ColdReceipt, ColdResult, ColdStorage, ColdStorageHandle, ColdWriteRequest,
     Confirmed, HeaderSpecifier, ReceiptSpecifier, TransactionSpecifier,
 };
-use signet_storage_types::{SealedHeader, TransactionSigned};
+use signet_storage_types::{RecoveredTx, SealedHeader};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -55,7 +55,7 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
     async fn fetch_and_cache_tx(
         &self,
         spec: TransactionSpecifier,
-    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
+    ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
         let r = self.backend.get_transaction(spec).await;
         if let Ok(Some(ref c)) = r {
             let meta = c.meta();

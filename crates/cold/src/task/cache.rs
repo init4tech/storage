@@ -6,7 +6,7 @@
 use crate::{ColdReceipt, Confirmed};
 use alloy::primitives::BlockNumber;
 use lru::LruCache;
-use signet_storage_types::{SealedHeader, TransactionSigned};
+use signet_storage_types::{RecoveredTx, SealedHeader};
 use std::num::NonZeroUsize;
 
 /// Default capacity for each LRU cache map.
@@ -28,7 +28,7 @@ fn evict_where<K: Copy + Eq + std::hash::Hash, V>(
 /// Keys are `(BlockNumber, tx_index)` for transactions and receipts,
 /// and `BlockNumber` for headers.
 pub(crate) struct ColdCache {
-    transactions: LruCache<(BlockNumber, u64), Confirmed<TransactionSigned>>,
+    transactions: LruCache<(BlockNumber, u64), Confirmed<RecoveredTx>>,
     receipts: LruCache<(BlockNumber, u64), ColdReceipt>,
     headers: LruCache<BlockNumber, SealedHeader>,
 }
@@ -50,15 +50,12 @@ impl ColdCache {
     }
 
     /// Look up a cached transaction by `(block_number, tx_index)`.
-    pub(crate) fn get_tx(
-        &mut self,
-        key: &(BlockNumber, u64),
-    ) -> Option<Confirmed<TransactionSigned>> {
+    pub(crate) fn get_tx(&mut self, key: &(BlockNumber, u64)) -> Option<Confirmed<RecoveredTx>> {
         self.transactions.get(key).cloned()
     }
 
     /// Insert a transaction into the cache.
-    pub(crate) fn put_tx(&mut self, key: (BlockNumber, u64), val: Confirmed<TransactionSigned>) {
+    pub(crate) fn put_tx(&mut self, key: (BlockNumber, u64), val: Confirmed<RecoveredTx>) {
         self.transactions.put(key, val);
     }
 

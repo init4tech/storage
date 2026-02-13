@@ -2,7 +2,7 @@
 
 use alloy::{
     consensus::{Receipt as ConsensusReceipt, TxType},
-    primitives::{B256, BlockNumber},
+    primitives::{Address, B256, BlockNumber},
 };
 use signet_storage_types::{IndexedReceipt, SealedHeader};
 
@@ -32,6 +32,8 @@ pub struct ColdReceipt {
     pub block_timestamp: u64,
     /// Index of this transaction within the block.
     pub transaction_index: u64,
+    /// Address of the transaction sender.
+    pub from: Address,
 }
 
 impl ColdReceipt {
@@ -78,6 +80,7 @@ impl ColdReceipt {
             block_hash,
             block_timestamp,
             transaction_index,
+            from: ir.sender,
         }
     }
 }

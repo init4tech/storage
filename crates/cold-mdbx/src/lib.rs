@@ -1,12 +1,13 @@
 //! MDBX table definitions and backend for cold storage.
 //!
 //! This crate provides table definitions for storing historical blockchain data
-//! in MDBX. It defines 8 tables:
+//! in MDBX. It defines 9 tables:
 //!
 //! ## Primary Data Tables
 //!
 //! - [`ColdHeaders`]: Block headers indexed by block number.
 //! - [`ColdTransactions`]: Transactions indexed by (block number, tx index).
+//! - [`ColdTxSenders`]: Transaction senders indexed by (block number, tx index).
 //! - [`ColdReceipts`]: Receipts indexed by (block number, tx index).
 //! - [`ColdSignetEvents`]: Signet events indexed by (block number, event index).
 //! - [`ColdZenithHeaders`]: Zenith headers indexed by block number.
@@ -39,7 +40,7 @@ pub use error::MdbxColdError;
 mod tables;
 pub use tables::{
     ColdBlockHashIndex, ColdHeaders, ColdReceipts, ColdSignetEvents, ColdTransactions,
-    ColdTxHashIndex, ColdZenithHeaders,
+    ColdTxHashIndex, ColdTxSenders, ColdZenithHeaders,
 };
 
 mod backend;

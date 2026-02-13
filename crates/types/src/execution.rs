@@ -3,7 +3,7 @@
 //! This module provides the [`ExecutedBlock`] type which contains all data
 //! needed by both hot and cold storage systems for a single executed block.
 
-use crate::{DbSignetEvent, DbZenithHeader, Receipt, SealedHeader, TransactionSigned};
+use crate::{DbSignetEvent, DbZenithHeader, Receipt, RecoveredTx, SealedHeader};
 use alloy::primitives::BlockNumber;
 use core::fmt;
 use trevm::revm::database::BundleState;
@@ -34,8 +34,8 @@ pub struct ExecutedBlock {
     pub header: SealedHeader,
     /// The state changes from execution (accounts, storage, bytecode).
     pub bundle: BundleState,
-    /// The signed transactions in the block.
-    pub transactions: Vec<TransactionSigned>,
+    /// The signed transactions in the block, with recovered senders.
+    pub transactions: Vec<RecoveredTx>,
     /// The receipts from execution.
     pub receipts: Vec<Receipt>,
     /// Extracted signet events from the block.
@@ -49,7 +49,7 @@ impl ExecutedBlock {
     pub const fn new(
         header: SealedHeader,
         bundle: BundleState,
-        transactions: Vec<TransactionSigned>,
+        transactions: Vec<RecoveredTx>,
         receipts: Vec<Receipt>,
         signet_events: Vec<DbSignetEvent>,
         zenith_header: Option<DbZenithHeader>,
@@ -81,7 +81,7 @@ impl ExecutedBlock {
 pub struct ExecutedBlockBuilder {
     header: Option<SealedHeader>,
     bundle: Option<BundleState>,
-    transactions: Vec<TransactionSigned>,
+    transactions: Vec<RecoveredTx>,
     receipts: Vec<Receipt>,
     signet_events: Vec<DbSignetEvent>,
     zenith_header: Option<DbZenithHeader>,
@@ -106,7 +106,7 @@ impl ExecutedBlockBuilder {
     }
 
     /// Set the transactions.
-    pub fn transactions(mut self, transactions: Vec<TransactionSigned>) -> Self {
+    pub fn transactions(mut self, transactions: Vec<RecoveredTx>) -> Self {
         self.transactions = transactions;
         self
     }

@@ -20,6 +20,7 @@ pub use account::Account;
 mod confirmed;
 pub use confirmed::Confirmed;
 mod execution;
+pub use ::alloy::consensus::transaction::Recovered;
 pub use execution::{ExecutedBlock, ExecutedBlockBuilder, MissingFieldError};
 
 mod alloy;
@@ -43,6 +44,9 @@ mod util;
 pub use util::{EthereumHardfork, genesis_header};
 
 use ::alloy::consensus::{Header, Sealed};
+
+/// A recovered transaction type.
+pub type RecoveredTx = Recovered<TransactionSigned>;
 
 /// A sealed header type.
 pub type SealedHeader = Sealed<Header>;

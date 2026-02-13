@@ -1,7 +1,7 @@
 //! Receipt type with precomputed block-level metadata.
 
 use crate::Receipt;
-use alloy::primitives::B256;
+use alloy::primitives::{Address, B256};
 
 /// A receipt with precomputed block-level metadata.
 ///
@@ -35,4 +35,8 @@ pub struct IndexedReceipt {
     /// Computed from the cumulative gas sequence:
     /// `receipt.cumulative_gas_used - prior_receipt.cumulative_gas_used`.
     pub gas_used: u64,
+    /// Address of the transaction sender.
+    ///
+    /// Stored at append time to avoid re-running `ecrecover` at query time.
+    pub sender: Address,
 }

@@ -6,7 +6,7 @@
 
 use alloy::primitives::BlockNumber;
 use signet_storage_types::{
-    DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, SealedHeader, TransactionSigned,
+    DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, RecoveredTx, SealedHeader,
 };
 use std::future::Future;
 
@@ -20,8 +20,8 @@ use super::{
 pub struct BlockData {
     /// The sealed block header (contains cached hash).
     pub header: SealedHeader,
-    /// The transactions in the block.
-    pub transactions: Vec<TransactionSigned>,
+    /// The transactions in the block, with recovered senders.
+    pub transactions: Vec<RecoveredTx>,
     /// The receipts for the transactions.
     pub receipts: Vec<Receipt>,
     /// The signet events in the block.
@@ -34,7 +34,7 @@ impl BlockData {
     /// Create new block data.
     pub const fn new(
         header: SealedHeader,
-        transactions: Vec<TransactionSigned>,
+        transactions: Vec<RecoveredTx>,
         receipts: Vec<Receipt>,
         signet_events: Vec<DbSignetEvent>,
         zenith_header: Option<DbZenithHeader>,
@@ -108,13 +108,13 @@ pub trait ColdStorage: Send + Sync + 'static {
     fn get_transaction(
         &self,
         spec: TransactionSpecifier,
-    ) -> impl Future<Output = ColdResult<Option<Confirmed<TransactionSigned>>>> + Send;
+    ) -> impl Future<Output = ColdResult<Option<Confirmed<RecoveredTx>>>> + Send;
 
     /// Get all transactions in a block.
     fn get_transactions_in_block(
         &self,
         block: BlockNumber,
-    ) -> impl Future<Output = ColdResult<Vec<TransactionSigned>>> + Send;
+    ) -> impl Future<Output = ColdResult<Vec<RecoveredTx>>> + Send;
 
     /// Get the number of transactions in a block.
     fn get_transaction_count(

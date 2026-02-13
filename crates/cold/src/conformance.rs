@@ -9,12 +9,13 @@ use crate::{
     TransactionSpecifier,
 };
 use alloy::{
+    consensus::transaction::Recovered,
     consensus::{Header, Receipt as AlloyReceipt, Sealable, Signed, TxLegacy},
     primitives::{
         Address, B256, BlockNumber, Bytes, Log, LogData, Signature, TxKind, U256, address,
     },
 };
-use signet_storage_types::{Receipt, TransactionSigned};
+use signet_storage_types::{Receipt, RecoveredTx, TransactionSigned};
 
 /// Run all conformance tests against a backend.
 ///
@@ -43,11 +44,14 @@ pub fn make_test_block(block_number: BlockNumber) -> BlockData {
     BlockData::new(header.seal_slow(), vec![], vec![], vec![], None)
 }
 
-/// Create a test transaction with a unique nonce.
-fn make_test_tx(nonce: u64) -> TransactionSigned {
+/// Create a test transaction with a unique nonce and deterministic sender.
+fn make_test_tx(nonce: u64) -> RecoveredTx {
     let tx = TxLegacy { nonce, to: TxKind::Call(Default::default()), ..Default::default() };
     let sig = Signature::new(U256::from(nonce + 1), U256::from(nonce + 2), false);
-    alloy::consensus::EthereumTxEnvelope::Legacy(Signed::new_unhashed(tx, sig))
+    let signed: TransactionSigned =
+        alloy::consensus::EthereumTxEnvelope::Legacy(Signed::new_unhashed(tx, sig));
+    let sender = Address::with_last_byte(nonce as u8);
+    Recovered::new_unchecked(signed, sender)
 }
 
 /// Create a test receipt.
@@ -78,7 +82,7 @@ fn make_test_receipt_with_logs(log_count: usize, cumulative_gas: u64) -> Receipt
 /// Create test block data with transactions and receipts.
 fn make_test_block_with_txs(block_number: BlockNumber, tx_count: usize) -> BlockData {
     let header = Header { number: block_number, ..Default::default() };
-    let transactions: Vec<_> =
+    let transactions: Vec<RecoveredTx> =
         (0..tx_count).map(|i| make_test_tx(block_number * 100 + i as u64)).collect();
     let receipts: Vec<_> = (0..tx_count).map(|_| make_test_receipt()).collect();
     BlockData::new(header.seal_slow(), transactions, receipts, vec![], None)
@@ -157,6 +161,7 @@ pub async fn test_confirmation_metadata<B: ColdStorage>(backend: &B) -> ColdResu
     let block = make_test_block_with_txs(600, 3);
     let expected_hash = block.header.hash();
     let tx_hashes: Vec<_> = block.transactions.iter().map(|tx| *tx.tx_hash()).collect();
+    let expected_senders: Vec<_> = block.transactions.iter().map(|tx| *tx.signer()).collect();
 
     backend.append_block(block).await?;
 
@@ -167,6 +172,7 @@ pub async fn test_confirmation_metadata<B: ColdStorage>(backend: &B) -> ColdResu
         assert_eq!(confirmed.meta().block_number(), 600);
         assert_eq!(confirmed.meta().block_hash(), expected_hash);
         assert_eq!(confirmed.meta().transaction_index(), idx as u64);
+        assert_eq!(*confirmed.inner().signer(), expected_senders[idx]);
     }
 
     // Verify transaction metadata via block+index lookup
@@ -177,6 +183,7 @@ pub async fn test_confirmation_metadata<B: ColdStorage>(backend: &B) -> ColdResu
     assert_eq!(confirmed.meta().block_number(), 600);
     assert_eq!(confirmed.meta().block_hash(), expected_hash);
     assert_eq!(confirmed.meta().transaction_index(), 1);
+    assert_eq!(*confirmed.inner().signer(), expected_senders[1]);
 
     // Verify transaction metadata via block_hash+index lookup
     let confirmed = backend
@@ -188,6 +195,7 @@ pub async fn test_confirmation_metadata<B: ColdStorage>(backend: &B) -> ColdResu
         .unwrap();
     assert_eq!(confirmed.meta().block_number(), 600);
     assert_eq!(confirmed.meta().transaction_index(), 2);
+    assert_eq!(*confirmed.inner().signer(), expected_senders[2]);
 
     // Verify receipt metadata via tx hash lookup
     let cold_receipt = backend.get_receipt(ReceiptSpecifier::TxHash(tx_hashes[0])).await?.unwrap();
@@ -263,14 +271,15 @@ pub async fn test_latest_block_tracking<B: ColdStorage>(backend: &B) -> ColdResu
 }
 
 /// Test ColdReceipt metadata: gas_used, first_log_index, tx_hash,
-/// block_hash, block_number, transaction_index.
+/// block_hash, block_number, transaction_index, from.
 pub async fn test_cold_receipt_metadata<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     // Block with 3 receipts having 2, 3, and 1 logs respectively.
     let header = Header { number: 700, ..Default::default() };
     let sealed = header.seal_slow();
     let block_hash = sealed.hash();
-    let transactions: Vec<_> = (0..3).map(|i| make_test_tx(700 * 100 + i)).collect();
+    let transactions: Vec<RecoveredTx> = (0..3).map(|i| make_test_tx(700 * 100 + i)).collect();
     let tx_hashes: Vec<_> = transactions.iter().map(|t| *t.tx_hash()).collect();
+    let expected_senders: Vec<_> = transactions.iter().map(|t| t.signer()).collect();
     let receipts = vec![
         make_test_receipt_with_logs(2, 21000),
         make_test_receipt_with_logs(3, 42000),
@@ -289,6 +298,7 @@ pub async fn test_cold_receipt_metadata<B: ColdStorage>(backend: &B) -> ColdResu
     assert_eq!(first.block_hash, block_hash);
     assert_eq!(first.transaction_index, 0);
     assert_eq!(first.tx_hash, tx_hashes[0]);
+    assert_eq!(first.from, expected_senders[0]);
     assert_eq!(first.gas_used, 21000);
     assert_eq!(first.receipt.logs[0].log_index, Some(0));
     assert_eq!(first.receipt.logs[1].log_index, Some(1));
@@ -316,6 +326,7 @@ pub async fn test_cold_receipt_metadata<B: ColdStorage>(backend: &B) -> ColdResu
     let by_hash = backend.get_receipt(ReceiptSpecifier::TxHash(tx_hashes[1])).await?.unwrap();
     assert_eq!(by_hash.transaction_index, 1);
     assert_eq!(by_hash.tx_hash, tx_hashes[1]);
+    assert_eq!(by_hash.from, expected_senders[1]);
     assert_eq!(by_hash.receipt.logs[0].log_index, Some(2));
 
     // Verify gas_used on all receipts via get_receipts_in_block
@@ -353,7 +364,7 @@ fn make_receipt_from_logs(logs: Vec<Log>) -> Receipt {
 fn make_test_block_with_receipts(block_number: BlockNumber, receipts: Vec<Receipt>) -> BlockData {
     let header =
         Header { number: block_number, timestamp: block_number * 12, ..Default::default() };
-    let transactions: Vec<_> =
+    let transactions: Vec<RecoveredTx> =
         (0..receipts.len()).map(|i| make_test_tx(block_number * 100 + i as u64)).collect();
     BlockData::new(header.seal_slow(), transactions, receipts, vec![], None)
 }

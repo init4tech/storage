@@ -148,7 +148,7 @@ mod request;
 pub use request::{AppendBlockRequest, ColdReadRequest, ColdWriteRequest, Responder};
 mod specifier;
 pub use alloy::rpc::types::{Filter, Log as RpcLog};
-pub use signet_storage_types::Confirmed;
+pub use signet_storage_types::{Confirmed, Recovered};
 pub use specifier::{
     HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
     ZenithHeaderSpecifier,

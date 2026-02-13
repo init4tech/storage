@@ -9,14 +9,17 @@ use crate::convert::{
     HeaderRow, LogRow, ReceiptRow, SignetEventRow, TxRow, ZenithHeaderRow, from_i64,
     receipt_from_rows, to_i64,
 };
-use alloy::{consensus::Sealable, primitives::BlockNumber};
+use alloy::{
+    consensus::transaction::Recovered,
+    primitives::{BlockNumber, Sealable},
+};
 use signet_cold::{
     BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter,
     HeaderSpecifier, ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier,
     ZenithHeaderSpecifier,
 };
 use signet_storage_types::{
-    ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, SealedHeader,
+    ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, RecoveredTx, SealedHeader,
     TransactionSigned,
 };
 use sqlx::{AnyPool, Row};
@@ -58,9 +61,15 @@ impl SqlColdBackend {
         let backend = conn.backend_name().to_owned();
         drop(conn);
 
-        let migration = match backend.as_str() {
-            "PostgreSQL" => include_str!("../migrations/001_initial_pg.sql"),
-            "SQLite" => include_str!("../migrations/001_initial.sql"),
+        let (migration, migration_002) = match backend.as_str() {
+            "PostgreSQL" => (
+                include_str!("../migrations/001_initial_pg.sql"),
+                include_str!("../migrations/002_add_from_address_pg.sql"),
+            ),
+            "SQLite" => (
+                include_str!("../migrations/001_initial.sql"),
+                include_str!("../migrations/002_add_from_address.sql"),
+            ),
             other => {
                 return Err(SqlColdError::Convert(format!(
                     "unsupported database backend: {other}"
@@ -70,6 +79,15 @@ impl SqlColdBackend {
         // Execute via pool to ensure the migration uses the same
         // connection that subsequent queries will use.
         sqlx::raw_sql(migration).execute(&pool).await?;
+        // Run migration 002 (add from_address column). Idempotent:
+        // SQLite ALTER will fail if column already exists, so we
+        // ignore that specific error.
+        if let Err(e) = sqlx::raw_sql(migration_002).execute(&pool).await {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") && !msg.contains("already exists") {
+                return Err(e.into());
+            }
+        }
         Ok(Self { pool })
     }
 
@@ -202,8 +220,10 @@ impl SqlColdBackend {
         .await?;
 
         // Insert transactions
-        for (idx, tx_signed) in data.transactions.iter().enumerate() {
-            let tr = TxRow::from_tx(tx_signed, bn, to_i64(idx as u64))?;
+        for (idx, recovered_tx) in data.transactions.iter().enumerate() {
+            let sender = recovered_tx.signer();
+            let tx_signed: &TransactionSigned = recovered_tx;
+            let tr = TxRow::from_tx(tx_signed, bn, to_i64(idx as u64), &sender)?;
             sqlx::query(
                 "INSERT INTO transactions (
                     block_number, tx_index, tx_hash, tx_type,
@@ -211,10 +231,10 @@ impl SqlColdBackend {
                     chain_id, nonce, gas_limit, to_address, value, input,
                     gas_price, max_fee_per_gas, max_priority_fee_per_gas,
                     max_fee_per_blob_gas, blob_versioned_hashes,
-                    access_list, authorization_list
+                    access_list, authorization_list, from_address
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
                 )",
             )
             .bind(tr.block_number)
@@ -237,6 +257,7 @@ impl SqlColdBackend {
             .bind(&tr.blob_versioned_hashes)
             .bind(&tr.access_list)
             .bind(&tr.authorization_list)
+            .bind(&tr.from_address)
             .execute(&mut *tx)
             .await?;
         }
@@ -351,6 +372,7 @@ fn row_to_tx_row(r: &sqlx::any::AnyRow) -> TxRow {
         blob_versioned_hashes: r.get("blob_versioned_hashes"),
         access_list: r.get("access_list"),
         authorization_list: r.get("authorization_list"),
+        from_address: r.get::<Option<Vec<u8>>, _>("from_address").unwrap_or_default(),
     }
 }
 
@@ -421,7 +443,7 @@ impl ColdStorage for SqlColdBackend {
     async fn get_transaction(
         &self,
         spec: TransactionSpecifier,
-    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
+    ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
         let row = match spec {
             TransactionSpecifier::Hash(hash) => sqlx::query(
                 "SELECT t.*, h.block_hash
@@ -461,19 +483,20 @@ impl ColdStorage for SqlColdBackend {
             return Ok(None);
         };
 
-        let tx = row_to_tx_row(&r).into_tx().map_err(ColdStorageError::from)?;
+        let tx_row = row_to_tx_row(&r);
+        let sender = alloy::primitives::Address::from_slice(&tx_row.from_address);
+        let tx = tx_row.into_tx().map_err(ColdStorageError::from)?;
         let block = from_i64(r.get::<i64, _>("block_number"));
         let index = from_i64(r.get::<i64, _>("tx_index"));
         let hash_bytes: Vec<u8> = r.get("block_hash");
         let block_hash = alloy::primitives::B256::from_slice(&hash_bytes);
         let meta = ConfirmationMeta::new(block, block_hash, index);
-        Ok(Some(Confirmed::new(tx, meta)))
+        // SAFETY: the sender was recovered at append time and stored in from_address.
+        let recovered = Recovered::new_unchecked(tx, sender);
+        Ok(Some(Confirmed::new(recovered, meta)))
     }
 
-    async fn get_transactions_in_block(
-        &self,
-        block: BlockNumber,
-    ) -> ColdResult<Vec<TransactionSigned>> {
+    async fn get_transactions_in_block(&self, block: BlockNumber) -> ColdResult<Vec<RecoveredTx>> {
         let bn = to_i64(block);
         let rows =
             sqlx::query("SELECT * FROM transactions WHERE block_number = $1 ORDER BY tx_index")
@@ -483,7 +506,13 @@ impl ColdStorage for SqlColdBackend {
                 .map_err(SqlColdError::from)?;
 
         rows.into_iter()
-            .map(|r| row_to_tx_row(&r).into_tx().map_err(ColdStorageError::from))
+            .map(|r| {
+                let tx_row = row_to_tx_row(&r);
+                let sender = alloy::primitives::Address::from_slice(&tx_row.from_address);
+                let tx = tx_row.into_tx().map_err(ColdStorageError::from)?;
+                // SAFETY: the sender was recovered at append time.
+                Ok(Recovered::new_unchecked(tx, sender))
+            })
             .collect()
     }
 
@@ -519,9 +548,9 @@ impl ColdStorage for SqlColdBackend {
             return Ok(None);
         };
 
-        // Fetch receipt + tx_hash
+        // Fetch receipt + tx_hash + from_address
         let receipt_row = sqlx::query(
-            "SELECT r.*, t.tx_hash
+            "SELECT r.*, t.tx_hash, t.from_address
              FROM receipts r
              JOIN transactions t ON r.block_number = t.block_number AND r.tx_index = t.tx_index
              WHERE r.block_number = $1 AND r.tx_index = $2",
@@ -540,6 +569,8 @@ impl ColdStorage for SqlColdBackend {
         let tx_idx: i64 = rr.get("tx_index");
         let tx_hash_bytes: Vec<u8> = rr.get("tx_hash");
         let tx_hash = alloy::primitives::B256::from_slice(&tx_hash_bytes);
+        let from_bytes: Vec<u8> = rr.get::<Option<Vec<u8>>, _>("from_address").unwrap_or_default();
+        let sender = alloy::primitives::Address::from_slice(&from_bytes);
 
         let receipt = ReceiptRow {
             block_number: bn,
@@ -581,7 +612,7 @@ impl ColdStorage for SqlColdBackend {
             prior.get::<Option<i64>, _>("prior_gas").unwrap_or(0) as u64;
         let gas_used = built.inner.cumulative_gas_used - prior_cumulative_gas;
 
-        let ir = IndexedReceipt { receipt: built, tx_hash, first_log_index, gas_used };
+        let ir = IndexedReceipt { receipt: built, tx_hash, first_log_index, gas_used, sender };
         Ok(Some(ColdReceipt::new(ir, &header, index)))
     }
 
@@ -594,9 +625,9 @@ impl ColdStorage for SqlColdBackend {
 
         let bn = to_i64(block);
 
-        // Fetch receipts joined with tx_hash
+        // Fetch receipts joined with tx_hash and from_address
         let receipt_rows = sqlx::query(
-            "SELECT r.*, t.tx_hash
+            "SELECT r.*, t.tx_hash, t.from_address
              FROM receipts r
              JOIN transactions t ON r.block_number = t.block_number AND r.tx_index = t.tx_index
              WHERE r.block_number = $1
@@ -630,6 +661,9 @@ impl ColdStorage for SqlColdBackend {
                 let tx_idx: i64 = rr.get("tx_index");
                 let tx_hash_bytes: Vec<u8> = rr.get("tx_hash");
                 let tx_hash = alloy::primitives::B256::from_slice(&tx_hash_bytes);
+                let from_bytes: Vec<u8> =
+                    rr.get::<Option<Vec<u8>>, _>("from_address").unwrap_or_default();
+                let sender = alloy::primitives::Address::from_slice(&from_bytes);
                 let receipt_row = ReceiptRow {
                     block_number: rr.get("block_number"),
                     tx_index: tx_idx,
@@ -642,7 +676,7 @@ impl ColdStorage for SqlColdBackend {
                     receipt_from_rows(receipt_row, logs).map_err(ColdStorageError::from)?;
                 let gas_used = receipt.inner.cumulative_gas_used - prior_cumulative_gas;
                 prior_cumulative_gas = receipt.inner.cumulative_gas_used;
-                let ir = IndexedReceipt { receipt, tx_hash, first_log_index, gas_used };
+                let ir = IndexedReceipt { receipt, tx_hash, first_log_index, gas_used, sender };
                 first_log_index += ir.receipt.inner.logs.len() as u64;
                 Ok(ColdReceipt::new(ir, &header, idx as u64))
             })

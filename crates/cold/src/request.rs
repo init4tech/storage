@@ -8,7 +8,7 @@ use crate::{
     RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::primitives::BlockNumber;
-use signet_storage_types::{DbSignetEvent, DbZenithHeader, SealedHeader, TransactionSigned};
+use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
 use tokio::sync::oneshot;
 
 /// Response sender type alias that propagates Result types.
@@ -50,14 +50,14 @@ pub enum ColdReadRequest {
         /// The transaction specifier.
         spec: TransactionSpecifier,
         /// The response channel.
-        resp: Responder<Option<Confirmed<TransactionSigned>>>,
+        resp: Responder<Option<Confirmed<RecoveredTx>>>,
     },
     /// Get all transactions in a block.
     GetTransactionsInBlock {
         /// The block number.
         block: BlockNumber,
         /// The response channel.
-        resp: Responder<Vec<TransactionSigned>>,
+        resp: Responder<Vec<RecoveredTx>>,
     },
     /// Get the transaction count for a block.
     GetTransactionCount {

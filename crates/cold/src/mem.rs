@@ -9,8 +9,7 @@ use crate::{
 };
 use alloy::primitives::{B256, BlockNumber};
 use signet_storage_types::{
-    ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, SealedHeader,
-    TransactionSigned,
+    ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, RecoveredTx, SealedHeader,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -27,7 +26,7 @@ struct MemColdBackendInner {
     header_hashes: HashMap<B256, BlockNumber>,
 
     /// Transactions indexed by block number.
-    transactions: BTreeMap<BlockNumber, Vec<TransactionSigned>>,
+    transactions: BTreeMap<BlockNumber, Vec<RecoveredTx>>,
     /// Transaction hash to (block number, tx index) index.
     tx_hashes: HashMap<B256, (BlockNumber, u64)>,
 
@@ -100,7 +99,7 @@ impl ColdStorage for MemColdBackend {
     async fn get_transaction(
         &self,
         spec: TransactionSpecifier,
-    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
+    ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
         let inner = self.inner.read().await;
         let (block, index) = match spec {
             TransactionSpecifier::Hash(h) => {
@@ -119,10 +118,7 @@ impl ColdStorage for MemColdBackend {
         Ok(tx.zip(inner.confirmation_meta(block, index)).map(|(tx, meta)| Confirmed::new(tx, meta)))
     }
 
-    async fn get_transactions_in_block(
-        &self,
-        block: BlockNumber,
-    ) -> ColdResult<Vec<TransactionSigned>> {
+    async fn get_transactions_in_block(&self, block: BlockNumber) -> ColdResult<Vec<RecoveredTx>> {
         let inner = self.inner.read().await;
         Ok(inner.transactions.get(&block).cloned().unwrap_or_default())
     }
@@ -259,9 +255,10 @@ impl ColdStorage for MemColdBackend {
         inner.headers.insert(block, data.header);
         inner.header_hashes.insert(header_hash, block);
 
-        // Build tx hash index and store both tx and receipt hash mappings
-        let tx_hashes: Vec<_> = data.transactions.iter().map(|tx| *tx.hash()).collect();
-        for (idx, &tx_hash) in tx_hashes.iter().enumerate() {
+        // Build tx hash and sender index, store both tx and receipt hash mappings
+        let tx_meta: Vec<_> =
+            data.transactions.iter().map(|tx| (*tx.tx_hash(), tx.signer())).collect();
+        for (idx, &(tx_hash, _)) in tx_meta.iter().enumerate() {
             let loc = (block, idx as u64);
             inner.tx_hashes.insert(tx_hash, loc);
             inner.receipt_tx_hashes.insert(tx_hash, loc);
@@ -274,11 +271,11 @@ impl ColdStorage for MemColdBackend {
         let indexed_receipts = data
             .receipts
             .into_iter()
-            .zip(tx_hashes)
-            .map(|(receipt, tx_hash)| {
+            .zip(tx_meta)
+            .map(|(receipt, (tx_hash, sender))| {
                 let gas_used = receipt.inner.cumulative_gas_used - prior_cumulative_gas;
                 prior_cumulative_gas = receipt.inner.cumulative_gas_used;
-                let ir = IndexedReceipt { receipt, tx_hash, first_log_index, gas_used };
+                let ir = IndexedReceipt { receipt, tx_hash, first_log_index, gas_used, sender };
                 first_log_index += ir.receipt.inner.logs.len() as u64;
                 ir
             })

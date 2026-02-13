@@ -15,7 +15,7 @@ use crate::{
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::primitives::{B256, BlockNumber};
-use signet_storage_types::{DbSignetEvent, DbZenithHeader, SealedHeader, TransactionSigned};
+use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
 use tokio::sync::{mpsc, oneshot};
 
 /// Map a [`mpsc::error::TrySendError`] to the appropriate
@@ -110,16 +110,13 @@ impl ColdStorageReadHandle {
     pub async fn get_transaction(
         &self,
         spec: TransactionSpecifier,
-    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
+    ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetTransaction { spec, resp }, rx).await
     }
 
     /// Get a transaction by hash.
-    pub async fn get_tx_by_hash(
-        &self,
-        hash: B256,
-    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
+    pub async fn get_tx_by_hash(&self, hash: B256) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
         self.get_transaction(TransactionSpecifier::Hash(hash)).await
     }
 
@@ -128,7 +125,7 @@ impl ColdStorageReadHandle {
         &self,
         block: BlockNumber,
         index: u64,
-    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
+    ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
         self.get_transaction(TransactionSpecifier::BlockAndIndex { block, index }).await
     }
 
@@ -137,7 +134,7 @@ impl ColdStorageReadHandle {
         &self,
         block_hash: B256,
         index: u64,
-    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
+    ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
         self.get_transaction(TransactionSpecifier::BlockHashAndIndex { block_hash, index }).await
     }
 
@@ -145,7 +142,7 @@ impl ColdStorageReadHandle {
     pub async fn get_transactions_in_block(
         &self,
         block: BlockNumber,
-    ) -> ColdResult<Vec<TransactionSigned>> {
+    ) -> ColdResult<Vec<RecoveredTx>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetTransactionsInBlock { block, resp }, rx).await
     }
