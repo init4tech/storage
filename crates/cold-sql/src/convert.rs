@@ -42,8 +42,8 @@ pub(crate) const fn from_i64(v: i64) -> u64 {
 // ============================================================================
 
 /// Encode a U256 as 32 big-endian bytes.
-pub(crate) fn encode_u256(v: &U256) -> Vec<u8> {
-    v.to_be_bytes::<32>().to_vec()
+pub(crate) const fn encode_u256(v: &U256) -> [u8; 32] {
+    v.to_be_bytes::<32>()
 }
 
 /// Decode a U256 from big-endian bytes.
@@ -55,8 +55,8 @@ pub(crate) fn decode_u256(data: &[u8]) -> Result<U256, SqlColdError> {
 }
 
 /// Encode a u128 as 16 big-endian bytes.
-pub(crate) fn encode_u128(v: u128) -> Vec<u8> {
-    v.to_be_bytes().to_vec()
+pub(crate) const fn encode_u128(v: u128) -> [u8; 16] {
+    v.to_be_bytes()
 }
 
 /// Decode a u128 from big-endian bytes.
@@ -71,10 +71,9 @@ pub(crate) fn decode_u128(data: &[u8]) -> Result<u128, SqlColdError> {
 // Header conversion
 // ============================================================================
 
-/// Row data for a header in SQL.
+/// Row data for a header read from SQL.
 pub(crate) struct HeaderRow {
     pub block_number: i64,
-    pub block_hash: Vec<u8>,
     pub parent_hash: Vec<u8>,
     pub ommers_hash: Vec<u8>,
     pub beneficiary: Vec<u8>,
@@ -97,61 +96,32 @@ pub(crate) struct HeaderRow {
     pub requests_hash: Option<Vec<u8>>,
 }
 
-impl HeaderRow {
-    /// Convert a header to a SQL row.
-    pub(crate) fn from_header(header: &Header) -> Self {
-        Self {
-            block_number: to_i64(header.number),
-            block_hash: header.hash_slow().as_slice().to_vec(),
-            parent_hash: header.parent_hash.as_slice().to_vec(),
-            ommers_hash: header.ommers_hash.as_slice().to_vec(),
-            beneficiary: header.beneficiary.as_slice().to_vec(),
-            state_root: header.state_root.as_slice().to_vec(),
-            transactions_root: header.transactions_root.as_slice().to_vec(),
-            receipts_root: header.receipts_root.as_slice().to_vec(),
-            logs_bloom: header.logs_bloom.as_slice().to_vec(),
-            difficulty: encode_u256(&header.difficulty),
-            gas_limit: to_i64(header.gas_limit),
-            gas_used: to_i64(header.gas_used),
-            timestamp: to_i64(header.timestamp),
-            extra_data: header.extra_data.to_vec(),
-            mix_hash: header.mix_hash.as_slice().to_vec(),
-            nonce: header.nonce.as_slice().to_vec(),
-            base_fee_per_gas: header.base_fee_per_gas.map(to_i64),
-            withdrawals_root: header.withdrawals_root.map(|r| r.as_slice().to_vec()),
-            blob_gas_used: header.blob_gas_used.map(to_i64),
-            excess_blob_gas: header.excess_blob_gas.map(to_i64),
-            parent_beacon_block_root: header
-                .parent_beacon_block_root
-                .map(|r| r.as_slice().to_vec()),
-            requests_hash: header.requests_hash.map(|r| r.as_slice().to_vec()),
-        }
-    }
+impl TryFrom<HeaderRow> for Header {
+    type Error = SqlColdError;
 
-    /// Convert a SQL row back to a header.
-    pub(crate) fn into_header(self) -> Result<Header, SqlColdError> {
-        Ok(Header {
-            parent_hash: B256::from_slice(&self.parent_hash),
-            ommers_hash: B256::from_slice(&self.ommers_hash),
-            beneficiary: Address::from_slice(&self.beneficiary),
-            state_root: B256::from_slice(&self.state_root),
-            transactions_root: B256::from_slice(&self.transactions_root),
-            receipts_root: B256::from_slice(&self.receipts_root),
-            logs_bloom: Bloom::from_slice(&self.logs_bloom),
-            difficulty: decode_u256(&self.difficulty)?,
-            number: from_i64(self.block_number),
-            gas_limit: from_i64(self.gas_limit),
-            gas_used: from_i64(self.gas_used),
-            timestamp: from_i64(self.timestamp),
-            extra_data: Bytes::from(self.extra_data),
-            mix_hash: B256::from_slice(&self.mix_hash),
-            nonce: alloy::primitives::B64::from_slice(&self.nonce),
-            base_fee_per_gas: self.base_fee_per_gas.map(from_i64),
-            withdrawals_root: self.withdrawals_root.map(|b| B256::from_slice(&b)),
-            blob_gas_used: self.blob_gas_used.map(from_i64),
-            excess_blob_gas: self.excess_blob_gas.map(from_i64),
-            parent_beacon_block_root: self.parent_beacon_block_root.map(|b| B256::from_slice(&b)),
-            requests_hash: self.requests_hash.map(|b| B256::from_slice(&b)),
+    fn try_from(row: HeaderRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            parent_hash: B256::from_slice(&row.parent_hash),
+            ommers_hash: B256::from_slice(&row.ommers_hash),
+            beneficiary: Address::from_slice(&row.beneficiary),
+            state_root: B256::from_slice(&row.state_root),
+            transactions_root: B256::from_slice(&row.transactions_root),
+            receipts_root: B256::from_slice(&row.receipts_root),
+            logs_bloom: Bloom::from_slice(&row.logs_bloom),
+            difficulty: decode_u256(&row.difficulty)?,
+            number: from_i64(row.block_number),
+            gas_limit: from_i64(row.gas_limit),
+            gas_used: from_i64(row.gas_used),
+            timestamp: from_i64(row.timestamp),
+            extra_data: Bytes::from(row.extra_data),
+            mix_hash: B256::from_slice(&row.mix_hash),
+            nonce: alloy::primitives::B64::from_slice(&row.nonce),
+            base_fee_per_gas: row.base_fee_per_gas.map(from_i64),
+            withdrawals_root: row.withdrawals_root.map(|b| B256::from_slice(&b)),
+            blob_gas_used: row.blob_gas_used.map(from_i64),
+            excess_blob_gas: row.excess_blob_gas.map(from_i64),
+            parent_beacon_block_root: row.parent_beacon_block_root.map(|b| B256::from_slice(&b)),
+            requests_hash: row.requests_hash.map(|b| B256::from_slice(&b)),
         })
     }
 }
@@ -206,15 +176,15 @@ impl TxRow {
                     tx_hash,
                     tx_type,
                     sig_y_parity: sig.v(),
-                    sig_r: encode_u256(&sig.r()),
-                    sig_s: encode_u256(&sig.s()),
+                    sig_r: encode_u256(&sig.r()).to_vec(),
+                    sig_s: encode_u256(&sig.s()).to_vec(),
                     chain_id: inner.chain_id.map(to_i64),
                     nonce: to_i64(inner.nonce),
                     gas_limit: to_i64(inner.gas_limit),
                     to_address: to_address(&inner.to),
-                    value: encode_u256(&inner.value),
+                    value: encode_u256(&inner.value).to_vec(),
                     input: inner.input.to_vec(),
-                    gas_price: Some(encode_u128(inner.gas_price)),
+                    gas_price: Some(encode_u128(inner.gas_price).to_vec()),
                     max_fee_per_gas: None,
                     max_priority_fee_per_gas: None,
                     max_fee_per_blob_gas: None,
@@ -232,15 +202,15 @@ impl TxRow {
                     tx_hash,
                     tx_type,
                     sig_y_parity: sig.v(),
-                    sig_r: encode_u256(&sig.r()),
-                    sig_s: encode_u256(&sig.s()),
+                    sig_r: encode_u256(&sig.r()).to_vec(),
+                    sig_s: encode_u256(&sig.s()).to_vec(),
                     chain_id: Some(to_i64(inner.chain_id)),
                     nonce: to_i64(inner.nonce),
                     gas_limit: to_i64(inner.gas_limit),
                     to_address: to_address(&inner.to),
-                    value: encode_u256(&inner.value),
+                    value: encode_u256(&inner.value).to_vec(),
                     input: inner.input.to_vec(),
-                    gas_price: Some(encode_u128(inner.gas_price)),
+                    gas_price: Some(encode_u128(inner.gas_price).to_vec()),
                     max_fee_per_gas: None,
                     max_priority_fee_per_gas: None,
                     max_fee_per_blob_gas: None,
@@ -258,17 +228,19 @@ impl TxRow {
                     tx_hash,
                     tx_type,
                     sig_y_parity: sig.v(),
-                    sig_r: encode_u256(&sig.r()),
-                    sig_s: encode_u256(&sig.s()),
+                    sig_r: encode_u256(&sig.r()).to_vec(),
+                    sig_s: encode_u256(&sig.s()).to_vec(),
                     chain_id: Some(to_i64(inner.chain_id)),
                     nonce: to_i64(inner.nonce),
                     gas_limit: to_i64(inner.gas_limit),
                     to_address: to_address(&inner.to),
-                    value: encode_u256(&inner.value),
+                    value: encode_u256(&inner.value).to_vec(),
                     input: inner.input.to_vec(),
                     gas_price: None,
-                    max_fee_per_gas: Some(encode_u128(inner.max_fee_per_gas)),
-                    max_priority_fee_per_gas: Some(encode_u128(inner.max_priority_fee_per_gas)),
+                    max_fee_per_gas: Some(encode_u128(inner.max_fee_per_gas).to_vec()),
+                    max_priority_fee_per_gas: Some(
+                        encode_u128(inner.max_priority_fee_per_gas).to_vec(),
+                    ),
                     max_fee_per_blob_gas: None,
                     blob_versioned_hashes: None,
                     access_list: Some(encode_access_list(&inner.access_list)),
@@ -284,18 +256,20 @@ impl TxRow {
                     tx_hash,
                     tx_type,
                     sig_y_parity: sig.v(),
-                    sig_r: encode_u256(&sig.r()),
-                    sig_s: encode_u256(&sig.s()),
+                    sig_r: encode_u256(&sig.r()).to_vec(),
+                    sig_s: encode_u256(&sig.s()).to_vec(),
                     chain_id: Some(to_i64(inner.chain_id)),
                     nonce: to_i64(inner.nonce),
                     gas_limit: to_i64(inner.gas_limit),
                     to_address: Some(inner.to.as_slice().to_vec()),
-                    value: encode_u256(&inner.value),
+                    value: encode_u256(&inner.value).to_vec(),
                     input: inner.input.to_vec(),
                     gas_price: None,
-                    max_fee_per_gas: Some(encode_u128(inner.max_fee_per_gas)),
-                    max_priority_fee_per_gas: Some(encode_u128(inner.max_priority_fee_per_gas)),
-                    max_fee_per_blob_gas: Some(encode_u128(inner.max_fee_per_blob_gas)),
+                    max_fee_per_gas: Some(encode_u128(inner.max_fee_per_gas).to_vec()),
+                    max_priority_fee_per_gas: Some(
+                        encode_u128(inner.max_priority_fee_per_gas).to_vec(),
+                    ),
+                    max_fee_per_blob_gas: Some(encode_u128(inner.max_fee_per_blob_gas).to_vec()),
                     blob_versioned_hashes: Some(encode_b256_vec(&inner.blob_versioned_hashes)),
                     access_list: Some(encode_access_list(&inner.access_list)),
                     authorization_list: None,
@@ -310,17 +284,19 @@ impl TxRow {
                     tx_hash,
                     tx_type,
                     sig_y_parity: sig.v(),
-                    sig_r: encode_u256(&sig.r()),
-                    sig_s: encode_u256(&sig.s()),
+                    sig_r: encode_u256(&sig.r()).to_vec(),
+                    sig_s: encode_u256(&sig.s()).to_vec(),
                     chain_id: Some(to_i64(inner.chain_id)),
                     nonce: to_i64(inner.nonce),
                     gas_limit: to_i64(inner.gas_limit),
                     to_address: Some(inner.to.as_slice().to_vec()),
-                    value: encode_u256(&inner.value),
+                    value: encode_u256(&inner.value).to_vec(),
                     input: inner.input.to_vec(),
                     gas_price: None,
-                    max_fee_per_gas: Some(encode_u128(inner.max_fee_per_gas)),
-                    max_priority_fee_per_gas: Some(encode_u128(inner.max_priority_fee_per_gas)),
+                    max_fee_per_gas: Some(encode_u128(inner.max_fee_per_gas).to_vec()),
+                    max_priority_fee_per_gas: Some(
+                        encode_u128(inner.max_priority_fee_per_gas).to_vec(),
+                    ),
                     max_fee_per_blob_gas: None,
                     blob_versioned_hashes: None,
                     access_list: Some(encode_access_list(&inner.access_list)),
@@ -329,87 +305,84 @@ impl TxRow {
             }
         }
     }
+}
 
-    /// Convert a SQL row back to a signed transaction.
-    pub(crate) fn into_tx(self) -> Result<TransactionSigned, SqlColdError> {
+impl TryFrom<TxRow> for TransactionSigned {
+    type Error = SqlColdError;
+
+    fn try_from(row: TxRow) -> Result<Self, Self::Error> {
         use alloy::consensus::EthereumTxEnvelope;
 
         let sig =
-            Signature::new(decode_u256(&self.sig_r)?, decode_u256(&self.sig_s)?, self.sig_y_parity);
+            Signature::new(decode_u256(&row.sig_r)?, decode_u256(&row.sig_s)?, row.sig_y_parity);
 
-        let tx_type = TxType::try_from(self.tx_type as u8)
-            .map_err(|_| SqlColdError::Convert(format!("invalid tx_type: {}", self.tx_type)))?;
+        let tx_type = TxType::try_from(row.tx_type as u8)
+            .map_err(|_| SqlColdError::Convert(format!("invalid tx_type: {}", row.tx_type)))?;
 
         match tx_type {
             TxType::Legacy => {
                 let tx = TxLegacy {
-                    chain_id: self.chain_id.map(from_i64),
-                    nonce: from_i64(self.nonce),
-                    gas_price: decode_u128_required(&self.gas_price, "gas_price")?,
-                    gas_limit: from_i64(self.gas_limit),
-                    to: from_address(&self.to_address),
-                    value: decode_u256(&self.value)?,
-                    input: Bytes::from(self.input),
+                    chain_id: row.chain_id.map(from_i64),
+                    nonce: from_i64(row.nonce),
+                    gas_price: decode_u128_required(&row.gas_price, "gas_price")?,
+                    gas_limit: from_i64(row.gas_limit),
+                    to: from_address(row.to_address.as_deref()),
+                    value: decode_u256(&row.value)?,
+                    input: Bytes::from(row.input),
                 };
                 Ok(EthereumTxEnvelope::Legacy(Signed::new_unhashed(tx, sig)))
             }
             TxType::Eip2930 => {
                 let tx = TxEip2930 {
-                    chain_id: from_i64(self.chain_id.unwrap_or(0)),
-                    nonce: from_i64(self.nonce),
-                    gas_price: decode_u128_required(&self.gas_price, "gas_price")?,
-                    gas_limit: from_i64(self.gas_limit),
-                    to: from_address(&self.to_address),
-                    value: decode_u256(&self.value)?,
-                    input: Bytes::from(self.input),
-                    access_list: decode_access_list_or_empty(&self.access_list)?,
+                    chain_id: from_i64(row.chain_id.unwrap_or(0)),
+                    nonce: from_i64(row.nonce),
+                    gas_price: decode_u128_required(&row.gas_price, "gas_price")?,
+                    gas_limit: from_i64(row.gas_limit),
+                    to: from_address(row.to_address.as_deref()),
+                    value: decode_u256(&row.value)?,
+                    input: Bytes::from(row.input),
+                    access_list: decode_access_list_or_empty(&row.access_list)?,
                 };
                 Ok(EthereumTxEnvelope::Eip2930(Signed::new_unhashed(tx, sig)))
             }
             TxType::Eip1559 => {
                 let tx = TxEip1559 {
-                    chain_id: from_i64(self.chain_id.unwrap_or(0)),
-                    nonce: from_i64(self.nonce),
-                    gas_limit: from_i64(self.gas_limit),
-                    max_fee_per_gas: decode_u128_required(
-                        &self.max_fee_per_gas,
-                        "max_fee_per_gas",
-                    )?,
+                    chain_id: from_i64(row.chain_id.unwrap_or(0)),
+                    nonce: from_i64(row.nonce),
+                    gas_limit: from_i64(row.gas_limit),
+                    max_fee_per_gas: decode_u128_required(&row.max_fee_per_gas, "max_fee_per_gas")?,
                     max_priority_fee_per_gas: decode_u128_required(
-                        &self.max_priority_fee_per_gas,
+                        &row.max_priority_fee_per_gas,
                         "max_priority_fee_per_gas",
                     )?,
-                    to: from_address(&self.to_address),
-                    value: decode_u256(&self.value)?,
-                    input: Bytes::from(self.input),
-                    access_list: decode_access_list_or_empty(&self.access_list)?,
+                    to: from_address(row.to_address.as_deref()),
+                    value: decode_u256(&row.value)?,
+                    input: Bytes::from(row.input),
+                    access_list: decode_access_list_or_empty(&row.access_list)?,
                 };
                 Ok(EthereumTxEnvelope::Eip1559(Signed::new_unhashed(tx, sig)))
             }
             TxType::Eip4844 => {
                 let tx = TxEip4844 {
-                    chain_id: from_i64(self.chain_id.unwrap_or(0)),
-                    nonce: from_i64(self.nonce),
-                    gas_limit: from_i64(self.gas_limit),
-                    max_fee_per_gas: decode_u128_required(
-                        &self.max_fee_per_gas,
-                        "max_fee_per_gas",
-                    )?,
+                    chain_id: from_i64(row.chain_id.unwrap_or(0)),
+                    nonce: from_i64(row.nonce),
+                    gas_limit: from_i64(row.gas_limit),
+                    max_fee_per_gas: decode_u128_required(&row.max_fee_per_gas, "max_fee_per_gas")?,
                     max_priority_fee_per_gas: decode_u128_required(
-                        &self.max_priority_fee_per_gas,
+                        &row.max_priority_fee_per_gas,
                         "max_priority_fee_per_gas",
                     )?,
-                    to: Address::from_slice(self.to_address.as_deref().ok_or_else(|| {
+                    to: Address::from_slice(row.to_address.as_deref().ok_or_else(|| {
                         SqlColdError::Convert("EIP4844 requires to_address".into())
                     })?),
-                    value: decode_u256(&self.value)?,
-                    input: Bytes::from(self.input),
-                    access_list: decode_access_list_or_empty(&self.access_list)?,
+                    value: decode_u256(&row.value)?,
+                    input: Bytes::from(row.input),
+                    access_list: decode_access_list_or_empty(&row.access_list)?,
                     blob_versioned_hashes: decode_b256_vec(
-                        self.blob_versioned_hashes.as_deref().unwrap_or_default(),
+                        row.blob_versioned_hashes.as_deref().unwrap_or_default(),
                     ),
                     max_fee_per_blob_gas: decode_u128_required(
-                        &self.max_fee_per_blob_gas,
+                        &row.max_fee_per_blob_gas,
                         "max_fee_per_blob_gas",
                     )?,
                 };
@@ -417,25 +390,22 @@ impl TxRow {
             }
             TxType::Eip7702 => {
                 let tx = TxEip7702 {
-                    chain_id: from_i64(self.chain_id.unwrap_or(0)),
-                    nonce: from_i64(self.nonce),
-                    gas_limit: from_i64(self.gas_limit),
-                    max_fee_per_gas: decode_u128_required(
-                        &self.max_fee_per_gas,
-                        "max_fee_per_gas",
-                    )?,
+                    chain_id: from_i64(row.chain_id.unwrap_or(0)),
+                    nonce: from_i64(row.nonce),
+                    gas_limit: from_i64(row.gas_limit),
+                    max_fee_per_gas: decode_u128_required(&row.max_fee_per_gas, "max_fee_per_gas")?,
                     max_priority_fee_per_gas: decode_u128_required(
-                        &self.max_priority_fee_per_gas,
+                        &row.max_priority_fee_per_gas,
                         "max_priority_fee_per_gas",
                     )?,
-                    to: Address::from_slice(self.to_address.as_deref().ok_or_else(|| {
+                    to: Address::from_slice(row.to_address.as_deref().ok_or_else(|| {
                         SqlColdError::Convert("EIP7702 requires to_address".into())
                     })?),
-                    value: decode_u256(&self.value)?,
-                    input: Bytes::from(self.input),
-                    access_list: decode_access_list_or_empty(&self.access_list)?,
+                    value: decode_u256(&row.value)?,
+                    input: Bytes::from(row.input),
+                    access_list: decode_access_list_or_empty(&row.access_list)?,
                     authorization_list: decode_authorization_list(
-                        self.authorization_list.as_deref().unwrap_or_default(),
+                        row.authorization_list.as_deref().unwrap_or_default(),
                     )?,
                 };
                 Ok(EthereumTxEnvelope::Eip7702(Signed::new_unhashed(tx, sig)))
@@ -451,8 +421,8 @@ fn to_address(kind: &TxKind) -> Option<Vec<u8>> {
     }
 }
 
-fn from_address(data: &Option<Vec<u8>>) -> TxKind {
-    data.as_ref().map(|b| TxKind::Call(Address::from_slice(b))).unwrap_or(TxKind::Create)
+fn from_address(data: Option<&[u8]>) -> TxKind {
+    data.map_or(TxKind::Create, |b| TxKind::Call(Address::from_slice(b)))
 }
 
 fn decode_u128_required(data: &Option<Vec<u8>>, field: &str) -> Result<u128, SqlColdError> {
@@ -633,11 +603,8 @@ impl ReceiptRow {
     }
 }
 
-/// Row data for a log entry in SQL.
+/// Row data for a log entry read from SQL.
 pub(crate) struct LogRow {
-    pub block_number: i64,
-    pub tx_index: i64,
-    pub log_index: i64,
     pub address: Vec<u8>,
     pub topic0: Option<Vec<u8>>,
     pub topic1: Option<Vec<u8>>,
@@ -646,41 +613,16 @@ pub(crate) struct LogRow {
     pub data: Vec<u8>,
 }
 
-impl LogRow {
-    /// Convert a log to a SQL row.
-    pub(crate) fn from_log(log: &Log, block_number: i64, tx_index: i64, log_index: i64) -> Self {
-        let topics = log.topics();
+impl From<LogRow> for Log {
+    fn from(row: LogRow) -> Self {
+        let topics = [row.topic0, row.topic1, row.topic2, row.topic3]
+            .into_iter()
+            .flatten()
+            .map(|t| B256::from_slice(&t))
+            .collect();
         Self {
-            block_number,
-            tx_index,
-            log_index,
-            address: log.address.as_slice().to_vec(),
-            topic0: topics.first().map(|t| t.as_slice().to_vec()),
-            topic1: topics.get(1).map(|t| t.as_slice().to_vec()),
-            topic2: topics.get(2).map(|t| t.as_slice().to_vec()),
-            topic3: topics.get(3).map(|t| t.as_slice().to_vec()),
-            data: log.data.data.to_vec(),
-        }
-    }
-
-    /// Convert a SQL row back to a log.
-    pub(crate) fn into_log(self) -> Log {
-        let mut topics = Vec::with_capacity(4);
-        if let Some(t) = self.topic0 {
-            topics.push(B256::from_slice(&t));
-        }
-        if let Some(t) = self.topic1 {
-            topics.push(B256::from_slice(&t));
-        }
-        if let Some(t) = self.topic2 {
-            topics.push(B256::from_slice(&t));
-        }
-        if let Some(t) = self.topic3 {
-            topics.push(B256::from_slice(&t));
-        }
-        Log {
-            address: Address::from_slice(&self.address),
-            data: LogData::new_unchecked(topics, Bytes::from(self.data)),
+            address: Address::from_slice(&row.address),
+            data: LogData::new_unchecked(topics, Bytes::from(row.data)),
         }
     }
 }
@@ -692,7 +634,7 @@ pub(crate) fn receipt_from_rows(
 ) -> Result<Receipt, SqlColdError> {
     let tx_type = TxType::try_from(receipt_row.tx_type as u8)
         .map_err(|_| SqlColdError::Convert(format!("invalid tx_type: {}", receipt_row.tx_type)))?;
-    let logs = log_rows.into_iter().map(LogRow::into_log).collect();
+    let logs = log_rows.into_iter().map(Log::from).collect();
     Ok(Receipt {
         tx_type,
         inner: AlloyReceipt {
@@ -714,10 +656,8 @@ pub(crate) const EVENT_ENTER: i16 = 1;
 /// EnterToken event discriminant.
 pub(crate) const EVENT_ENTER_TOKEN: i16 = 2;
 
-/// Row data for a signet event in SQL.
+/// Row data for a signet event read from SQL.
 pub(crate) struct SignetEventRow {
-    pub block_number: i64,
-    pub event_index: i64,
     pub event_type: i16,
     pub order_index: i64,
     pub rollup_chain_id: Vec<u8>,
@@ -732,94 +672,41 @@ pub(crate) struct SignetEventRow {
     pub token: Option<Vec<u8>>,
 }
 
-impl SignetEventRow {
-    /// Convert a signet event to a SQL row.
-    pub(crate) fn from_event(event: &DbSignetEvent, block_number: i64, event_index: i64) -> Self {
-        match event {
-            DbSignetEvent::Transact(order, t) => Self {
-                block_number,
-                event_index,
-                event_type: EVENT_TRANSACT,
-                order_index: to_i64(*order),
-                rollup_chain_id: encode_u256(&t.rollupChainId),
-                sender: Some(t.sender.as_slice().to_vec()),
-                to_address: Some(t.to.as_slice().to_vec()),
-                value: Some(encode_u256(&t.value)),
-                gas: Some(encode_u256(&t.gas)),
-                max_fee_per_gas: Some(encode_u256(&t.maxFeePerGas)),
-                data: Some(t.data.to_vec()),
-                rollup_recipient: None,
-                amount: None,
-                token: None,
-            },
-            DbSignetEvent::Enter(order, e) => Self {
-                block_number,
-                event_index,
-                event_type: EVENT_ENTER,
-                order_index: to_i64(*order),
-                rollup_chain_id: encode_u256(&e.rollupChainId),
-                sender: None,
-                to_address: None,
-                value: None,
-                gas: None,
-                max_fee_per_gas: None,
-                data: None,
-                rollup_recipient: Some(e.rollupRecipient.as_slice().to_vec()),
-                amount: Some(encode_u256(&e.amount)),
-                token: None,
-            },
-            DbSignetEvent::EnterToken(order, e) => Self {
-                block_number,
-                event_index,
-                event_type: EVENT_ENTER_TOKEN,
-                order_index: to_i64(*order),
-                rollup_chain_id: encode_u256(&e.rollupChainId),
-                sender: None,
-                to_address: None,
-                value: None,
-                gas: None,
-                max_fee_per_gas: None,
-                data: None,
-                rollup_recipient: Some(e.rollupRecipient.as_slice().to_vec()),
-                amount: Some(encode_u256(&e.amount)),
-                token: Some(e.token.as_slice().to_vec()),
-            },
-        }
-    }
+impl TryFrom<SignetEventRow> for DbSignetEvent {
+    type Error = SqlColdError;
 
-    /// Convert a SQL row back to a signet event.
-    pub(crate) fn into_event(self) -> Result<DbSignetEvent, SqlColdError> {
-        let order = from_i64(self.order_index);
-        let rollup_chain_id = decode_u256(&self.rollup_chain_id)?;
+    fn try_from(row: SignetEventRow) -> Result<Self, Self::Error> {
+        let order = from_i64(row.order_index);
+        let rollup_chain_id = decode_u256(&row.rollup_chain_id)?;
 
-        match self.event_type {
+        match row.event_type {
             EVENT_TRANSACT => {
                 let sender = Address::from_slice(
-                    self.sender
+                    row.sender
                         .as_deref()
                         .ok_or_else(|| SqlColdError::Convert("Transact requires sender".into()))?,
                 );
                 let to = Address::from_slice(
-                    self.to_address
+                    row.to_address
                         .as_deref()
                         .ok_or_else(|| SqlColdError::Convert("Transact requires to".into()))?,
                 );
                 let value = decode_u256(
-                    self.value
+                    row.value
                         .as_deref()
                         .ok_or_else(|| SqlColdError::Convert("Transact requires value".into()))?,
                 )?;
                 let gas = decode_u256(
-                    self.gas
+                    row.gas
                         .as_deref()
                         .ok_or_else(|| SqlColdError::Convert("Transact requires gas".into()))?,
                 )?;
-                let max_fee = decode_u256(self.max_fee_per_gas.as_deref().ok_or_else(|| {
+                let max_fee = decode_u256(row.max_fee_per_gas.as_deref().ok_or_else(|| {
                     SqlColdError::Convert("Transact requires max_fee_per_gas".into())
                 })?)?;
-                let data = Bytes::from(self.data.unwrap_or_default());
+                let data = Bytes::from(row.data.unwrap_or_default());
 
-                Ok(DbSignetEvent::Transact(
+                Ok(Self::Transact(
                     order,
                     Transact {
                         rollupChainId: rollup_chain_id,
@@ -834,35 +721,35 @@ impl SignetEventRow {
             }
             EVENT_ENTER => {
                 let recipient =
-                    Address::from_slice(self.rollup_recipient.as_deref().ok_or_else(|| {
+                    Address::from_slice(row.rollup_recipient.as_deref().ok_or_else(|| {
                         SqlColdError::Convert("Enter requires rollup_recipient".into())
                     })?);
                 let amount = decode_u256(
-                    self.amount
+                    row.amount
                         .as_deref()
                         .ok_or_else(|| SqlColdError::Convert("Enter requires amount".into()))?,
                 )?;
 
-                Ok(DbSignetEvent::Enter(
+                Ok(Self::Enter(
                     order,
                     Enter { rollupChainId: rollup_chain_id, rollupRecipient: recipient, amount },
                 ))
             }
             EVENT_ENTER_TOKEN => {
                 let token =
-                    Address::from_slice(self.token.as_deref().ok_or_else(|| {
+                    Address::from_slice(row.token.as_deref().ok_or_else(|| {
                         SqlColdError::Convert("EnterToken requires token".into())
                     })?);
                 let recipient =
-                    Address::from_slice(self.rollup_recipient.as_deref().ok_or_else(|| {
+                    Address::from_slice(row.rollup_recipient.as_deref().ok_or_else(|| {
                         SqlColdError::Convert("EnterToken requires rollup_recipient".into())
                     })?);
                 let amount =
-                    decode_u256(self.amount.as_deref().ok_or_else(|| {
+                    decode_u256(row.amount.as_deref().ok_or_else(|| {
                         SqlColdError::Convert("EnterToken requires amount".into())
                     })?)?;
 
-                Ok(DbSignetEvent::EnterToken(
+                Ok(Self::EnterToken(
                     order,
                     EnterToken {
                         rollupChainId: rollup_chain_id,
@@ -872,7 +759,7 @@ impl SignetEventRow {
                     },
                 ))
             }
-            _ => Err(SqlColdError::Convert(format!("invalid event_type: {}", self.event_type))),
+            _ => Err(SqlColdError::Convert(format!("invalid event_type: {}", row.event_type))),
         }
     }
 }
@@ -881,9 +768,8 @@ impl SignetEventRow {
 // Zenith header conversion
 // ============================================================================
 
-/// Row data for a zenith header in SQL.
+/// Row data for a zenith header read from SQL.
 pub(crate) struct ZenithHeaderRow {
-    pub block_number: i64,
     pub host_block_number: Vec<u8>,
     pub rollup_chain_id: Vec<u8>,
     pub gas_limit: Vec<u8>,
@@ -891,28 +777,16 @@ pub(crate) struct ZenithHeaderRow {
     pub block_data_hash: Vec<u8>,
 }
 
-impl ZenithHeaderRow {
-    /// Convert a zenith header to a SQL row.
-    pub(crate) fn from_zenith(header: &DbZenithHeader, block_number: i64) -> Self {
-        let h = &header.0;
-        Self {
-            block_number,
-            host_block_number: encode_u256(&h.hostBlockNumber),
-            rollup_chain_id: encode_u256(&h.rollupChainId),
-            gas_limit: encode_u256(&h.gasLimit),
-            reward_address: h.rewardAddress.as_slice().to_vec(),
-            block_data_hash: h.blockDataHash.as_slice().to_vec(),
-        }
-    }
+impl TryFrom<ZenithHeaderRow> for DbZenithHeader {
+    type Error = SqlColdError;
 
-    /// Convert a SQL row back to a zenith header.
-    pub(crate) fn into_zenith(self) -> Result<DbZenithHeader, SqlColdError> {
-        Ok(DbZenithHeader(Zenith::BlockHeader {
-            hostBlockNumber: decode_u256(&self.host_block_number)?,
-            rollupChainId: decode_u256(&self.rollup_chain_id)?,
-            gasLimit: decode_u256(&self.gas_limit)?,
-            rewardAddress: Address::from_slice(&self.reward_address),
-            blockDataHash: alloy::primitives::FixedBytes::<32>::from_slice(&self.block_data_hash),
+    fn try_from(row: ZenithHeaderRow) -> Result<Self, Self::Error> {
+        Ok(Self(Zenith::BlockHeader {
+            hostBlockNumber: decode_u256(&row.host_block_number)?,
+            rollupChainId: decode_u256(&row.rollup_chain_id)?,
+            gasLimit: decode_u256(&row.gas_limit)?,
+            rewardAddress: Address::from_slice(&row.reward_address),
+            blockDataHash: alloy::primitives::FixedBytes::<32>::from_slice(&row.block_data_hash),
         }))
     }
 }
