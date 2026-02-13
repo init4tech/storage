@@ -15,7 +15,10 @@ use alloy::primitives::B256;
 /// - `first_log_index`: the absolute index of this receipt's first log
 ///   within the block (sum of log counts from all preceding receipts).
 ///   Avoids O(N) iteration over prior receipts when building
-///   [`ReceiptContext`](crate::ReceiptContext) or [`RichLog`](crate::RichLog).
+///   `ReceiptContext` or RPC log responses.
+/// - `gas_used`: per-transaction gas consumed. Precomputed from the
+///   cumulative gas sequence at append time to avoid needing prior
+///   receipt lookups at query time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedReceipt {
     /// The receipt.
@@ -27,4 +30,9 @@ pub struct IndexedReceipt {
     /// Equal to the sum of log counts from all preceding receipts.
     /// Zero for the first receipt in a block.
     pub first_log_index: u64,
+    /// Gas used by this transaction alone.
+    ///
+    /// Computed from the cumulative gas sequence:
+    /// `receipt.cumulative_gas_used - prior_receipt.cumulative_gas_used`.
+    pub gas_used: u64,
 }

@@ -11,9 +11,9 @@ use crate::convert::{
 };
 use alloy::{consensus::Header, primitives::BlockNumber};
 use signet_cold::{
-    BlockData, ColdResult, ColdStorage, ColdStorageError, Confirmed, HeaderSpecifier,
-    IndexedReceipt, LogFilter, ReceiptSpecifier, RichLog, SignetEventsSpecifier,
-    TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter, HeaderSpecifier,
+    IndexedReceipt, ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier,
+    ZenithHeaderSpecifier,
 };
 use signet_storage_types::{
     ConfirmationMeta, DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned,
@@ -599,6 +599,7 @@ impl ColdStorage for SqlColdBackend {
         }
 
         let mut first_log_index = 0u64;
+        let mut prior_cumulative_gas = 0u64;
         receipt_rows
             .into_iter()
             .map(|rr| {
@@ -615,7 +616,9 @@ impl ColdStorage for SqlColdBackend {
                 let logs = logs_by_tx.remove(&tx_idx).unwrap_or_default();
                 let receipt =
                     receipt_from_rows(receipt_row, logs).map_err(ColdStorageError::from)?;
-                let ir = IndexedReceipt { receipt, tx_hash, first_log_index };
+                let gas_used = receipt.inner.cumulative_gas_used - prior_cumulative_gas;
+                prior_cumulative_gas = receipt.inner.cumulative_gas_used;
+                let ir = IndexedReceipt { receipt, tx_hash, first_log_index, gas_used };
                 first_log_index += ir.receipt.inner.logs.len() as u64;
                 Ok(ir)
             })
@@ -709,13 +712,16 @@ impl ColdStorage for SqlColdBackend {
             .collect()
     }
 
-    async fn get_logs(&self, filter: LogFilter) -> ColdResult<Vec<RichLog>> {
+    async fn get_logs(&self, filter: Filter) -> ColdResult<Vec<RpcLog>> {
+        let from = filter.get_from_block().unwrap_or(0);
+        let to = filter.get_to_block().unwrap_or(u64::MAX);
+
         // Build dynamic SQL with positional $N placeholders.
         // The correlated subquery computes block_log_index: the absolute
         // position of each log among all logs in its block, leveraging the
         // PK index on (block_number, tx_index, log_index).
         let mut sql = String::from(
-            "SELECT l.*, h.block_hash, t.tx_hash, \
+            "SELECT l.*, h.block_hash, h.timestamp AS block_timestamp, t.tx_hash, \
                (SELECT COUNT(*) FROM logs l2 \
                 WHERE l2.block_number = l.block_number \
                   AND (l2.tx_index < l.tx_index \
@@ -731,12 +737,13 @@ impl ColdStorage for SqlColdBackend {
         let mut idx = 3u32;
 
         // Address filter
-        if let Some(ref addrs) = filter.address {
+        if !filter.address.is_empty() {
+            let addrs: Vec<_> = filter.address.iter().collect();
             if addrs.len() == 1 {
                 sql.push_str(&format!(" AND l.address = ${idx}"));
                 params.push(addrs[0].as_slice().to_vec());
                 idx += 1;
-            } else if !addrs.is_empty() {
+            } else {
                 let placeholders: String = addrs
                     .iter()
                     .enumerate()
@@ -744,7 +751,7 @@ impl ColdStorage for SqlColdBackend {
                     .collect::<Vec<_>>()
                     .join(", ");
                 sql.push_str(&format!(" AND l.address IN ({placeholders})"));
-                for addr in addrs {
+                for addr in &addrs {
                     params.push(addr.as_slice().to_vec());
                 }
                 idx += addrs.len() as u32;
@@ -754,10 +761,10 @@ impl ColdStorage for SqlColdBackend {
         // Topic filters
         let topic_cols = ["l.topic0", "l.topic1", "l.topic2", "l.topic3"];
         for (i, topic_filter) in filter.topics.iter().enumerate() {
-            let Some(values) = topic_filter else { continue };
-            if values.is_empty() {
+            if topic_filter.is_empty() {
                 continue;
             }
+            let values: Vec<_> = topic_filter.iter().collect();
             if values.len() == 1 {
                 sql.push_str(&format!(" AND {} = ${idx}", topic_cols[i]));
                 params.push(values[0].as_slice().to_vec());
@@ -770,7 +777,7 @@ impl ColdStorage for SqlColdBackend {
                     .collect::<Vec<_>>()
                     .join(", ");
                 sql.push_str(&format!(" AND {} IN ({placeholders})", topic_cols[i]));
-                for v in values {
+                for v in &values {
                     params.push(v.as_slice().to_vec());
                 }
                 idx += values.len() as u32;
@@ -780,8 +787,7 @@ impl ColdStorage for SqlColdBackend {
         sql.push_str(" ORDER BY l.block_number, l.tx_index, l.log_index");
 
         // Bind parameters and execute.
-        let mut query =
-            sqlx::query(&sql).bind(to_i64(filter.from_block)).bind(to_i64(filter.to_block));
+        let mut query = sqlx::query(&sql).bind(to_i64(from)).bind(to_i64(to));
         for param in &params {
             query = query.bind(param.as_slice());
         }
@@ -794,14 +800,15 @@ impl ColdStorage for SqlColdBackend {
                 let block_number = from_i64(r.get::<i64, _>("block_number"));
                 let block_hash_bytes: Vec<u8> = r.get("block_hash");
                 let tx_hash_bytes: Vec<u8> = r.get("tx_hash");
-                Ok(RichLog {
-                    log,
-                    block_number,
-                    block_hash: alloy::primitives::B256::from_slice(&block_hash_bytes),
-                    tx_hash: alloy::primitives::B256::from_slice(&tx_hash_bytes),
-                    tx_index: from_i64(r.get::<i64, _>("tx_index")),
-                    block_log_index: from_i64(r.get::<i64, _>("block_log_index")),
-                    tx_log_index: from_i64(r.get::<i64, _>("log_index")),
+                Ok(RpcLog {
+                    inner: log,
+                    block_hash: Some(alloy::primitives::B256::from_slice(&block_hash_bytes)),
+                    block_number: Some(block_number),
+                    block_timestamp: Some(from_i64(r.get::<i64, _>("block_timestamp"))),
+                    transaction_hash: Some(alloy::primitives::B256::from_slice(&tx_hash_bytes)),
+                    transaction_index: Some(from_i64(r.get::<i64, _>("tx_index"))),
+                    log_index: Some(from_i64(r.get::<i64, _>("block_log_index"))),
+                    removed: false,
                 })
             })
             .collect::<ColdResult<Vec<_>>>()

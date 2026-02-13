@@ -4,8 +4,8 @@
 //! It is primarily intended for testing and development.
 
 use crate::{
-    BlockData, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, LogFilter, ReceiptSpecifier,
-    RichLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdResult, ColdStorage, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier,
+    RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::{
     consensus::{Header, Sealable},
@@ -203,12 +203,15 @@ impl ColdStorage for MemColdBackend {
         })
     }
 
-    async fn get_logs(&self, filter: LogFilter) -> ColdResult<Vec<RichLog>> {
+    async fn get_logs(&self, filter: Filter) -> ColdResult<Vec<RpcLog>> {
         let inner = self.inner.read().await;
         let mut results = Vec::new();
 
-        for (&block_num, receipts) in inner.receipts.range(filter.from_block..=filter.to_block) {
-            let block_hash = inner.headers.get(&block_num).map(|h| h.hash()).unwrap_or_default();
+        let from = filter.get_from_block().unwrap_or(0);
+        let to = filter.get_to_block().unwrap_or(u64::MAX);
+        for (&block_num, receipts) in inner.receipts.range(from..=to) {
+            let (block_hash, block_timestamp) =
+                inner.headers.get(&block_num).map(|h| (h.hash(), h.timestamp)).unwrap_or_default();
 
             for (tx_idx, ir) in receipts.iter().enumerate() {
                 results.extend(
@@ -217,15 +220,16 @@ impl ColdStorage for MemColdBackend {
                         .logs
                         .iter()
                         .enumerate()
-                        .filter(|(_, log)| filter.matches_log(log))
-                        .map(|(log_idx, log)| RichLog {
-                            log: log.clone(),
-                            block_number: block_num,
-                            block_hash,
-                            tx_hash: ir.tx_hash,
-                            tx_index: tx_idx as u64,
-                            block_log_index: ir.first_log_index + log_idx as u64,
-                            tx_log_index: log_idx as u64,
+                        .filter(|(_, log)| filter.matches(log))
+                        .map(|(log_idx, log)| RpcLog {
+                            inner: log.clone(),
+                            block_hash: Some(block_hash),
+                            block_number: Some(block_num),
+                            block_timestamp: Some(block_timestamp),
+                            transaction_hash: Some(ir.tx_hash),
+                            transaction_index: Some(tx_idx as u64),
+                            log_index: Some(ir.first_log_index + log_idx as u64),
+                            removed: false,
                         }),
                 );
             }
@@ -259,14 +263,17 @@ impl ColdStorage for MemColdBackend {
         }
         inner.transactions.insert(block, data.transactions);
 
-        // Compute IndexedReceipt with precomputed first_log_index and tx_hash
+        // Compute IndexedReceipt with precomputed metadata
         let mut first_log_index = 0u64;
+        let mut prior_cumulative_gas = 0u64;
         let indexed_receipts = data
             .receipts
             .into_iter()
             .zip(tx_hashes)
             .map(|(receipt, tx_hash)| {
-                let ir = IndexedReceipt { receipt, tx_hash, first_log_index };
+                let gas_used = receipt.inner.cumulative_gas_used - prior_cumulative_gas;
+                prior_cumulative_gas = receipt.inner.cumulative_gas_used;
+                let ir = IndexedReceipt { receipt, tx_hash, first_log_index, gas_used };
                 first_log_index += ir.receipt.inner.logs.len() as u64;
                 ir
             })

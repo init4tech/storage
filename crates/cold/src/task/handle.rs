@@ -11,7 +11,7 @@
 
 use crate::{
     AppendBlockRequest, BlockData, ColdReadRequest, ColdResult, ColdStorageError, ColdWriteRequest,
-    Confirmed, HeaderSpecifier, LogFilter, ReceiptContext, ReceiptSpecifier, RichLog,
+    Confirmed, Filter, HeaderSpecifier, ReceiptContext, ReceiptSpecifier, RpcLog,
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::{
@@ -270,9 +270,9 @@ impl ColdStorageReadHandle {
     ///
     /// Follows `eth_getLogs` semantics. Returns all matching logs ordered
     /// by (block_number, tx_index, log_index).
-    pub async fn get_logs(&self, filter: LogFilter) -> ColdResult<Vec<RichLog>> {
+    pub async fn get_logs(&self, filter: Filter) -> ColdResult<Vec<RpcLog>> {
         let (resp, rx) = oneshot::channel();
-        self.send(ColdReadRequest::GetLogs { filter, resp }, rx).await
+        self.send(ColdReadRequest::GetLogs { filter: Box::new(filter), resp }, rx).await
     }
 
     // ==========================================================================

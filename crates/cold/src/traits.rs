@@ -11,7 +11,7 @@ use signet_storage_types::{
 use std::future::Future;
 
 use super::{
-    ColdResult, Confirmed, HeaderSpecifier, LogFilter, ReceiptSpecifier, RichLog,
+    ColdResult, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 
@@ -204,7 +204,7 @@ pub trait ColdStorage: Send + Sync + 'static {
     ///
     /// Follows `eth_getLogs` semantics: returns all logs matching the
     /// filter criteria, ordered by (block_number, tx_index, log_index).
-    fn get_logs(&self, filter: LogFilter) -> impl Future<Output = ColdResult<Vec<RichLog>>> + Send;
+    fn get_logs(&self, filter: Filter) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send;
 
     // --- Composite queries ---
 

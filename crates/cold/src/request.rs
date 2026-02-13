@@ -4,8 +4,8 @@
 //! Reads and writes use separate channels with their own request types.
 
 use crate::{
-    BlockData, ColdStorageError, Confirmed, HeaderSpecifier, LogFilter, ReceiptContext,
-    ReceiptSpecifier, RichLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdStorageError, Confirmed, Filter, HeaderSpecifier, ReceiptContext,
+    ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::{consensus::Header, primitives::BlockNumber};
 use signet_storage_types::{
@@ -114,9 +114,9 @@ pub enum ColdReadRequest {
     /// Filter logs by block range, address, and topics.
     GetLogs {
         /// The log filter.
-        filter: LogFilter,
+        filter: Box<Filter>,
         /// The response channel.
-        resp: Responder<Vec<RichLog>>,
+        resp: Responder<Vec<RpcLog>>,
     },
 
     // --- Metadata ---

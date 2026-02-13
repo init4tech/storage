@@ -33,10 +33,6 @@ mod indexed_receipt;
 pub use indexed_receipt::IndexedReceipt;
 mod int_list;
 pub use int_list::{BlockNumberList, IntegerList, IntegerListError};
-mod log_filter;
-pub use log_filter::LogFilter;
-mod rich_log;
-pub use rich_log::RichLog;
 mod sharded;
 pub use sharded::ShardedKey;
 

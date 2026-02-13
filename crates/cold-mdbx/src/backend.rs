@@ -13,8 +13,9 @@ use alloy::{
     primitives::BlockNumber,
 };
 use signet_cold::{
-    BlockData, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, IndexedReceipt, ReceiptContext,
-    ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdResult, ColdStorage, Confirmed, Filter, HeaderSpecifier, IndexedReceipt,
+    ReceiptContext, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
+    ZenithHeaderSpecifier,
 };
 use signet_hot::{
     KeySer, MAX_KEY_SIZE, ValSer,
@@ -331,8 +332,11 @@ impl MdbxColdBackend {
 
         // Compute and store IndexedReceipts with precomputed metadata
         let mut first_log_index = 0u64;
+        let mut prior_cumulative_gas = 0u64;
         for (idx, (receipt, tx_hash)) in data.receipts.into_iter().zip(tx_hashes).enumerate() {
-            let ir = IndexedReceipt { receipt, tx_hash, first_log_index };
+            let gas_used = receipt.inner.cumulative_gas_used - prior_cumulative_gas;
+            prior_cumulative_gas = receipt.inner.cumulative_gas_used;
+            let ir = IndexedReceipt { receipt, tx_hash, first_log_index, gas_used };
             first_log_index += ir.receipt.inner.logs.len() as u64;
             tx.queue_put_dual::<ColdReceipts>(&block, &(idx as u64), &ir)?;
         }
@@ -398,18 +402,18 @@ impl MdbxColdBackend {
         Ok(())
     }
 
-    fn get_logs_inner(
-        &self,
-        filter: signet_cold::LogFilter,
-    ) -> Result<Vec<signet_cold::RichLog>, MdbxColdError> {
+    fn get_logs_inner(&self, filter: Filter) -> Result<Vec<signet_cold::RpcLog>, MdbxColdError> {
         let tx = self.env.tx()?;
         let mut results = Vec::new();
 
-        for block_num in filter.from_block..=filter.to_block {
+        let from = filter.get_from_block().unwrap_or(0);
+        let to = filter.get_to_block().unwrap_or(u64::MAX);
+        for block_num in from..=to {
             let Some(sealed) = tx.traverse::<ColdHeaders>()?.exact(&block_num)? else {
                 continue;
             };
             let block_hash = sealed.hash();
+            let block_timestamp = sealed.timestamp;
 
             for item in tx.traverse_dual::<ColdReceipts>()?.iter_k2(&block_num)? {
                 let (tx_idx, ir) = item?;
@@ -419,15 +423,16 @@ impl MdbxColdBackend {
                         .logs
                         .iter()
                         .enumerate()
-                        .filter(|(_, log)| filter.matches_log(log))
-                        .map(|(log_idx, log)| signet_cold::RichLog {
-                            log: log.clone(),
-                            block_number: block_num,
-                            block_hash,
-                            tx_hash: ir.tx_hash,
-                            tx_index: tx_idx,
-                            block_log_index: ir.first_log_index + log_idx as u64,
-                            tx_log_index: log_idx as u64,
+                        .filter(|(_, log)| filter.matches(log))
+                        .map(|(log_idx, log)| signet_cold::RpcLog {
+                            inner: log.clone(),
+                            block_hash: Some(block_hash),
+                            block_number: Some(block_num),
+                            block_timestamp: Some(block_timestamp),
+                            transaction_hash: Some(ir.tx_hash),
+                            transaction_index: Some(tx_idx),
+                            log_index: Some(ir.first_log_index + log_idx as u64),
+                            removed: false,
                         }),
                 );
             }
@@ -556,10 +561,7 @@ impl ColdStorage for MdbxColdBackend {
         Ok(headers)
     }
 
-    async fn get_logs(
-        &self,
-        filter: signet_cold::LogFilter,
-    ) -> ColdResult<Vec<signet_cold::RichLog>> {
+    async fn get_logs(&self, filter: Filter) -> ColdResult<Vec<signet_cold::RpcLog>> {
         Ok(self.get_logs_inner(filter)?)
     }
 
