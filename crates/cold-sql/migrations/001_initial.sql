@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     blob_versioned_hashes     BLOB,
     access_list               BLOB,
     authorization_list        BLOB,
+    from_address              BLOB,
     PRIMARY KEY (block_number, tx_index)
 );
 
@@ -79,7 +80,7 @@ CREATE TABLE IF NOT EXISTS logs (
     PRIMARY KEY (block_number, tx_index, log_index)
 );
 
-CREATE INDEX IF NOT EXISTS idx_logs_address ON logs (address);
+CREATE INDEX IF NOT EXISTS idx_logs_address_block ON logs (address, block_number);
 CREATE INDEX IF NOT EXISTS idx_logs_topic0 ON logs (topic0);
 
 CREATE TABLE IF NOT EXISTS signet_events (

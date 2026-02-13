@@ -17,7 +17,10 @@
 
 mod account;
 pub use account::Account;
+mod confirmed;
+pub use confirmed::Confirmed;
 mod execution;
+pub use ::alloy::consensus::transaction::Recovered;
 pub use execution::{ExecutedBlock, ExecutedBlockBuilder, MissingFieldError};
 
 mod alloy;
@@ -27,10 +30,10 @@ pub use confirmation::ConfirmationMeta;
 
 mod events;
 pub use events::{DbSignetEvent, DbZenithHeader};
-
+mod indexed_receipt;
+pub use indexed_receipt::IndexedReceipt;
 mod int_list;
 pub use int_list::{BlockNumberList, IntegerList, IntegerListError};
-
 mod sharded;
 pub use sharded::ShardedKey;
 
@@ -41,6 +44,9 @@ mod util;
 pub use util::{EthereumHardfork, genesis_header};
 
 use ::alloy::consensus::{Header, Sealed};
+
+/// A recovered transaction type.
+pub type RecoveredTx = Recovered<TransactionSigned>;
 
 /// A sealed header type.
 pub type SealedHeader = Sealed<Header>;

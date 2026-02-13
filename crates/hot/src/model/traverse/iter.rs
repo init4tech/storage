@@ -9,6 +9,7 @@ use super::{
 };
 use crate::tables::DualKey;
 use core::marker::PhantomData;
+use std::borrow::Cow;
 
 // ============================================================================
 // Raw Iterator Structs (for base traits)
@@ -17,10 +18,14 @@ use core::marker::PhantomData;
 /// Default forward iterator over raw key-value entries.
 ///
 /// This iterator wraps a cursor implementing `KvTraverse` and yields entries
-/// by calling `read_next` on each iteration.
+/// by calling `read_next` on each iteration. The `first_entry` field captures
+/// the entry returned by the initial positioning call (e.g. `first()` or
+/// `lower_bound()`), which would otherwise be skipped when `read_next()`
+/// advances past it.
 pub(crate) struct RawKvIter<'a, C, E> {
     pub(super) cursor: &'a mut C,
     pub(super) done: bool,
+    pub(super) first_entry: Option<(Vec<u8>, Vec<u8>)>,
     pub(super) _marker: PhantomData<fn() -> E>,
 }
 
@@ -34,6 +39,9 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
+        }
+        if let Some((k, v)) = self.first_entry.take() {
+            return Some(Ok((Cow::Owned(k), Cow::Owned(v))));
         }
         // SAFETY: We're using a mutable borrow of the cursor, so the lifetime
         // of the returned data is correctly tied to this iterator.
@@ -62,10 +70,13 @@ where
 /// Default forward iterator over raw dual-keyed entries.
 ///
 /// This iterator wraps a cursor implementing `DualKeyTraverse` and yields
-/// entries by calling `read_next` on each iteration.
+/// entries by calling `read_next` on each iteration. The `first_entry` field
+/// captures the entry returned by the initial positioning call (e.g.
+/// `first()` or `next_dual_above()`), which would otherwise be skipped.
 pub(crate) struct RawDualKeyIter<'a, C, E> {
     pub(super) cursor: &'a mut C,
     pub(super) done: bool,
+    pub(super) first_entry: Option<(Vec<u8>, Vec<u8>, Vec<u8>)>,
     pub(super) _marker: PhantomData<fn() -> E>,
 }
 
@@ -79,6 +90,9 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
+        }
+        if let Some((k1, k2, v)) = self.first_entry.take() {
+            return Some(Ok((Cow::Owned(k1), Cow::Owned(k2), Cow::Owned(v))));
         }
         // SAFETY: Same rationale as RawKvIter - the cursor's internal state
         // keeps the data alive for the duration of iteration.
@@ -110,6 +124,7 @@ where
 pub(crate) struct RawDualKeyK2Iter<'a, C, E> {
     pub(super) cursor: &'a mut C,
     pub(super) done: bool,
+    pub(super) first_entry: Option<(Vec<u8>, Vec<u8>)>,
     pub(super) _marker: PhantomData<fn() -> E>,
 }
 
@@ -123,6 +138,9 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
+        }
+        if let Some((k2, v)) = self.first_entry.take() {
+            return Some(Ok((Cow::Owned(k2), Cow::Owned(v))));
         }
         // SAFETY: Same rationale as RawKvIter
         let result = unsafe {
@@ -160,6 +178,7 @@ where
 {
     pub(super) cursor: &'a mut C,
     pub(super) done: bool,
+    pub(super) first_entry: Option<K2Value<T>>,
     pub(super) _marker: PhantomData<fn() -> (T, E)>,
 }
 
@@ -174,6 +193,9 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
+        }
+        if let Some(entry) = self.first_entry.take() {
+            return Some(Ok(entry));
         }
         match DualTableTraverse::<T, E>::next_k2(self.cursor) {
             Ok(Some((_k1, k2, v))) => Some(Ok((k2, v))),

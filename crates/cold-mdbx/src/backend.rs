@@ -6,21 +6,22 @@
 
 use crate::{
     ColdBlockHashIndex, ColdHeaders, ColdReceipts, ColdSignetEvents, ColdTransactions,
-    ColdTxHashIndex, ColdZenithHeaders, MdbxColdError,
+    ColdTxHashIndex, ColdTxSenders, ColdZenithHeaders, MdbxColdError,
 };
-use alloy::{consensus::Header, primitives::BlockNumber};
+use alloy::{consensus::transaction::Recovered, primitives::BlockNumber};
 use signet_cold::{
-    BlockData, ColdResult, ColdStorage, Confirmed, HeaderSpecifier, ReceiptContext,
+    BlockData, ColdReceipt, ColdResult, ColdStorage, Confirmed, Filter, HeaderSpecifier,
     ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use signet_hot::{
     KeySer, MAX_KEY_SIZE, ValSer,
-    model::{DualTableTraverse, HotKvWrite, KvTraverse, TableTraverse},
+    model::{HotKvRead, HotKvWrite, KvTraverse},
     tables::Table,
 };
 use signet_hot_mdbx::{DatabaseArguments, DatabaseEnv, DatabaseEnvKind};
 use signet_storage_types::{
-    ConfirmationMeta, DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned, TxLocation,
+    ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, RecoveredTx, SealedHeader,
+    TransactionSigned, TxLocation,
 };
 use std::path::Path;
 
@@ -99,6 +100,12 @@ impl MdbxColdBackend {
                 ColdTransactions::INT_KEY,
             ),
             (
+                ColdTxSenders::NAME,
+                ColdTxSenders::DUAL_KEY_SIZE,
+                ColdTxSenders::FIXED_VAL_SIZE,
+                ColdTxSenders::INT_KEY,
+            ),
+            (
                 ColdReceipts::NAME,
                 ColdReceipts::DUAL_KEY_SIZE,
                 ColdReceipts::FIXED_VAL_SIZE,
@@ -118,49 +125,37 @@ impl MdbxColdBackend {
         Ok(())
     }
 
-    fn get_header_inner(&self, spec: HeaderSpecifier) -> Result<Option<Header>, MdbxColdError> {
+    fn get_header_inner(
+        &self,
+        spec: HeaderSpecifier,
+    ) -> Result<Option<SealedHeader>, MdbxColdError> {
         let tx = self.env.tx()?;
         let block_num = match spec {
             HeaderSpecifier::Number(n) => n,
             HeaderSpecifier::Hash(h) => {
-                let Some(n) = TableTraverse::<ColdBlockHashIndex, _>::exact(
-                    &mut tx.new_cursor::<ColdBlockHashIndex>()?,
-                    &h,
-                )?
-                else {
+                let Some(n) = tx.traverse::<ColdBlockHashIndex>()?.exact(&h)? else {
                     return Ok(None);
                 };
                 n
             }
         };
-        Ok(TableTraverse::<ColdHeaders, _>::exact(
-            &mut tx.new_cursor::<ColdHeaders>()?,
-            &block_num,
-        )?)
+        Ok(tx.traverse::<ColdHeaders>()?.exact(&block_num)?)
     }
 
     fn get_headers_inner(
         &self,
         specs: Vec<HeaderSpecifier>,
-    ) -> Result<Vec<Option<Header>>, MdbxColdError> {
+    ) -> Result<Vec<Option<SealedHeader>>, MdbxColdError> {
         let tx = self.env.tx()?;
         specs
             .into_iter()
             .map(|spec| {
                 let block_num = match spec {
                     HeaderSpecifier::Number(n) => Some(n),
-                    HeaderSpecifier::Hash(h) => TableTraverse::<ColdBlockHashIndex, _>::exact(
-                        &mut tx.new_cursor::<ColdBlockHashIndex>()?,
-                        &h,
-                    )?,
+                    HeaderSpecifier::Hash(h) => tx.traverse::<ColdBlockHashIndex>()?.exact(&h)?,
                 };
                 block_num
-                    .map(|n| {
-                        TableTraverse::<ColdHeaders, _>::exact(
-                            &mut tx.new_cursor::<ColdHeaders>()?,
-                            &n,
-                        )
-                    })
+                    .map(|n| tx.traverse::<ColdHeaders>()?.exact(&n))
                     .transpose()
                     .map(Option::flatten)
             })
@@ -171,53 +166,60 @@ impl MdbxColdBackend {
     fn get_transaction_inner(
         &self,
         spec: TransactionSpecifier,
-    ) -> Result<Option<Confirmed<TransactionSigned>>, MdbxColdError> {
+    ) -> Result<Option<Confirmed<RecoveredTx>>, MdbxColdError> {
         let tx = self.env.tx()?;
         let (block, index) = match spec {
             TransactionSpecifier::Hash(h) => {
-                let Some(loc) = TableTraverse::<ColdTxHashIndex, _>::exact(
-                    &mut tx.new_cursor::<ColdTxHashIndex>()?,
-                    &h,
-                )?
-                else {
+                let Some(loc) = tx.traverse::<ColdTxHashIndex>()?.exact(&h)? else {
                     return Ok(None);
                 };
                 (loc.block, loc.index)
             }
             TransactionSpecifier::BlockAndIndex { block, index } => (block, index),
             TransactionSpecifier::BlockHashAndIndex { block_hash, index } => {
-                let Some(block) = TableTraverse::<ColdBlockHashIndex, _>::exact(
-                    &mut tx.new_cursor::<ColdBlockHashIndex>()?,
-                    &block_hash,
-                )?
-                else {
+                let Some(block) = tx.traverse::<ColdBlockHashIndex>()?.exact(&block_hash)? else {
                     return Ok(None);
                 };
                 (block, index)
             }
         };
-        let Some(signed_tx) = DualTableTraverse::<ColdTransactions, _>::exact_dual(
-            &mut tx.new_cursor::<ColdTransactions>()?,
-            &block,
-            &index,
-        )?
+        let Some(signed_tx) = tx.traverse_dual::<ColdTransactions>()?.exact_dual(&block, &index)?
         else {
             return Ok(None);
         };
-        let Some(header) =
-            TableTraverse::<ColdHeaders, _>::exact(&mut tx.new_cursor::<ColdHeaders>()?, &block)?
-        else {
+        let Some(sender) = tx.traverse_dual::<ColdTxSenders>()?.exact_dual(&block, &index)? else {
             return Ok(None);
         };
-        let meta = ConfirmationMeta::new(block, header.hash_slow(), index);
-        Ok(Some(Confirmed::new(signed_tx, meta)))
+        let Some(sealed) = tx.traverse::<ColdHeaders>()?.exact(&block)? else {
+            return Ok(None);
+        };
+        let meta = ConfirmationMeta::new(block, sealed.hash(), index);
+        // SAFETY: the sender was recovered at append time and stored alongside the transaction.
+        let recovered = Recovered::new_unchecked(signed_tx, sender);
+        Ok(Some(Confirmed::new(recovered, meta)))
     }
 
     fn get_receipt_inner(
         &self,
         spec: ReceiptSpecifier,
-    ) -> Result<Option<Confirmed<Receipt>>, MdbxColdError> {
-        Ok(self.get_receipt_with_context_inner(spec)?.map(|ctx| ctx.receipt))
+    ) -> Result<Option<ColdReceipt>, MdbxColdError> {
+        let tx = self.env.tx()?;
+        let (block, index) = match spec {
+            ReceiptSpecifier::TxHash(h) => {
+                let Some(loc) = tx.traverse::<ColdTxHashIndex>()?.exact(&h)? else {
+                    return Ok(None);
+                };
+                (loc.block, loc.index)
+            }
+            ReceiptSpecifier::BlockAndIndex { block, index } => (block, index),
+        };
+        let Some(sealed) = tx.traverse::<ColdHeaders>()?.exact(&block)? else {
+            return Ok(None);
+        };
+        let Some(ir) = tx.traverse_dual::<ColdReceipts>()?.exact_dual(&block, &index)? else {
+            return Ok(None);
+        };
+        Ok(Some(ColdReceipt::new(ir, &sealed, index)))
     }
 
     fn get_zenith_header_by_number(
@@ -225,42 +227,51 @@ impl MdbxColdBackend {
         block: BlockNumber,
     ) -> Result<Option<DbZenithHeader>, MdbxColdError> {
         let tx = self.env.tx()?;
-        Ok(TableTraverse::<ColdZenithHeaders, _>::exact(
-            &mut tx.new_cursor::<ColdZenithHeaders>()?,
-            &block,
-        )?)
+        Ok(tx.traverse::<ColdZenithHeaders>()?.exact(&block)?)
     }
 
     fn collect_transactions_in_block(
         &self,
         block: BlockNumber,
-    ) -> Result<Vec<TransactionSigned>, MdbxColdError> {
+    ) -> Result<Vec<RecoveredTx>, MdbxColdError> {
         let tx = self.env.tx()?;
-        let mut cursor = tx.new_cursor::<ColdTransactions>()?;
-        DualTableTraverse::<ColdTransactions, _>::iter_k2(&mut cursor, &block)?
-            .map(|item| item.map(|(_, v)| v))
-            .collect::<Result<_, _>>()
-            .map_err(Into::into)
+        tx.traverse_dual::<ColdTransactions>()?
+            .iter_k2(&block)?
+            .zip(tx.traverse_dual::<ColdTxSenders>()?.iter_k2(&block)?)
+            .map(|(tx_item, sender_item)| -> Result<_, MdbxColdError> {
+                let (_, signed_tx) = tx_item?;
+                let (_, sender) = sender_item?;
+                // SAFETY: the sender was recovered at append time.
+                Ok(Recovered::new_unchecked(signed_tx, sender))
+            })
+            .collect()
     }
 
     fn count_transactions_in_block(&self, block: BlockNumber) -> Result<u64, MdbxColdError> {
         let tx = self.env.tx()?;
-        let mut cursor = tx.new_cursor::<ColdTransactions>()?;
         let mut count = 0u64;
-        for item in DualTableTraverse::<ColdTransactions, _>::iter_k2(&mut cursor, &block)? {
+        for item in tx.traverse_dual::<ColdTransactions>()?.iter_k2(&block)? {
             item?;
             count += 1;
         }
         Ok(count)
     }
 
-    fn collect_receipts_in_block(&self, block: BlockNumber) -> Result<Vec<Receipt>, MdbxColdError> {
+    fn collect_receipts_in_block(
+        &self,
+        block: BlockNumber,
+    ) -> Result<Vec<ColdReceipt>, MdbxColdError> {
         let tx = self.env.tx()?;
-        let mut cursor = tx.new_cursor::<ColdReceipts>()?;
-        DualTableTraverse::<ColdReceipts, _>::iter_k2(&mut cursor, &block)?
-            .map(|item| item.map(|(_, v)| v))
-            .collect::<Result<_, _>>()
-            .map_err(Into::into)
+        let Some(sealed) = tx.traverse::<ColdHeaders>()?.exact(&block)? else {
+            return Ok(Vec::new());
+        };
+        tx.traverse_dual::<ColdReceipts>()?
+            .iter_k2(&block)?
+            .map(|item| {
+                let (idx, ir) = item?;
+                Ok::<_, MdbxColdError>(ColdReceipt::new(ir, &sealed, idx))
+            })
+            .collect()
     }
 
     fn collect_signet_events_in_block(
@@ -268,8 +279,8 @@ impl MdbxColdBackend {
         block: BlockNumber,
     ) -> Result<Vec<DbSignetEvent>, MdbxColdError> {
         let tx = self.env.tx()?;
-        let mut cursor = tx.new_cursor::<ColdSignetEvents>()?;
-        DualTableTraverse::<ColdSignetEvents, _>::iter_k2(&mut cursor, &block)?
+        tx.traverse_dual::<ColdSignetEvents>()?
+            .iter_k2(&block)?
             .map(|item| item.map(|(_, v)| v))
             .collect::<Result<_, _>>()
             .map_err(Into::into)
@@ -283,8 +294,7 @@ impl MdbxColdBackend {
         let tx = self.env.tx()?;
         let mut events = Vec::new();
         for block in start..=end {
-            let mut cursor = tx.new_cursor::<ColdSignetEvents>()?;
-            for item in DualTableTraverse::<ColdSignetEvents, _>::iter_k2(&mut cursor, &block)? {
+            for item in tx.traverse_dual::<ColdSignetEvents>()?.iter_k2(&block)? {
                 events.push(item?.1);
             }
         }
@@ -303,7 +313,7 @@ impl MdbxColdBackend {
         let mut key_buf = [0u8; MAX_KEY_SIZE];
         let key_bytes = start.encode_key(&mut key_buf);
 
-        let Some((key, value)) = KvTraverse::<_>::lower_bound(&mut cursor, key_bytes)? else {
+        let Some((key, value)) = cursor.lower_bound(key_bytes)? else {
             return Ok(headers);
         };
 
@@ -312,7 +322,7 @@ impl MdbxColdBackend {
             headers.push(DbZenithHeader::decode_value(&value)?);
         }
 
-        while let Some((key, value)) = KvTraverse::<_>::read_next(&mut cursor)? {
+        while let Some((key, value)) = cursor.read_next()? {
             let block_num = BlockNumber::decode_key(&key)?;
             if block_num > end {
                 break;
@@ -327,17 +337,37 @@ impl MdbxColdBackend {
         let tx = self.env.tx_rw()?;
         let block = data.block_number();
 
+        // Store the sealed header (hash already cached)
         tx.queue_put::<ColdHeaders>(&block, &data.header)?;
-        tx.queue_put::<ColdBlockHashIndex>(&data.header.hash_slow(), &block)?;
+        tx.queue_put::<ColdBlockHashIndex>(&data.header.hash(), &block)?;
 
-        for (idx, tx_signed) in data.transactions.iter().enumerate() {
-            let tx_idx = idx as u64;
-            tx.queue_put_dual::<ColdTransactions>(&block, &tx_idx, tx_signed)?;
-            tx.queue_put::<ColdTxHashIndex>(tx_signed.hash(), &TxLocation::new(block, tx_idx))?;
-        }
+        // Store transactions, senders, and build hash index
+        let tx_meta: Vec<_> = data
+            .transactions
+            .iter()
+            .enumerate()
+            .map(|(idx, recovered_tx)| {
+                let tx_idx = idx as u64;
+                let sender = recovered_tx.signer();
+                let tx_signed: &TransactionSigned = recovered_tx;
+                tx.queue_put_dual::<ColdTransactions>(&block, &tx_idx, tx_signed)?;
+                tx.queue_put_dual::<ColdTxSenders>(&block, &tx_idx, &sender)?;
+                tx.queue_put::<ColdTxHashIndex>(tx_signed.hash(), &TxLocation::new(block, tx_idx))?;
+                Ok((*tx_signed.hash(), sender))
+            })
+            .collect::<Result<_, MdbxColdError>>()?;
 
-        for (idx, receipt) in data.receipts.iter().enumerate() {
-            tx.queue_put_dual::<ColdReceipts>(&block, &(idx as u64), receipt)?;
+        // Compute and store IndexedReceipts with precomputed metadata
+        let mut first_log_index = 0u64;
+        let mut prior_cumulative_gas = 0u64;
+        for (idx, (receipt, (tx_hash, sender))) in
+            data.receipts.into_iter().zip(tx_meta).enumerate()
+        {
+            let gas_used = receipt.inner.cumulative_gas_used - prior_cumulative_gas;
+            prior_cumulative_gas = receipt.inner.cumulative_gas_used;
+            let ir = IndexedReceipt { receipt, tx_hash, first_log_index, gas_used, sender };
+            first_log_index += ir.receipt.inner.logs.len() as u64;
+            tx.queue_put_dual::<ColdReceipts>(&block, &(idx as u64), &ir)?;
         }
 
         for (idx, event) in data.signet_events.iter().enumerate() {
@@ -355,20 +385,23 @@ impl MdbxColdBackend {
     fn truncate_above_inner(&self, block: BlockNumber) -> Result<(), MdbxColdError> {
         let tx = self.env.tx_rw()?;
 
-        // Collect headers above the cutoff
+        // Collect sealed headers above the cutoff
         let headers_to_remove = {
             let mut cursor = tx.new_cursor::<ColdHeaders>()?;
-            let mut headers: Vec<(BlockNumber, Header)> = Vec::new();
+            let mut headers: Vec<(BlockNumber, SealedHeader)> = Vec::new();
 
             let start_block = block + 1;
             let mut key_buf = [0u8; MAX_KEY_SIZE];
             let key_bytes = start_block.encode_key(&mut key_buf);
 
-            if let Some((key, value)) = KvTraverse::<_>::lower_bound(&mut cursor, key_bytes)? {
-                headers.push((BlockNumber::decode_key(&key)?, Header::decode_value(&value)?));
+            if let Some((key, value)) = cursor.lower_bound(key_bytes)? {
+                headers.push((BlockNumber::decode_key(&key)?, SealedHeader::decode_value(&value)?));
 
-                while let Some((key, value)) = KvTraverse::<_>::read_next(&mut cursor)? {
-                    headers.push((BlockNumber::decode_key(&key)?, Header::decode_value(&value)?));
+                while let Some((key, value)) = cursor.read_next()? {
+                    headers.push((
+                        BlockNumber::decode_key(&key)?,
+                        SealedHeader::decode_value(&value)?,
+                    ));
                 }
             }
             headers
@@ -379,21 +412,17 @@ impl MdbxColdBackend {
         }
 
         // Delete each block's data
-        for (block_num, header) in &headers_to_remove {
+        for (block_num, sealed) in &headers_to_remove {
             // Delete transaction hash indices
-            {
-                let mut tx_cursor = tx.new_cursor::<ColdTransactions>()?;
-                for item in
-                    DualTableTraverse::<ColdTransactions, _>::iter_k2(&mut tx_cursor, block_num)?
-                {
-                    let (_, tx_signed): (u64, TransactionSigned) = item?;
-                    tx.queue_delete::<ColdTxHashIndex>(tx_signed.hash())?;
-                }
+            for item in tx.traverse_dual::<ColdTransactions>()?.iter_k2(block_num)? {
+                let (_, tx_signed) = item?;
+                tx.queue_delete::<ColdTxHashIndex>(tx_signed.hash())?;
             }
 
             tx.queue_delete::<ColdHeaders>(block_num)?;
-            tx.queue_delete::<ColdBlockHashIndex>(&header.hash_slow())?;
+            tx.queue_delete::<ColdBlockHashIndex>(&sealed.hash())?;
             tx.clear_k1_for::<ColdTransactions>(block_num)?;
+            tx.clear_k1_for::<ColdTxSenders>(block_num)?;
             tx.clear_k1_for::<ColdReceipts>(block_num)?;
             tx.clear_k1_for::<ColdSignetEvents>(block_num)?;
             tx.queue_delete::<ColdZenithHeaders>(block_num)?;
@@ -403,86 +432,66 @@ impl MdbxColdBackend {
         Ok(())
     }
 
-    fn get_receipt_with_context_inner(
-        &self,
-        spec: ReceiptSpecifier,
-    ) -> Result<Option<ReceiptContext>, MdbxColdError> {
+    fn get_logs_inner(&self, filter: Filter) -> Result<Vec<signet_cold::RpcLog>, MdbxColdError> {
         let tx = self.env.tx()?;
-        let (block, index) = match spec {
-            ReceiptSpecifier::TxHash(h) => {
-                let Some(loc) = TableTraverse::<ColdTxHashIndex, _>::exact(
-                    &mut tx.new_cursor::<ColdTxHashIndex>()?,
-                    &h,
-                )?
-                else {
-                    return Ok(None);
-                };
-                (loc.block, loc.index)
+        let mut results = Vec::new();
+
+        let from = filter.get_from_block().unwrap_or(0);
+        let to = filter.get_to_block().unwrap_or(u64::MAX);
+        for block_num in from..=to {
+            let Some(sealed) = tx.traverse::<ColdHeaders>()?.exact(&block_num)? else {
+                continue;
+            };
+            let block_hash = sealed.hash();
+            let block_timestamp = sealed.timestamp;
+
+            for item in tx.traverse_dual::<ColdReceipts>()?.iter_k2(&block_num)? {
+                let (tx_idx, ir) = item?;
+                results.extend(
+                    ir.receipt
+                        .inner
+                        .logs
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, log)| filter.matches(log))
+                        .map(|(log_idx, log)| signet_cold::RpcLog {
+                            inner: log.clone(),
+                            block_hash: Some(block_hash),
+                            block_number: Some(block_num),
+                            block_timestamp: Some(block_timestamp),
+                            transaction_hash: Some(ir.tx_hash),
+                            transaction_index: Some(tx_idx),
+                            log_index: Some(ir.first_log_index + log_idx as u64),
+                            removed: false,
+                        }),
+                );
             }
-            ReceiptSpecifier::BlockAndIndex { block, index } => (block, index),
-        };
-        let Some(header) =
-            TableTraverse::<ColdHeaders, _>::exact(&mut tx.new_cursor::<ColdHeaders>()?, &block)?
-        else {
-            return Ok(None);
-        };
-        let Some(receipt) = DualTableTraverse::<ColdReceipts, _>::exact_dual(
-            &mut tx.new_cursor::<ColdReceipts>()?,
-            &block,
-            &index,
-        )?
-        else {
-            return Ok(None);
-        };
-        let Some(transaction) = DualTableTraverse::<ColdTransactions, _>::exact_dual(
-            &mut tx.new_cursor::<ColdTransactions>()?,
-            &block,
-            &index,
-        )?
-        else {
-            return Ok(None);
-        };
+        }
 
-        let prior_cumulative_gas = index
-            .checked_sub(1)
-            .map(|prev| {
-                DualTableTraverse::<ColdReceipts, _>::exact_dual(
-                    &mut tx.new_cursor::<ColdReceipts>()?,
-                    &block,
-                    &prev,
-                )
-            })
-            .transpose()?
-            .flatten()
-            .map(|r: Receipt| r.inner.cumulative_gas_used)
-            .unwrap_or(0);
-
-        let meta = ConfirmationMeta::new(block, header.hash_slow(), index);
-        let confirmed_receipt = Confirmed::new(receipt, meta);
-        Ok(Some(ReceiptContext::new(header, transaction, confirmed_receipt, prior_cumulative_gas)))
+        Ok(results)
     }
 }
 
 impl ColdStorage for MdbxColdBackend {
-    async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<Header>> {
+    async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<SealedHeader>> {
         Ok(self.get_header_inner(spec)?)
     }
 
-    async fn get_headers(&self, specs: Vec<HeaderSpecifier>) -> ColdResult<Vec<Option<Header>>> {
+    async fn get_headers(
+        &self,
+        specs: Vec<HeaderSpecifier>,
+    ) -> ColdResult<Vec<Option<SealedHeader>>> {
         Ok(self.get_headers_inner(specs)?)
     }
 
     async fn get_transaction(
         &self,
         spec: TransactionSpecifier,
-    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
+    ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
         Ok(self.get_transaction_inner(spec)?)
     }
 
-    async fn get_transactions_in_block(
-        &self,
-        block: BlockNumber,
-    ) -> ColdResult<Vec<TransactionSigned>> {
+    async fn get_transactions_in_block(&self, block: BlockNumber) -> ColdResult<Vec<RecoveredTx>> {
         Ok(self.collect_transactions_in_block(block)?)
     }
 
@@ -490,11 +499,11 @@ impl ColdStorage for MdbxColdBackend {
         Ok(self.count_transactions_in_block(block)?)
     }
 
-    async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<Confirmed<Receipt>>> {
+    async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<ColdReceipt>> {
         Ok(self.get_receipt_inner(spec)?)
     }
 
-    async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<Receipt>> {
+    async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<ColdReceipt>> {
         Ok(self.collect_receipts_in_block(block)?)
     }
 
@@ -537,22 +546,20 @@ impl ColdStorage for MdbxColdBackend {
         Ok(headers)
     }
 
+    async fn get_logs(&self, filter: Filter) -> ColdResult<Vec<signet_cold::RpcLog>> {
+        Ok(self.get_logs_inner(filter)?)
+    }
+
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
         let tx = self.env.tx().map_err(MdbxColdError::from)?;
         let mut cursor = tx.new_cursor::<ColdHeaders>().map_err(MdbxColdError::from)?;
-        let latest = KvTraverse::<_>::last(&mut cursor)
+        let latest = cursor
+            .last()
             .map_err(MdbxColdError::from)?
             .map(|(key, _)| BlockNumber::decode_key(&key))
             .transpose()
             .map_err(MdbxColdError::from)?;
         Ok(latest)
-    }
-
-    async fn get_receipt_with_context(
-        &self,
-        spec: ReceiptSpecifier,
-    ) -> ColdResult<Option<ReceiptContext>> {
-        Ok(self.get_receipt_with_context_inner(spec)?)
     }
 
     async fn append_block(&self, data: BlockData) -> ColdResult<()> {

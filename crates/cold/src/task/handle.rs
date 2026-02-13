@@ -10,15 +10,12 @@
 //! maintaining sequential write ordering.
 
 use crate::{
-    AppendBlockRequest, BlockData, ColdReadRequest, ColdResult, ColdStorageError, ColdWriteRequest,
-    Confirmed, HeaderSpecifier, ReceiptContext, ReceiptSpecifier, SignetEventsSpecifier,
-    TransactionSpecifier, ZenithHeaderSpecifier,
+    AppendBlockRequest, BlockData, ColdReadRequest, ColdReceipt, ColdResult, ColdStorageError,
+    ColdWriteRequest, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
+    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
-use alloy::{
-    consensus::Header,
-    primitives::{B256, BlockNumber},
-};
-use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned};
+use alloy::primitives::{B256, BlockNumber};
+use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
 use tokio::sync::{mpsc, oneshot};
 
 /// Map a [`mpsc::error::TrySendError`] to the appropriate
@@ -78,18 +75,21 @@ impl ColdStorageReadHandle {
     // ==========================================================================
 
     /// Get a header by specifier.
-    pub async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<Header>> {
+    pub async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<SealedHeader>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetHeader { spec, resp }, rx).await
     }
 
     /// Get a header by block number.
-    pub async fn get_header_by_number(&self, block: BlockNumber) -> ColdResult<Option<Header>> {
+    pub async fn get_header_by_number(
+        &self,
+        block: BlockNumber,
+    ) -> ColdResult<Option<SealedHeader>> {
         self.get_header(HeaderSpecifier::Number(block)).await
     }
 
     /// Get a header by block hash.
-    pub async fn get_header_by_hash(&self, hash: B256) -> ColdResult<Option<Header>> {
+    pub async fn get_header_by_hash(&self, hash: B256) -> ColdResult<Option<SealedHeader>> {
         self.get_header(HeaderSpecifier::Hash(hash)).await
     }
 
@@ -97,7 +97,7 @@ impl ColdStorageReadHandle {
     pub async fn get_headers(
         &self,
         specs: Vec<HeaderSpecifier>,
-    ) -> ColdResult<Vec<Option<Header>>> {
+    ) -> ColdResult<Vec<Option<SealedHeader>>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetHeaders { specs, resp }, rx).await
     }
@@ -110,16 +110,13 @@ impl ColdStorageReadHandle {
     pub async fn get_transaction(
         &self,
         spec: TransactionSpecifier,
-    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
+    ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetTransaction { spec, resp }, rx).await
     }
 
     /// Get a transaction by hash.
-    pub async fn get_tx_by_hash(
-        &self,
-        hash: B256,
-    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
+    pub async fn get_tx_by_hash(&self, hash: B256) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
         self.get_transaction(TransactionSpecifier::Hash(hash)).await
     }
 
@@ -128,7 +125,7 @@ impl ColdStorageReadHandle {
         &self,
         block: BlockNumber,
         index: u64,
-    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
+    ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
         self.get_transaction(TransactionSpecifier::BlockAndIndex { block, index }).await
     }
 
@@ -137,7 +134,7 @@ impl ColdStorageReadHandle {
         &self,
         block_hash: B256,
         index: u64,
-    ) -> ColdResult<Option<Confirmed<TransactionSigned>>> {
+    ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
         self.get_transaction(TransactionSpecifier::BlockHashAndIndex { block_hash, index }).await
     }
 
@@ -145,7 +142,7 @@ impl ColdStorageReadHandle {
     pub async fn get_transactions_in_block(
         &self,
         block: BlockNumber,
-    ) -> ColdResult<Vec<TransactionSigned>> {
+    ) -> ColdResult<Vec<RecoveredTx>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetTransactionsInBlock { block, resp }, rx).await
     }
@@ -160,20 +157,14 @@ impl ColdStorageReadHandle {
     // Receipts
     // ==========================================================================
 
-    /// Get a receipt by specifier, with block confirmation metadata.
-    pub async fn get_receipt(
-        &self,
-        spec: ReceiptSpecifier,
-    ) -> ColdResult<Option<Confirmed<Receipt>>> {
+    /// Get a receipt by specifier.
+    pub async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<ColdReceipt>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetReceipt { spec, resp }, rx).await
     }
 
     /// Get a receipt by transaction hash.
-    pub async fn get_receipt_by_tx_hash(
-        &self,
-        hash: B256,
-    ) -> ColdResult<Option<Confirmed<Receipt>>> {
+    pub async fn get_receipt_by_tx_hash(&self, hash: B256) -> ColdResult<Option<ColdReceipt>> {
         self.get_receipt(ReceiptSpecifier::TxHash(hash)).await
     }
 
@@ -182,12 +173,12 @@ impl ColdStorageReadHandle {
         &self,
         block: BlockNumber,
         index: u64,
-    ) -> ColdResult<Option<Confirmed<Receipt>>> {
+    ) -> ColdResult<Option<ColdReceipt>> {
         self.get_receipt(ReceiptSpecifier::BlockAndIndex { block, index }).await
     }
 
     /// Get all receipts in a block.
-    pub async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<Receipt>> {
+    pub async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<ColdReceipt>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetReceiptsInBlock { block, resp }, rx).await
     }
@@ -258,6 +249,19 @@ impl ColdStorageReadHandle {
     }
 
     // ==========================================================================
+    // Logs
+    // ==========================================================================
+
+    /// Filter logs by block range, address, and topics.
+    ///
+    /// Follows `eth_getLogs` semantics. Returns all matching logs ordered
+    /// by (block_number, tx_index, log_index).
+    pub async fn get_logs(&self, filter: Filter) -> ColdResult<Vec<RpcLog>> {
+        let (resp, rx) = oneshot::channel();
+        self.send(ColdReadRequest::GetLogs { filter: Box::new(filter), resp }, rx).await
+    }
+
+    // ==========================================================================
     // Metadata
     // ==========================================================================
 
@@ -265,22 +269,6 @@ impl ColdStorageReadHandle {
     pub async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetLatestBlock { resp }, rx).await
-    }
-
-    // ==========================================================================
-    // Composite Queries
-    // ==========================================================================
-
-    /// Get a receipt with all context needed for RPC responses.
-    ///
-    /// Returns the receipt, its transaction, the block header, confirmation
-    /// metadata, and the cumulative gas used by preceding transactions.
-    pub async fn get_receipt_with_context(
-        &self,
-        spec: ReceiptSpecifier,
-    ) -> ColdResult<Option<ReceiptContext>> {
-        let (resp, rx) = oneshot::channel();
-        self.send(ColdReadRequest::GetReceiptWithContext { spec, resp }, rx).await
     }
 }
 

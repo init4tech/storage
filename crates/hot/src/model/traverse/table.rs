@@ -1,7 +1,8 @@
 //! Typed single-key table traversal traits.
 
-use super::{HotKvReadError, KeyValue, kv::KvTraverse, kv::KvTraverseMut};
+use super::{HotKvReadError, KeyValue, iter::RawKvIter, kv::KvTraverse, kv::KvTraverseMut};
 use crate::{ser::KeySer, ser::MAX_KEY_SIZE, tables::SingleKey};
+use core::marker::PhantomData;
 use std::ops::{Range, RangeInclusive};
 
 /// Extension trait for typed table traversal.
@@ -58,11 +59,20 @@ pub trait TableTraverse<T: SingleKey, E: HotKvReadError>: KvTraverse<E> {
     where
         Self: Sized,
     {
-        // Position the cursor at the key
-        TableTraverse::<T, E>::lower_bound(self, key)?;
-        // Return iterator that decodes from raw
-        Ok(KvTraverse::iter(self)?
-            .map(|r| r.and_then(|kv| T::decode_kv_tuple(kv).map_err(Into::into))))
+        // Encode the key and position the cursor. The first_entry is
+        // converted to owned so the key buffer borrow ends here.
+        let first_entry = {
+            let mut key_buf = [0u8; MAX_KEY_SIZE];
+            let key_bytes = key.encode_key(&mut key_buf);
+            KvTraverse::lower_bound(self, key_bytes)?.map(|(k, v)| (k.into_owned(), v.into_owned()))
+        };
+        Ok(RawKvIter {
+            cursor: self,
+            done: first_entry.is_none(),
+            first_entry,
+            _marker: PhantomData,
+        }
+        .map(|r| r.and_then(|kv| T::decode_kv_tuple(kv).map_err(Into::into))))
     }
 
     /// Position at first entry and return iterator over all entries.

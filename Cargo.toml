@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.92"
 authors = ["init4"]
@@ -35,13 +35,13 @@ incremental = false
 
 [workspace.dependencies]
 # internal
-signet-hot = { version = "0.2.0", path = "./crates/hot" }
-signet-hot-mdbx = { version = "0.2.0", path = "./crates/hot-mdbx" }
-signet-cold = { version = "0.2.0", path = "./crates/cold" }
-signet-cold-mdbx = { version = "0.2.0", path = "./crates/cold-mdbx" }
-signet-cold-sql = { version = "0.2.0", path = "./crates/cold-sql" }
-signet-storage = { version = "0.2.0", path = "./crates/storage" }
-signet-storage-types = { version = "0.2.0", path = "./crates/types" }
+signet-hot = { version = "0.3.0", path = "./crates/hot" }
+signet-hot-mdbx = { version = "0.3.0", path = "./crates/hot-mdbx" }
+signet-cold = { version = "0.3.0", path = "./crates/cold" }
+signet-cold-mdbx = { version = "0.3.0", path = "./crates/cold-mdbx" }
+signet-cold-sql = { version = "0.3.0", path = "./crates/cold-sql" }
+signet-storage = { version = "0.3.0", path = "./crates/storage" }
+signet-storage-types = { version = "0.3.0", path = "./crates/types" }
 
 # External, in-house
 signet-libmdbx = { version = "0.8.0" }
@@ -52,7 +52,7 @@ signet-zenith = "0.16.0-rc.8"
 trevm = { version = "0.34.0", features = ["full_env_cfg"] }
 
 # alloy
-alloy = { version = "1.6", default-features = false, features = ["consensus", "rlp"] }
+alloy = { version = "1.6", default-features = false, features = ["consensus", "rlp", "rpc-types-eth"] }
 
 ahash = "0.8"
 auto_impl = "1.3.0"

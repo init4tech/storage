@@ -3,10 +3,12 @@
 //! This module defines all tables used by cold storage by manually implementing
 //! the [`Table`], [`SingleKey`], and [`DualKey`] traits.
 
-use alloy::{consensus::Header, primitives::B256, primitives::BlockNumber};
+use alloy::primitives::{Address, B256, BlockNumber};
 use signet_hot::ser::KeySer;
 use signet_hot::tables::{DualKey, SingleKey, Table};
-use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned, TxLocation};
+use signet_storage_types::{
+    DbSignetEvent, DbZenithHeader, IndexedReceipt, SealedHeader, TransactionSigned, TxLocation,
+};
 
 // ============================================================================
 // Primary Data Tables
@@ -22,7 +24,7 @@ impl Table for ColdHeaders {
     const NAME: &'static str = "ColdHeaders";
     const INT_KEY: bool = true;
     type Key = BlockNumber;
-    type Value = Header;
+    type Value = SealedHeader;
 }
 
 impl SingleKey for ColdHeaders {}
@@ -64,7 +66,7 @@ impl Table for ColdReceipts {
     const INT_KEY: bool = true;
     const DUAL_KEY_SIZE: Option<usize> = Some(<u64 as KeySer>::SIZE);
     type Key = BlockNumber;
-    type Value = Receipt;
+    type Value = IndexedReceipt;
 }
 
 impl DualKey for ColdReceipts {
@@ -109,6 +111,26 @@ impl Table for ColdZenithHeaders {
 }
 
 impl SingleKey for ColdZenithHeaders {}
+
+/// Transaction senders indexed by (block number, tx index).
+///
+/// Uses DUPSORT to mirror the `ColdTransactions` key structure.
+/// Stores the recovered sender address for each transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ColdTxSenders;
+
+impl Table for ColdTxSenders {
+    const NAME: &'static str = "ColdTxSenders";
+    const INT_KEY: bool = true;
+    const DUAL_KEY_SIZE: Option<usize> = Some(<u64 as KeySer>::SIZE);
+    const FIXED_VAL_SIZE: Option<usize> = Some(20);
+    type Key = BlockNumber;
+    type Value = Address;
+}
+
+impl DualKey for ColdTxSenders {
+    type Key2 = u64;
+}
 
 // ============================================================================
 // Index Tables
@@ -155,6 +177,7 @@ mod tests {
     fn test_table_names() {
         assert_eq!(ColdHeaders::NAME, "ColdHeaders");
         assert_eq!(ColdTransactions::NAME, "ColdTransactions");
+        assert_eq!(ColdTxSenders::NAME, "ColdTxSenders");
         assert_eq!(ColdReceipts::NAME, "ColdReceipts");
         assert_eq!(ColdSignetEvents::NAME, "ColdSignetEvents");
         assert_eq!(ColdZenithHeaders::NAME, "ColdZenithHeaders");
@@ -179,6 +202,7 @@ mod tests {
         fn assert_dual_key<T: DualKey>() {}
 
         assert_dual_key::<ColdTransactions>();
+        assert_dual_key::<ColdTxSenders>();
         assert_dual_key::<ColdReceipts>();
         assert_dual_key::<ColdSignetEvents>();
     }
@@ -188,6 +212,7 @@ mod tests {
         // Tables with int_key should have INT_KEY = true
         const { assert!(ColdHeaders::INT_KEY) };
         const { assert!(ColdTransactions::INT_KEY) };
+        const { assert!(ColdTxSenders::INT_KEY) };
         const { assert!(ColdReceipts::INT_KEY) };
         const { assert!(ColdSignetEvents::INT_KEY) };
         const { assert!(ColdZenithHeaders::INT_KEY) };
@@ -204,6 +229,9 @@ mod tests {
 
         // ColdBlockHashIndex has BlockNumber (u64) = 8 bytes
         assert_eq!(ColdBlockHashIndex::FIXED_VAL_SIZE, Some(8));
+
+        // ColdTxSenders has Address = 20 bytes
+        assert_eq!(ColdTxSenders::FIXED_VAL_SIZE, Some(20));
 
         // Variable-size value tables should not have fixed value size
         assert_eq!(ColdHeaders::FIXED_VAL_SIZE, None);

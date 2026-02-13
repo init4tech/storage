@@ -4,24 +4,24 @@
 //! backends must implement. Backends are responsible for data organization,
 //! indexing, and keying - the trait is agnostic to these implementation details.
 
-use alloy::{consensus::Header, primitives::BlockNumber};
+use alloy::primitives::BlockNumber;
 use signet_storage_types::{
-    DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, TransactionSigned,
+    DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, RecoveredTx, SealedHeader,
 };
 use std::future::Future;
 
 use super::{
-    ColdResult, Confirmed, HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier,
-    TransactionSpecifier, ZenithHeaderSpecifier,
+    ColdReceipt, ColdResult, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
+    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 
 /// Data for appending a complete block to cold storage.
 #[derive(Debug, Clone)]
 pub struct BlockData {
-    /// The block header.
-    pub header: Header,
-    /// The transactions in the block.
-    pub transactions: Vec<TransactionSigned>,
+    /// The sealed block header (contains cached hash).
+    pub header: SealedHeader,
+    /// The transactions in the block, with recovered senders.
+    pub transactions: Vec<RecoveredTx>,
     /// The receipts for the transactions.
     pub receipts: Vec<Receipt>,
     /// The signet events in the block.
@@ -33,8 +33,8 @@ pub struct BlockData {
 impl BlockData {
     /// Create new block data.
     pub const fn new(
-        header: Header,
-        transactions: Vec<TransactionSigned>,
+        header: SealedHeader,
+        transactions: Vec<RecoveredTx>,
         receipts: Vec<Receipt>,
         signet_events: Vec<DbSignetEvent>,
         zenith_header: Option<DbZenithHeader>,
@@ -43,44 +43,15 @@ impl BlockData {
     }
 
     /// Get the block number of the block.
-    pub const fn block_number(&self) -> BlockNumber {
+    pub fn block_number(&self) -> BlockNumber {
         self.header.number
-    }
-}
-
-/// All data needed to build a complete RPC receipt response.
-///
-/// Bundles a [`Confirmed`] receipt with its transaction, block header,
-/// and the prior cumulative gas (needed to compute per-tx `gas_used`).
-#[derive(Debug, Clone)]
-pub struct ReceiptContext {
-    /// The block header.
-    pub header: Header,
-    /// The transaction that produced this receipt.
-    pub transaction: TransactionSigned,
-    /// The receipt with block confirmation metadata.
-    pub receipt: Confirmed<Receipt>,
-    /// Cumulative gas used by all preceding transactions in the block.
-    /// Zero for the first transaction.
-    pub prior_cumulative_gas: u64,
-}
-
-impl ReceiptContext {
-    /// Create a new receipt context.
-    pub const fn new(
-        header: Header,
-        transaction: TransactionSigned,
-        receipt: Confirmed<Receipt>,
-        prior_cumulative_gas: u64,
-    ) -> Self {
-        Self { header, transaction, receipt, prior_cumulative_gas }
     }
 }
 
 impl From<ExecutedBlock> for BlockData {
     fn from(block: ExecutedBlock) -> Self {
         Self::new(
-            block.header.into_inner(),
+            block.header,
             block.transactions,
             block.receipts,
             block.signet_events,
@@ -123,13 +94,13 @@ pub trait ColdStorage: Send + Sync + 'static {
     fn get_header(
         &self,
         spec: HeaderSpecifier,
-    ) -> impl Future<Output = ColdResult<Option<Header>>> + Send;
+    ) -> impl Future<Output = ColdResult<Option<SealedHeader>>> + Send;
 
     /// Get multiple headers by specifiers.
     fn get_headers(
         &self,
         specs: Vec<HeaderSpecifier>,
-    ) -> impl Future<Output = ColdResult<Vec<Option<Header>>>> + Send;
+    ) -> impl Future<Output = ColdResult<Vec<Option<SealedHeader>>>> + Send;
 
     // --- Transactions ---
 
@@ -137,13 +108,13 @@ pub trait ColdStorage: Send + Sync + 'static {
     fn get_transaction(
         &self,
         spec: TransactionSpecifier,
-    ) -> impl Future<Output = ColdResult<Option<Confirmed<TransactionSigned>>>> + Send;
+    ) -> impl Future<Output = ColdResult<Option<Confirmed<RecoveredTx>>>> + Send;
 
     /// Get all transactions in a block.
     fn get_transactions_in_block(
         &self,
         block: BlockNumber,
-    ) -> impl Future<Output = ColdResult<Vec<TransactionSigned>>> + Send;
+    ) -> impl Future<Output = ColdResult<Vec<RecoveredTx>>> + Send;
 
     /// Get the number of transactions in a block.
     fn get_transaction_count(
@@ -153,17 +124,17 @@ pub trait ColdStorage: Send + Sync + 'static {
 
     // --- Receipts ---
 
-    /// Get a receipt by specifier, with block confirmation metadata.
+    /// Get a receipt by specifier.
     fn get_receipt(
         &self,
         spec: ReceiptSpecifier,
-    ) -> impl Future<Output = ColdResult<Option<Confirmed<Receipt>>>> + Send;
+    ) -> impl Future<Output = ColdResult<Option<ColdReceipt>>> + Send;
 
     /// Get all receipts in a block.
     fn get_receipts_in_block(
         &self,
         block: BlockNumber,
-    ) -> impl Future<Output = ColdResult<Vec<Receipt>>> + Send;
+    ) -> impl Future<Output = ColdResult<Vec<ColdReceipt>>> + Send;
 
     // --- SignetEvents ---
 
@@ -192,49 +163,13 @@ pub trait ColdStorage: Send + Sync + 'static {
     /// Get the latest block number in storage.
     fn get_latest_block(&self) -> impl Future<Output = ColdResult<Option<BlockNumber>>> + Send;
 
-    // --- Composite queries ---
+    // --- Logs ---
 
-    /// Get a receipt with all context needed for RPC responses.
+    /// Filter logs by block range, address, and topics.
     ///
-    /// Returns the receipt, its transaction, the block header, confirmation
-    /// metadata, and the cumulative gas used by preceding transactions.
-    /// Returns `None` if the receipt does not exist.
-    ///
-    /// The default implementation composes existing trait methods. Backends
-    /// that can serve this more efficiently (e.g., in a single transaction)
-    /// should override.
-    fn get_receipt_with_context(
-        &self,
-        spec: ReceiptSpecifier,
-    ) -> impl Future<Output = ColdResult<Option<ReceiptContext>>> + Send {
-        async move {
-            let Some(receipt) = self.get_receipt(spec).await? else {
-                return Ok(None);
-            };
-            let block = receipt.meta().block_number();
-            let index = receipt.meta().transaction_index();
-
-            let Some(header) = self.get_header(HeaderSpecifier::Number(block)).await? else {
-                return Ok(None);
-            };
-            let Some(tx) =
-                self.get_transaction(TransactionSpecifier::BlockAndIndex { block, index }).await?
-            else {
-                return Ok(None);
-            };
-
-            let prior_cumulative_gas = if index > 0 {
-                self.get_receipt(ReceiptSpecifier::BlockAndIndex { block, index: index - 1 })
-                    .await?
-                    .map(|r| r.into_inner().inner.cumulative_gas_used)
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-
-            Ok(Some(ReceiptContext::new(header, tx.into_inner(), receipt, prior_cumulative_gas)))
-        }
-    }
+    /// Follows `eth_getLogs` semantics: returns all logs matching the
+    /// filter criteria, ordered by (block_number, tx_index, log_index).
+    fn get_logs(&self, filter: Filter) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send;
 
     // --- Write operations ---
 

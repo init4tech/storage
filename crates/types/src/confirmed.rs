@@ -1,6 +1,6 @@
 //! Wrapper type pairing a value with block confirmation metadata.
 
-use signet_storage_types::ConfirmationMeta;
+use crate::ConfirmationMeta;
 
 /// A value paired with its block confirmation metadata.
 ///
@@ -11,8 +11,7 @@ use signet_storage_types::ConfirmationMeta;
 /// # Example
 ///
 /// ```
-/// # use signet_storage_types::ConfirmationMeta;
-/// # use signet_cold::Confirmed;
+/// # use signet_storage_types::{ConfirmationMeta, Confirmed};
 /// # use alloy::primitives::B256;
 /// let meta = ConfirmationMeta::new(42, B256::ZERO, 0);
 /// let confirmed = Confirmed::new("hello", meta);

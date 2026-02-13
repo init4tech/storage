@@ -16,7 +16,9 @@ use alloy::{
     },
     primitives::{Address, B256, Bloom, Bytes, Log, LogData, Signature, TxKind, U256},
 };
-use signet_storage_types::{DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned};
+use signet_storage_types::{
+    DbSignetEvent, DbZenithHeader, Receipt, SealedHeader, TransactionSigned,
+};
 use signet_zenith::{
     Passage::{Enter, EnterToken},
     Transactor::Transact,
@@ -98,11 +100,11 @@ pub(crate) struct HeaderRow {
 }
 
 impl HeaderRow {
-    /// Convert a header to a SQL row.
-    pub(crate) fn from_header(header: &Header) -> Self {
+    /// Convert a sealed header to a SQL row.
+    pub(crate) fn from_header(header: &SealedHeader) -> Self {
         Self {
             block_number: to_i64(header.number),
-            block_hash: header.hash_slow().as_slice().to_vec(),
+            block_hash: header.hash().as_slice().to_vec(),
             parent_hash: header.parent_hash.as_slice().to_vec(),
             ommers_hash: header.ommers_hash.as_slice().to_vec(),
             beneficiary: header.beneficiary.as_slice().to_vec(),
@@ -182,6 +184,7 @@ pub(crate) struct TxRow {
     pub blob_versioned_hashes: Option<Vec<u8>>,
     pub access_list: Option<Vec<u8>>,
     pub authorization_list: Option<Vec<u8>>,
+    pub from_address: Vec<u8>,
 }
 
 impl TxRow {
@@ -190,6 +193,7 @@ impl TxRow {
         tx: &TransactionSigned,
         block_number: i64,
         tx_index: i64,
+        sender: &Address,
     ) -> Result<Self, SqlColdError> {
         use alloy::consensus::EthereumTxEnvelope;
 
@@ -221,6 +225,7 @@ impl TxRow {
                     blob_versioned_hashes: None,
                     access_list: None,
                     authorization_list: None,
+                    from_address: sender.as_slice().to_vec(),
                 })
             }
             EthereumTxEnvelope::Eip2930(signed) => {
@@ -247,6 +252,7 @@ impl TxRow {
                     blob_versioned_hashes: None,
                     access_list: Some(encode_access_list(&inner.access_list)),
                     authorization_list: None,
+                    from_address: sender.as_slice().to_vec(),
                 })
             }
             EthereumTxEnvelope::Eip1559(signed) => {
@@ -273,6 +279,7 @@ impl TxRow {
                     blob_versioned_hashes: None,
                     access_list: Some(encode_access_list(&inner.access_list)),
                     authorization_list: None,
+                    from_address: sender.as_slice().to_vec(),
                 })
             }
             EthereumTxEnvelope::Eip4844(signed) => {
@@ -299,6 +306,7 @@ impl TxRow {
                     blob_versioned_hashes: Some(encode_b256_vec(&inner.blob_versioned_hashes)),
                     access_list: Some(encode_access_list(&inner.access_list)),
                     authorization_list: None,
+                    from_address: sender.as_slice().to_vec(),
                 })
             }
             EthereumTxEnvelope::Eip7702(signed) => {
@@ -325,6 +333,7 @@ impl TxRow {
                     blob_versioned_hashes: None,
                     access_list: Some(encode_access_list(&inner.access_list)),
                     authorization_list: Some(encode_authorization_list(&inner.authorization_list)),
+                    from_address: sender.as_slice().to_vec(),
                 })
             }
         }

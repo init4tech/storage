@@ -142,22 +142,22 @@
 #![deny(unused_must_use, rust_2018_idioms)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod confirmed;
-pub use confirmed::Confirmed;
 mod error;
 pub use error::{ColdResult, ColdStorageError};
-
 mod request;
 pub use request::{AppendBlockRequest, ColdReadRequest, ColdWriteRequest, Responder};
-
 mod specifier;
+pub use alloy::rpc::types::{Filter, Log as RpcLog};
+pub use signet_storage_types::{Confirmed, Recovered};
 pub use specifier::{
     HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
     ZenithHeaderSpecifier,
 };
 
+mod cold_receipt;
+pub use cold_receipt::ColdReceipt;
 mod traits;
-pub use traits::{BlockData, ColdStorage, ReceiptContext};
+pub use traits::{BlockData, ColdStorage};
 
 /// Task module containing the storage task runner and handles.
 pub mod task;

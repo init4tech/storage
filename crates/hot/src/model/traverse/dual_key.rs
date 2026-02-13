@@ -85,8 +85,14 @@ pub trait DualKeyTraverse<E: HotKvReadError> {
     where
         Self: Sized,
     {
-        self.first()?;
-        Ok(RawDualKeyIter { cursor: self, done: false, _marker: PhantomData })
+        let first_entry =
+            self.first()?.map(|(k1, k2, v)| (k1.into_owned(), k2.into_owned(), v.into_owned()));
+        Ok(RawDualKeyIter {
+            cursor: self,
+            done: first_entry.is_none(),
+            first_entry,
+            _marker: PhantomData,
+        })
     }
 
     /// Position at (k1, k2) and return iterator over subsequent entries.
@@ -101,8 +107,15 @@ pub trait DualKeyTraverse<E: HotKvReadError> {
     where
         Self: Sized,
     {
-        self.next_dual_above(k1, k2)?;
-        Ok(RawDualKeyIter { cursor: self, done: false, _marker: PhantomData })
+        let first_entry = self
+            .next_dual_above(k1, k2)?
+            .map(|(k1, k2, v)| (k1.into_owned(), k2.into_owned(), v.into_owned()));
+        Ok(RawDualKeyIter {
+            cursor: self,
+            done: first_entry.is_none(),
+            first_entry,
+            _marker: PhantomData,
+        })
     }
 
     /// Iterate all k2 entries within a single k1.
@@ -122,12 +135,32 @@ pub trait DualKeyTraverse<E: HotKvReadError> {
     {
         // Position at first entry for this k1 (using empty slice as minimum k2)
         let entry = self.next_dual_above(k1, &[])?;
-        let Some((found_k1, _, _)) = entry else {
-            return Ok(RawDualKeyK2Iter { cursor: self, done: true, _marker: PhantomData });
+        let Some((found_k1, k2, v)) = entry else {
+            return Ok(RawDualKeyK2Iter {
+                cursor: self,
+                done: true,
+                first_entry: None,
+                _marker: PhantomData,
+            });
         };
         // If the found k1 doesn't match, we're done
-        let done = found_k1.as_ref() != k1;
-        Ok(RawDualKeyK2Iter { cursor: self, done, _marker: PhantomData })
+        if found_k1.as_ref() != k1 {
+            return Ok(RawDualKeyK2Iter {
+                cursor: self,
+                done: true,
+                first_entry: None,
+                _marker: PhantomData,
+            });
+        }
+        // Convert to owned before constructing the iterator to release the
+        // mutable borrow on self from `next_dual_above`.
+        let first = (k2.into_owned(), v.into_owned());
+        Ok(RawDualKeyK2Iter {
+            cursor: self,
+            done: false,
+            first_entry: Some(first),
+            _marker: PhantomData,
+        })
     }
 
     /// Position at first entry and return iterator yielding [`DualKeyItem`].
