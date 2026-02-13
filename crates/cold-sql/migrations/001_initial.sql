@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     blob_versioned_hashes     BLOB,
     access_list               BLOB,
     authorization_list        BLOB,
+    from_address              BLOB,
     PRIMARY KEY (block_number, tx_index)
 );
 

@@ -61,15 +61,9 @@ impl SqlColdBackend {
         let backend = conn.backend_name().to_owned();
         drop(conn);
 
-        let (migration, migration_002) = match backend.as_str() {
-            "PostgreSQL" => (
-                include_str!("../migrations/001_initial_pg.sql"),
-                include_str!("../migrations/002_add_from_address_pg.sql"),
-            ),
-            "SQLite" => (
-                include_str!("../migrations/001_initial.sql"),
-                include_str!("../migrations/002_add_from_address.sql"),
-            ),
+        let migration = match backend.as_str() {
+            "PostgreSQL" => include_str!("../migrations/001_initial_pg.sql"),
+            "SQLite" => include_str!("../migrations/001_initial.sql"),
             other => {
                 return Err(SqlColdError::Convert(format!(
                     "unsupported database backend: {other}"
@@ -79,15 +73,6 @@ impl SqlColdBackend {
         // Execute via pool to ensure the migration uses the same
         // connection that subsequent queries will use.
         sqlx::raw_sql(migration).execute(&pool).await?;
-        // Run migration 002 (add from_address column). Idempotent:
-        // SQLite ALTER will fail if column already exists, so we
-        // ignore that specific error.
-        if let Err(e) = sqlx::raw_sql(migration_002).execute(&pool).await {
-            let msg = e.to_string();
-            if !msg.contains("duplicate column") && !msg.contains("already exists") {
-                return Err(e.into());
-            }
-        }
         Ok(Self { pool })
     }
 
@@ -372,7 +357,7 @@ fn row_to_tx_row(r: &sqlx::any::AnyRow) -> TxRow {
         blob_versioned_hashes: r.get("blob_versioned_hashes"),
         access_list: r.get("access_list"),
         authorization_list: r.get("authorization_list"),
-        from_address: r.get::<Option<Vec<u8>>, _>("from_address").unwrap_or_default(),
+        from_address: r.get("from_address"),
     }
 }
 
@@ -569,7 +554,7 @@ impl ColdStorage for SqlColdBackend {
         let tx_idx: i64 = rr.get("tx_index");
         let tx_hash_bytes: Vec<u8> = rr.get("tx_hash");
         let tx_hash = alloy::primitives::B256::from_slice(&tx_hash_bytes);
-        let from_bytes: Vec<u8> = rr.get::<Option<Vec<u8>>, _>("from_address").unwrap_or_default();
+        let from_bytes: Vec<u8> = rr.get("from_address");
         let sender = alloy::primitives::Address::from_slice(&from_bytes);
 
         let receipt = ReceiptRow {
@@ -661,8 +646,7 @@ impl ColdStorage for SqlColdBackend {
                 let tx_idx: i64 = rr.get("tx_index");
                 let tx_hash_bytes: Vec<u8> = rr.get("tx_hash");
                 let tx_hash = alloy::primitives::B256::from_slice(&tx_hash_bytes);
-                let from_bytes: Vec<u8> =
-                    rr.get::<Option<Vec<u8>>, _>("from_address").unwrap_or_default();
+                let from_bytes: Vec<u8> = rr.get("from_address");
                 let sender = alloy::primitives::Address::from_slice(&from_bytes);
                 let receipt_row = ReceiptRow {
                     block_number: rr.get("block_number"),

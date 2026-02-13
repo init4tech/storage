@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     blob_versioned_hashes     BYTEA,
     access_list               BYTEA,
     authorization_list        BYTEA,
+    from_address              BYTEA,
     PRIMARY KEY (block_number, tx_index)
 );
 
