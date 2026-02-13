@@ -239,6 +239,132 @@ pub fn test_cursor_iter_k2_empty<T: HotKv>(hot_kv: &T) {
     assert!(entries.is_empty(), "iter_k2 on nonexistent k1 should return empty");
 }
 
+/// Test `iter()` yields all entries including the first.
+///
+/// Writes headers at blocks 500–504 and verifies that `iter()` returns all 5
+/// in order.
+pub fn test_cursor_iter<T: HotKv>(hot_kv: &T) {
+    {
+        let writer = hot_kv.writer().unwrap();
+        for i in 500u64..505 {
+            let header = Header { number: i, gas_limit: 1_000_000, ..Default::default() };
+            writer.put_header_inconsistent(&header.seal_slow()).unwrap();
+        }
+        writer.commit().unwrap();
+    }
+
+    let reader = hot_kv.reader().unwrap();
+    let mut cursor = reader.traverse::<tables::Headers>().unwrap();
+
+    let entries: Vec<_> = cursor.iter().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert!(entries.len() >= 5, "iter() should return at least 5 entries");
+
+    // Verify our 5 entries are present in order
+    let our_entries: Vec<_> = entries.iter().filter(|(n, _)| (500..505).contains(n)).collect();
+    assert_eq!(our_entries.len(), 5, "iter() must include all 5 written headers");
+    for (i, (num, _)) in our_entries.iter().enumerate() {
+        assert_eq!(*num, 500 + i as u64);
+    }
+}
+
+/// Test `iter_from()` starts at the correct key including that key.
+///
+/// Reuses headers at blocks 500–504 and calls `iter_from(&502)`, asserting
+/// entries 502, 503, 504 are returned.
+pub fn test_cursor_iter_from<T: HotKv>(hot_kv: &T) {
+    // Ensure data exists (may already be written by test_cursor_iter)
+    {
+        let writer = hot_kv.writer().unwrap();
+        for i in 500u64..505 {
+            let header = Header { number: i, gas_limit: 1_000_000, ..Default::default() };
+            writer.put_header_inconsistent(&header.seal_slow()).unwrap();
+        }
+        writer.commit().unwrap();
+    }
+
+    let reader = hot_kv.reader().unwrap();
+    let mut cursor = reader.traverse::<tables::Headers>().unwrap();
+
+    let entries: Vec<_> =
+        cursor.iter_from(&502u64).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert!(entries.len() >= 3, "iter_from(502) should return at least 3 entries");
+    assert_eq!(entries[0].0, 502, "iter_from(502) must start at 502");
+    assert_eq!(entries[1].0, 503);
+    assert_eq!(entries[2].0, 504);
+}
+
+/// Test dual-key `iter()` yields all entries including the first.
+///
+/// Writes storage for 3 addresses (6 total entries) and verifies that `iter()`
+/// returns all 6 in order.
+pub fn test_cursor_dual_iter<T: HotKv>(hot_kv: &T) {
+    let addr1 = address!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let addr2 = address!("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    let addr3 = address!("0xcccccccccccccccccccccccccccccccccccccccc");
+
+    {
+        let writer = hot_kv.writer().unwrap();
+        writer.put_storage(&addr1, &U256::from(1), &U256::from(10)).unwrap();
+        writer.put_storage(&addr1, &U256::from(2), &U256::from(20)).unwrap();
+        writer.put_storage(&addr2, &U256::from(1), &U256::from(100)).unwrap();
+        writer.put_storage(&addr2, &U256::from(2), &U256::from(200)).unwrap();
+        writer.put_storage(&addr3, &U256::from(1), &U256::from(1000)).unwrap();
+        writer.put_storage(&addr3, &U256::from(2), &U256::from(2000)).unwrap();
+        writer.commit().unwrap();
+    }
+
+    let reader = hot_kv.reader().unwrap();
+    let mut cursor = reader.traverse_dual::<tables::PlainStorageState>().unwrap();
+
+    let entries: Vec<_> = cursor.iter().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert!(entries.len() >= 6, "dual iter() should return at least 6 entries");
+
+    // Find our entries by address
+    let our_entries: Vec<_> =
+        entries.iter().filter(|(k1, _, _)| *k1 == addr1 || *k1 == addr2 || *k1 == addr3).collect();
+    assert_eq!(our_entries.len(), 6, "dual iter() must include all 6 written entries");
+    assert_eq!(our_entries[0], &(addr1, U256::from(1), U256::from(10)));
+    assert_eq!(our_entries[1], &(addr1, U256::from(2), U256::from(20)));
+    assert_eq!(our_entries[2], &(addr2, U256::from(1), U256::from(100)));
+    assert_eq!(our_entries[3], &(addr2, U256::from(2), U256::from(200)));
+    assert_eq!(our_entries[4], &(addr3, U256::from(1), U256::from(1000)));
+    assert_eq!(our_entries[5], &(addr3, U256::from(2), U256::from(2000)));
+}
+
+/// Test dual-key `iter_from()` starts at the correct key pair.
+///
+/// Uses the same data as `test_cursor_dual_iter` and calls
+/// `iter_from(&addr2, &U256::from(1))`, asserting entries from (addr2, 1)
+/// onward are returned.
+pub fn test_cursor_dual_iter_from<T: HotKv>(hot_kv: &T) {
+    let addr2 = address!("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    let addr3 = address!("0xcccccccccccccccccccccccccccccccccccccccc");
+
+    // Ensure data exists
+    {
+        let writer = hot_kv.writer().unwrap();
+        let addr1 = address!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        writer.put_storage(&addr1, &U256::from(1), &U256::from(10)).unwrap();
+        writer.put_storage(&addr1, &U256::from(2), &U256::from(20)).unwrap();
+        writer.put_storage(&addr2, &U256::from(1), &U256::from(100)).unwrap();
+        writer.put_storage(&addr2, &U256::from(2), &U256::from(200)).unwrap();
+        writer.put_storage(&addr3, &U256::from(1), &U256::from(1000)).unwrap();
+        writer.put_storage(&addr3, &U256::from(2), &U256::from(2000)).unwrap();
+        writer.commit().unwrap();
+    }
+
+    let reader = hot_kv.reader().unwrap();
+    let mut cursor = reader.traverse_dual::<tables::PlainStorageState>().unwrap();
+
+    let entries: Vec<_> =
+        cursor.iter_from(&addr2, &U256::from(1)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert!(entries.len() >= 4, "dual iter_from(addr2, 1) should return at least 4 entries");
+    assert_eq!(entries[0], (addr2, U256::from(1), U256::from(100)));
+    assert_eq!(entries[1], (addr2, U256::from(2), U256::from(200)));
+    assert_eq!(entries[2], (addr3, U256::from(1), U256::from(1000)));
+    assert_eq!(entries[3], (addr3, U256::from(2), U256::from(2000)));
+}
+
 /// Test cursor on table with single entry.
 pub fn test_cursor_single_entry<T: HotKv>(hot_kv: &T) {
     let addr = address!("0xdddddddddddddddddddddddddddddddddddddd01");

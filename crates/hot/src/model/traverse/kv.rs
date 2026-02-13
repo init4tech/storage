@@ -43,8 +43,13 @@ pub trait KvTraverse<E: HotKvReadError> {
     where
         Self: Sized,
     {
-        self.first()?;
-        Ok(RawKvIter { cursor: self, done: false, _marker: PhantomData })
+        let first_entry = self.first()?.map(|(k, v)| (k.into_owned(), v.into_owned()));
+        Ok(RawKvIter {
+            cursor: self,
+            done: first_entry.is_none(),
+            first_entry,
+            _marker: PhantomData,
+        })
     }
 
     /// Position at `key` and return iterator over subsequent entries.
@@ -60,8 +65,13 @@ pub trait KvTraverse<E: HotKvReadError> {
     where
         Self: Sized,
     {
-        self.lower_bound(key)?;
-        Ok(RawKvIter { cursor: self, done: false, _marker: PhantomData })
+        let first_entry = self.lower_bound(key)?.map(|(k, v)| (k.into_owned(), v.into_owned()));
+        Ok(RawKvIter {
+            cursor: self,
+            done: first_entry.is_none(),
+            first_entry,
+            _marker: PhantomData,
+        })
     }
 }
 

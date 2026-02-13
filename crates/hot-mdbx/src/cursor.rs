@@ -8,7 +8,7 @@ use signet_hot::{
         RawDualKeyItem, RawDualKeyValue, RawKeyValue, RawValue,
     },
 };
-use signet_libmdbx::{DupItem, Ro, Rw, RwSync, TransactionKind, tx::WriteMarker};
+use signet_libmdbx::{DupItem, Ro, Rw, RwSync, TransactionKind, tx::WriteMarker, tx::iter};
 use std::{
     borrow::Cow,
     ops::{Deref, DerefMut},
@@ -102,6 +102,29 @@ where
 
     fn read_prev<'a>(&'a mut self) -> Result<Option<RawKeyValue<'a>>, MdbxError> {
         self.inner.prev().map_err(MdbxError::from)
+    }
+
+    fn iter(
+        &mut self,
+    ) -> Result<impl Iterator<Item = Result<RawKeyValue<'_>, MdbxError>> + '_, MdbxError>
+    where
+        Self: Sized,
+    {
+        let iter =
+            self.inner.iter_start::<Cow<'_, [u8]>, Cow<'_, [u8]>>().map_err(MdbxError::from)?;
+        Ok(MdbxKvIter { iter })
+    }
+
+    fn iter_from<'a>(
+        &'a mut self,
+        key: &[u8],
+    ) -> Result<impl Iterator<Item = Result<RawKeyValue<'a>, MdbxError>> + 'a, MdbxError>
+    where
+        Self: Sized,
+    {
+        let iter =
+            self.inner.iter_from::<Cow<'_, [u8]>, Cow<'_, [u8]>>(key).map_err(MdbxError::from)?;
+        Ok(MdbxKvIter { iter })
     }
 }
 
@@ -450,6 +473,27 @@ where
         // Use iter_dup_start which yields DupItem::NewKey/SameKey
         let iter_dup = self.inner.iter_dup_start::<Cow<'_, [u8]>, Cow<'_, [u8]>>()?;
         Ok(MdbxDualKeyItemIter { iter_dup, key2_size })
+    }
+}
+
+/// Iterator adapter that wraps a native libmdbx [`iter::Iter`] for
+/// [`KvTraverse`].
+///
+/// Uses the native cursor iteration which captures the first entry in a
+/// `pending` field, avoiding data copies for the initial positioning.
+struct MdbxKvIter<'tx, 'cur, K: TransactionKind> {
+    iter: iter::Iter<'tx, 'cur, K, Cow<'tx, [u8]>, Cow<'tx, [u8]>>,
+}
+
+impl<'a, K: TransactionKind> Iterator for MdbxKvIter<'_, 'a, K> {
+    type Item = Result<RawKeyValue<'a>, MdbxError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.iter.borrow_next() {
+            Ok(Some(kv)) => Some(Ok(kv)),
+            Ok(None) => None,
+            Err(e) => Some(Err(MdbxError::from(e))),
+        }
     }
 }
 

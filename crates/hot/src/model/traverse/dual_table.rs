@@ -3,7 +3,7 @@
 use super::{
     DualKeyValue, HotKvReadError,
     dual_key::{DualKeyTraverse, DualKeyTraverseMut},
-    iter::DualTableK2Iter,
+    iter::{DualTableK2Iter, RawDualKeyIter},
     types::K2Value,
 };
 use crate::{ser::KeySer, ser::MAX_KEY_SIZE, tables::DualKey};
@@ -156,11 +156,23 @@ where
     where
         T::Key: PartialEq,
     {
-        // Position cursor at (k1, k2)
-        DualTableTraverse::<T, E>::next_dual_above(self, k1, k2)?;
-        // Return iterator that decodes from raw
-        Ok(DualKeyTraverse::iter(self)?
-            .map(|r| r.and_then(|kkv| T::decode_kkv_tuple(kkv).map_err(Into::into))))
+        // Encode both keys and position the cursor. The first_entry is
+        // converted to owned so the key buffer borrows end here.
+        let first_entry = {
+            let mut key1_buf = [0u8; MAX_KEY_SIZE];
+            let mut key2_buf = [0u8; MAX_KEY_SIZE];
+            let key1_bytes = k1.encode_key(&mut key1_buf);
+            let key2_bytes = k2.encode_key(&mut key2_buf);
+            DualKeyTraverse::next_dual_above(self, key1_bytes, key2_bytes)?
+                .map(|(k1, k2, v)| (k1.into_owned(), k2.into_owned(), v.into_owned()))
+        };
+        Ok(RawDualKeyIter {
+            cursor: self,
+            done: first_entry.is_none(),
+            first_entry,
+            _marker: PhantomData,
+        }
+        .map(|r| r.and_then(|kkv| T::decode_kkv_tuple(kkv).map_err(Into::into))))
     }
 
     fn iter(&mut self) -> Result<impl Iterator<Item = Result<DualKeyValue<T>, E>> + '_, E>

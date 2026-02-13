@@ -85,8 +85,14 @@ pub trait DualKeyTraverse<E: HotKvReadError> {
     where
         Self: Sized,
     {
-        self.first()?;
-        Ok(RawDualKeyIter { cursor: self, done: false, _marker: PhantomData })
+        let first_entry =
+            self.first()?.map(|(k1, k2, v)| (k1.into_owned(), k2.into_owned(), v.into_owned()));
+        Ok(RawDualKeyIter {
+            cursor: self,
+            done: first_entry.is_none(),
+            first_entry,
+            _marker: PhantomData,
+        })
     }
 
     /// Position at (k1, k2) and return iterator over subsequent entries.
@@ -101,8 +107,15 @@ pub trait DualKeyTraverse<E: HotKvReadError> {
     where
         Self: Sized,
     {
-        self.next_dual_above(k1, k2)?;
-        Ok(RawDualKeyIter { cursor: self, done: false, _marker: PhantomData })
+        let first_entry = self
+            .next_dual_above(k1, k2)?
+            .map(|(k1, k2, v)| (k1.into_owned(), k2.into_owned(), v.into_owned()));
+        Ok(RawDualKeyIter {
+            cursor: self,
+            done: first_entry.is_none(),
+            first_entry,
+            _marker: PhantomData,
+        })
     }
 
     /// Iterate all k2 entries within a single k1.

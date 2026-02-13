@@ -33,4 +33,8 @@ pub fn conformance<T: HotKv>(hot_kv: &T) {
     test_cursor_iter_k2(hot_kv);
     test_cursor_iter_k2_single(hot_kv);
     test_cursor_iter_k2_empty(hot_kv);
+    test_cursor_iter(hot_kv);
+    test_cursor_iter_from(hot_kv);
+    test_cursor_dual_iter(hot_kv);
+    test_cursor_dual_iter_from(hot_kv);
 }
