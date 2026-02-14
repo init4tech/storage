@@ -10,9 +10,8 @@ use crate::{
 };
 use alloy::{consensus::transaction::Recovered, primitives::BlockNumber};
 use signet_cold::{
-    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter,
-    HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
-    ZenithHeaderSpecifier,
+    BlockData, ColdReceipt, ColdResult, ColdStorage, Confirmed, Filter, HeaderSpecifier,
+    ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use signet_hot::{
     KeySer, MAX_KEY_SIZE, ValSer,
@@ -436,7 +435,11 @@ impl MdbxColdBackend {
         Ok(())
     }
 
-    fn get_logs_inner(&self, filter: Filter) -> Result<Vec<signet_cold::RpcLog>, MdbxColdError> {
+    fn get_logs_inner(
+        &self,
+        filter: Filter,
+        max_logs: usize,
+    ) -> Result<Vec<signet_cold::RpcLog>, MdbxColdError> {
         let tx = self.env.tx()?;
         let mut results = Vec::new();
 
@@ -469,6 +472,9 @@ impl MdbxColdBackend {
                 for (log_idx, log) in ir.receipt.inner.logs.into_iter().enumerate() {
                     if !filter.matches(&log) {
                         continue;
+                    }
+                    if results.len() >= max_logs {
+                        return Err(MdbxColdError::TooManyLogs(max_logs));
                     }
                     results.push(signet_cold::RpcLog {
                         inner: log,
@@ -567,11 +573,7 @@ impl ColdStorage for MdbxColdBackend {
         filter: Filter,
         max_logs: usize,
     ) -> ColdResult<Vec<signet_cold::RpcLog>> {
-        let results = self.get_logs_inner(filter)?;
-        if results.len() > max_logs {
-            return Err(ColdStorageError::TooManyLogs { limit: max_logs });
-        }
-        Ok(results)
+        Ok(self.get_logs_inner(filter, max_logs)?)
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
