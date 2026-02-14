@@ -6,7 +6,7 @@
 
 use crate::{
     BlockData, ColdResult, ColdStorage, ColdStorageError, Filter, HeaderSpecifier,
-    ReceiptSpecifier, TransactionSpecifier,
+    ReceiptSpecifier, RpcLog, TransactionSpecifier,
 };
 use alloy::{
     consensus::transaction::Recovered,
@@ -16,6 +16,7 @@ use alloy::{
     },
 };
 use signet_storage_types::{Receipt, RecoveredTx, TransactionSigned};
+use tokio_stream::StreamExt;
 
 /// Run all conformance tests against a backend.
 ///
@@ -31,6 +32,7 @@ pub async fn conformance<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     test_confirmation_metadata(backend).await?;
     test_cold_receipt_metadata(backend).await?;
     test_get_logs(backend).await?;
+    test_stream_logs(backend).await?;
     Ok(())
 }
 
@@ -496,6 +498,88 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     // --- max_logs at exact count succeeds ---
     let exact = backend.get_logs(Filter::new().from_block(800).to_block(801), 4).await?;
     assert_eq!(exact.len(), 4);
+
+    Ok(())
+}
+
+/// Collect a [`LogStream`] into a `Vec`, returning the first error if any.
+async fn collect_stream(stream: crate::LogStream) -> ColdResult<Vec<RpcLog>> {
+    let mut stream = stream;
+    let mut results = Vec::new();
+    while let Some(item) = stream.next().await {
+        results.push(item?);
+    }
+    Ok(results)
+}
+
+/// Test stream_logs produces identical results to get_logs for all filter
+/// combinations from the existing test_get_logs suite.
+///
+/// Uses block numbers 850-851 to avoid collisions with test_get_logs data
+/// (800-801).
+pub async fn test_stream_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
+    let addr_a = Address::with_last_byte(0xAA);
+    let addr_b = Address::with_last_byte(0xBB);
+    let topic0_transfer = B256::with_last_byte(0x01);
+    let topic0_approval = B256::with_last_byte(0x02);
+    let topic1_sender = B256::with_last_byte(0x10);
+
+    // Block 850: 2 txs, tx0 has 2 logs, tx1 has 1 log
+    let receipts_850 = vec![
+        make_receipt_from_logs(vec![
+            make_test_log(addr_a, vec![topic0_transfer, topic1_sender], vec![1]),
+            make_test_log(addr_b, vec![topic0_approval], vec![2]),
+        ]),
+        make_receipt_from_logs(vec![make_test_log(addr_a, vec![topic0_transfer], vec![3])]),
+    ];
+    let block_850 = make_test_block_with_receipts(850, receipts_850);
+    backend.append_block(block_850).await?;
+
+    // Block 851: 1 tx, 1 log
+    let receipts_851 =
+        vec![make_receipt_from_logs(vec![make_test_log(addr_b, vec![topic0_transfer], vec![4])])];
+    let block_851 = make_test_block_with_receipts(851, receipts_851);
+    backend.append_block(block_851).await?;
+
+    // Helper: verify stream matches get_logs for the same filter.
+    let filters = vec![
+        // All logs
+        Filter::new().from_block(850).to_block(851),
+        // Single block
+        Filter::new().from_block(850).to_block(850),
+        // Address filter
+        Filter::new().from_block(850).to_block(851).address(addr_a),
+        // Topic filter
+        Filter::new().from_block(850).to_block(851).event_signature(topic0_transfer),
+        // Combined address + topic
+        Filter::new()
+            .from_block(850)
+            .to_block(851)
+            .address(addr_a)
+            .event_signature(topic0_transfer),
+        // Empty range
+        Filter::new().from_block(900).to_block(999),
+    ];
+
+    for filter in filters {
+        let expected = backend.get_logs(filter.clone(), usize::MAX).await?;
+        let stream = backend.stream_logs(filter, usize::MAX).await?;
+        let streamed = collect_stream(stream).await?;
+        assert_eq!(expected.len(), streamed.len(), "stream length mismatch");
+        for (e, s) in expected.iter().zip(streamed.iter()) {
+            assert_eq!(e.block_number, s.block_number);
+            assert_eq!(e.transaction_index, s.transaction_index);
+            assert_eq!(e.log_index, s.log_index);
+            assert_eq!(e.block_hash, s.block_hash);
+            assert_eq!(e.transaction_hash, s.transaction_hash);
+            assert_eq!(e.inner.address, s.inner.address);
+        }
+    }
+
+    // --- max_logs: stream yields TooManyLogs error ---
+    let stream = backend.stream_logs(Filter::new().from_block(850).to_block(851), 2).await?;
+    let result = collect_stream(stream).await;
+    assert!(matches!(result, Err(ColdStorageError::TooManyLogs { limit: 2 })));
 
     Ok(())
 }

@@ -41,6 +41,22 @@ pub enum ColdStorageError {
         limit: usize,
     },
 
+    /// The streaming operation exceeded its deadline.
+    ///
+    /// The backend enforces a wall-clock limit on streaming operations
+    /// to prevent unbounded resource acquisition. Partial results may
+    /// have been delivered before this error.
+    #[error("stream deadline exceeded")]
+    StreamDeadlineExceeded,
+
+    /// A reorg was detected during a streaming operation.
+    ///
+    /// The anchor block hash changed between chunks, indicating that
+    /// the data being streamed may no longer be consistent. Partial
+    /// results may have been delivered before this error.
+    #[error("reorg detected during streaming")]
+    ReorgDetected,
+
     /// The cold storage task has terminated.
     ///
     /// The channel is closed because the task has stopped (panic, cancellation,

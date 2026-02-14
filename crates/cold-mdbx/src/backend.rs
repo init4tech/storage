@@ -10,8 +10,9 @@ use crate::{
 };
 use alloy::{consensus::transaction::Recovered, primitives::BlockNumber};
 use signet_cold::{
-    BlockData, ColdReceipt, ColdResult, ColdStorage, Confirmed, Filter, HeaderSpecifier,
-    ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter,
+    HeaderSpecifier, LogStream, ReceiptSpecifier, RpcLog, SignetEventsSpecifier,
+    TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use signet_hot::{
     KeySer, MAX_KEY_SIZE, ValSer,
@@ -23,7 +24,9 @@ use signet_storage_types::{
     ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, RecoveredTx, SealedHeader,
     TransactionSigned, TxLocation,
 };
-use std::path::Path;
+use std::{path::Path, sync::Arc, time::Duration};
+use tokio::sync::Semaphore;
+use tokio_stream::wrappers::ReceiverStream;
 
 /// Write a single block's data into an open read-write transaction.
 ///
@@ -77,28 +80,100 @@ fn write_block_to_tx(
     Ok(())
 }
 
+/// Collect matching logs from a single block.
+///
+/// Opens a short-lived read transaction, processes the block, and returns.
+/// The read transaction is dropped when this function returns.
+fn collect_logs_block(
+    env: &DatabaseEnv,
+    filter: &Filter,
+    block_num: BlockNumber,
+    remaining: usize,
+) -> Result<Vec<RpcLog>, MdbxColdError> {
+    let tx = env.tx()?;
+    let Some(sealed) = tx.traverse::<ColdHeaders>()?.exact(&block_num)? else {
+        return Ok(Vec::new());
+    };
+    let block_hash = sealed.hash();
+    let block_timestamp = sealed.timestamp;
+    let mut logs = Vec::new();
+
+    for item in tx.traverse_dual::<ColdReceipts>()?.iter_k2(&block_num)? {
+        let (tx_idx, ir) = item?;
+        let tx_hash = ir.tx_hash;
+        let first_log_index = ir.first_log_index;
+        for (log_idx, log) in ir.receipt.inner.logs.into_iter().enumerate() {
+            if !filter.matches(&log) {
+                continue;
+            }
+            if logs.len() >= remaining {
+                return Err(MdbxColdError::TooManyLogs(remaining));
+            }
+            logs.push(RpcLog {
+                inner: log,
+                block_hash: Some(block_hash),
+                block_number: Some(block_num),
+                block_timestamp: Some(block_timestamp),
+                transaction_hash: Some(tx_hash),
+                transaction_index: Some(tx_idx),
+                log_index: Some(first_log_index + log_idx as u64),
+                removed: false,
+            });
+        }
+    }
+
+    Ok(logs)
+}
+
+/// Default deadline for streaming operations.
+const DEFAULT_STREAM_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Maximum concurrent streaming operations.
+const MAX_CONCURRENT_STREAMS: usize = 8;
+
+/// Channel buffer size for streaming operations.
+const STREAM_CHANNEL_BUFFER: usize = 256;
+
 /// MDBX-based cold storage backend.
 ///
 /// This backend stores historical blockchain data in an MDBX database.
 /// It implements the [`ColdStorage`] trait for use with the cold storage
 /// task runner.
-#[derive(Debug)]
 pub struct MdbxColdBackend {
     /// The MDBX environment.
-    env: DatabaseEnv,
+    env: Arc<DatabaseEnv>,
+    /// Maximum duration for streaming operations.
+    stream_deadline: Duration,
+    /// Semaphore limiting concurrent streaming operations.
+    stream_semaphore: Arc<Semaphore>,
+}
+
+impl std::fmt::Debug for MdbxColdBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MdbxColdBackend").finish_non_exhaustive()
+    }
 }
 
 impl MdbxColdBackend {
+    /// Create a new backend from an existing MDBX environment.
+    fn from_env(env: DatabaseEnv) -> Self {
+        Self {
+            env: Arc::new(env),
+            stream_deadline: DEFAULT_STREAM_DEADLINE,
+            stream_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS)),
+        }
+    }
+
     /// Open an existing MDBX cold storage database in read-only mode.
     pub fn open_ro(path: &Path) -> Result<Self, MdbxColdError> {
         let env = DatabaseArguments::new().open_ro(path)?;
-        Ok(Self { env })
+        Ok(Self::from_env(env))
     }
 
     /// Open or create an MDBX cold storage database in read-write mode.
     pub fn open_rw(path: &Path) -> Result<Self, MdbxColdError> {
         let env = DatabaseArguments::new().open_rw(path)?;
-        let backend = Self { env };
+        let backend = Self::from_env(env);
         backend.create_tables()?;
         Ok(backend)
     }
@@ -110,11 +185,17 @@ impl MdbxColdBackend {
         args: DatabaseArguments,
     ) -> Result<Self, MdbxColdError> {
         let env = DatabaseEnv::open(path, kind, args)?;
-        let backend = Self { env };
+        let backend = Self::from_env(env);
         if kind.is_rw() {
             backend.create_tables()?;
         }
         Ok(backend)
+    }
+
+    /// Set the maximum duration for streaming operations.
+    pub const fn with_stream_deadline(mut self, deadline: Duration) -> Self {
+        self.stream_deadline = deadline;
+        self
     }
 
     fn create_tables(&self) -> Result<(), MdbxColdError> {
@@ -435,6 +516,32 @@ impl MdbxColdBackend {
         Ok(())
     }
 
+    /// Resolve the `to` block number from a filter, falling back to the
+    /// latest block in the database.
+    fn resolve_to_block(&self, filter: &Filter) -> Result<Option<BlockNumber>, MdbxColdError> {
+        match filter.get_to_block() {
+            Some(to) => Ok(Some(to)),
+            None => {
+                let tx = self.env.tx()?;
+                let mut cursor = tx.new_cursor::<ColdHeaders>()?;
+                cursor
+                    .last()?
+                    .map(|(key, _)| BlockNumber::decode_key(&key))
+                    .transpose()
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    /// Get the hash of a block header by block number.
+    fn get_block_hash(
+        &self,
+        block: BlockNumber,
+    ) -> Result<Option<alloy::primitives::B256>, MdbxColdError> {
+        let tx = self.env.tx()?;
+        Ok(tx.traverse::<ColdHeaders>()?.exact(&block)?.map(|h| h.hash()))
+    }
+
     fn get_logs_inner(
         &self,
         filter: Filter,
@@ -574,6 +681,93 @@ impl ColdStorage for MdbxColdBackend {
         max_logs: usize,
     ) -> ColdResult<Vec<signet_cold::RpcLog>> {
         Ok(self.get_logs_inner(filter, max_logs)?)
+    }
+
+    async fn stream_logs(&self, filter: Filter, max_logs: usize) -> ColdResult<LogStream> {
+        let permit = self
+            .stream_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ColdStorageError::Cancelled)?;
+        let env = Arc::clone(&self.env);
+        let deadline = tokio::time::Instant::now() + self.stream_deadline;
+        let from = filter.get_from_block().unwrap_or(0);
+        let Some(to) = self.resolve_to_block(&filter)? else {
+            // Empty database — return an empty stream.
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            return Ok(ReceiverStream::new(rx));
+        };
+
+        // Anchor to the `to` block for reorg detection.
+        let anchor_hash = self.get_block_hash(to)?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_BUFFER);
+
+        tokio::spawn(async move {
+            let _permit = permit;
+            let mut total = 0usize;
+
+            for block_num in from..=to {
+                if tokio::time::Instant::now() > deadline {
+                    let _ = tx.try_send(Err(ColdStorageError::StreamDeadlineExceeded));
+                    return;
+                }
+
+                // Re-anchor: verify `to` block hash unchanged.
+                let current_hash = {
+                    let rtx = match env.tx() {
+                        Ok(rtx) => rtx,
+                        Err(e) => {
+                            let _ = tx.try_send(Err(MdbxColdError::from(e).into()));
+                            return;
+                        }
+                    };
+                    match rtx.traverse::<ColdHeaders>() {
+                        Ok(mut cursor) => match cursor.exact(&to) {
+                            Ok(Some(h)) => Some(h.hash()),
+                            Ok(None) => None,
+                            Err(e) => {
+                                let _ = tx.try_send(Err(MdbxColdError::from(e).into()));
+                                return;
+                            }
+                        },
+                        Err(e) => {
+                            let _ = tx.try_send(Err(MdbxColdError::from(e).into()));
+                            return;
+                        }
+                    }
+                };
+                if current_hash != anchor_hash {
+                    let _ = tx.try_send(Err(ColdStorageError::ReorgDetected));
+                    return;
+                }
+
+                let block_logs =
+                    match collect_logs_block(&env, &filter, block_num, max_logs - total) {
+                        Ok(logs) => logs,
+                        Err(e) => {
+                            let _ = tx.try_send(Err(e.into()));
+                            return;
+                        }
+                    };
+
+                total += block_logs.len();
+
+                for log in block_logs {
+                    match tokio::time::timeout_at(deadline, tx.send(Ok(log))).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => return,
+                        Err(_) => {
+                            let _ = tx.try_send(Err(ColdStorageError::StreamDeadlineExceeded));
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(ReceiverStream::new(rx))
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {

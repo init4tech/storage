@@ -11,7 +11,7 @@
 
 use crate::{
     AppendBlockRequest, BlockData, ColdReadRequest, ColdReceipt, ColdResult, ColdStorageError,
-    ColdWriteRequest, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
+    ColdWriteRequest, Confirmed, Filter, HeaderSpecifier, LogStream, ReceiptSpecifier, RpcLog,
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::primitives::{B256, BlockNumber};
@@ -264,6 +264,23 @@ impl ColdStorageReadHandle {
     pub async fn get_logs(&self, filter: Filter, max_logs: usize) -> ColdResult<Vec<RpcLog>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetLogs { filter: Box::new(filter), max_logs, resp }, rx).await
+    }
+
+    /// Stream logs matching a filter.
+    ///
+    /// Returns a [`LogStream`] that yields matching logs in order.
+    /// Consume with `StreamExt::next()` until `None`. If the last item
+    /// is `Err(...)`, an error occurred (deadline, too many logs, etc.).
+    ///
+    /// # Resource Management
+    ///
+    /// The stream holds a backend concurrency permit. Dropping the
+    /// stream releases the permit. Drop early if results are no
+    /// longer needed.
+    pub async fn stream_logs(&self, filter: Filter, max_logs: usize) -> ColdResult<LogStream> {
+        let (resp, rx) = oneshot::channel();
+        self.send(ColdReadRequest::StreamLogs { filter: Box::new(filter), max_logs, resp }, rx)
+            .await
     }
 
     // ==========================================================================

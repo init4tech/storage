@@ -14,6 +14,19 @@ use signet_storage_types::{
     DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, RecoveredTx, SealedHeader,
 };
 use std::future::Future;
+use tokio_stream::wrappers::ReceiverStream;
+
+/// A stream of log results backed by a bounded channel.
+///
+/// Each item is a `ColdResult<RpcLog>`. The stream produces `Ok(log)` items
+/// until complete, or yields a final `Err(e)` on failure. The stream ends
+/// (`None`) when all matching logs have been delivered or after an error.
+///
+/// # Resource Management
+///
+/// The stream holds a backend concurrency permit. Dropping the stream
+/// releases the permit. Drop early if results are no longer needed.
+pub type LogStream = ReceiverStream<ColdResult<RpcLog>>;
 
 /// Data for appending a complete block to cold storage.
 #[derive(Debug, Clone)]
@@ -182,6 +195,31 @@ pub trait ColdStorage: Send + Sync + 'static {
         filter: Filter,
         max_logs: usize,
     ) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send;
+
+    /// Stream logs matching a filter.
+    ///
+    /// Returns a [`LogStream`] that yields matching logs in order of
+    /// `(block_number, tx_index, log_index)`. The stream produces
+    /// `Ok(log)` items until complete, or yields a final `Err(e)` on
+    /// failure.
+    ///
+    /// # Deadline
+    ///
+    /// Backends MUST enforce a wall-clock deadline on streaming to
+    /// prevent unbounded resource acquisition. The deadline duration
+    /// is a backend configuration option. The producer task enforces
+    /// the deadline independently of consumer polling, guaranteeing
+    /// resource release within the deadline period.
+    ///
+    /// # Resource Lifetime
+    ///
+    /// Backends SHOULD process one block at a time, releasing
+    /// resources (e.g., MDBX read transactions) between blocks.
+    fn stream_logs(
+        &self,
+        filter: Filter,
+        max_logs: usize,
+    ) -> impl Future<Output = ColdResult<LogStream>> + Send;
 
     // --- Write operations ---
 

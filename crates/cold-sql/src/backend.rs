@@ -35,8 +35,8 @@ use alloy::{
 };
 use signet_cold::{
     BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter,
-    HeaderSpecifier, ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier,
-    ZenithHeaderSpecifier,
+    HeaderSpecifier, LogStream, ReceiptSpecifier, RpcLog, SignetEventsSpecifier,
+    TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use signet_storage_types::{
     ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, RecoveredTx, SealedHeader,
@@ -48,6 +48,18 @@ use signet_zenith::{
     Zenith,
 };
 use sqlx::{AnyPool, Row};
+use std::{sync::Arc, time::Duration};
+use tokio::sync::Semaphore;
+use tokio_stream::wrappers::ReceiverStream;
+
+/// Default deadline for streaming operations.
+const DEFAULT_STREAM_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Maximum concurrent streaming operations.
+const MAX_CONCURRENT_STREAMS: usize = 8;
+
+/// Channel buffer size for streaming operations.
+const STREAM_CHANNEL_BUFFER: usize = 256;
 
 /// SQL-based cold storage backend.
 ///
@@ -71,6 +83,10 @@ use sqlx::{AnyPool, Row};
 #[derive(Debug, Clone)]
 pub struct SqlColdBackend {
     pool: AnyPool,
+    /// Maximum duration for streaming operations.
+    stream_deadline: Duration,
+    /// Semaphore limiting concurrent streaming operations.
+    stream_semaphore: Arc<Semaphore>,
 }
 
 impl SqlColdBackend {
@@ -98,7 +114,11 @@ impl SqlColdBackend {
         // Execute via pool to ensure the migration uses the same
         // connection that subsequent queries will use.
         sqlx::raw_sql(migration).execute(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            stream_deadline: DEFAULT_STREAM_DEADLINE,
+            stream_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS)),
+        })
     }
 
     /// Connect to a database URL and create the backend.
@@ -113,6 +133,12 @@ impl SqlColdBackend {
         sqlx::any::install_default_drivers();
         let pool: AnyPool = sqlx::pool::PoolOptions::new().max_connections(1).connect(url).await?;
         Self::new(pool).await
+    }
+
+    /// Set the maximum duration for streaming operations.
+    pub const fn with_stream_deadline(mut self, deadline: Duration) -> Self {
+        self.stream_deadline = deadline;
+        self
     }
 
     // ========================================================================
@@ -813,6 +839,72 @@ async fn insert_signet_event(
 }
 
 // ============================================================================
+// Log filter helpers
+// ============================================================================
+
+/// Build the WHERE clause fragment for address/topic filtering on the logs
+/// table.
+///
+/// Returns the clause fragment (including leading ` AND` for each condition)
+/// and the bind parameters as raw byte vectors. Parameter indices start at
+/// `start_idx`.
+fn build_log_filter_clause(filter: &Filter, start_idx: u32) -> (String, Vec<Vec<u8>>) {
+    let mut clause = String::new();
+    let mut params: Vec<Vec<u8>> = Vec::new();
+    let mut idx = start_idx;
+
+    // Address filter
+    if !filter.address.is_empty() {
+        let addrs: Vec<_> = filter.address.iter().collect();
+        if addrs.len() == 1 {
+            clause.push_str(&format!(" AND l.address = ${idx}"));
+            params.push(addrs[0].as_slice().to_vec());
+            idx += 1;
+        } else {
+            let placeholders: String = addrs
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("${}", idx + i as u32))
+                .collect::<Vec<_>>()
+                .join(", ");
+            clause.push_str(&format!(" AND l.address IN ({placeholders})"));
+            for addr in &addrs {
+                params.push(addr.as_slice().to_vec());
+            }
+            idx += addrs.len() as u32;
+        }
+    }
+
+    // Topic filters
+    let topic_cols = ["l.topic0", "l.topic1", "l.topic2", "l.topic3"];
+    for (i, topic_filter) in filter.topics.iter().enumerate() {
+        if topic_filter.is_empty() {
+            continue;
+        }
+        let values: Vec<_> = topic_filter.iter().collect();
+        if values.len() == 1 {
+            clause.push_str(&format!(" AND {} = ${idx}", topic_cols[i]));
+            params.push(values[0].as_slice().to_vec());
+            idx += 1;
+        } else {
+            let placeholders: String = values
+                .iter()
+                .enumerate()
+                .map(|(j, _)| format!("${}", idx + j as u32))
+                .collect::<Vec<_>>()
+                .join(", ");
+            clause.push_str(&format!(" AND {} IN ({placeholders})", topic_cols[i]));
+            for v in &values {
+                params.push(v.as_slice().to_vec());
+            }
+            idx += values.len() as u32;
+        }
+    }
+
+    (clause, params)
+}
+
+// ============================================================================
 // ColdStorage implementation
 // ============================================================================
 
@@ -1143,58 +1235,9 @@ impl ColdStorage for SqlColdBackend {
         let from = filter.get_from_block().unwrap_or(0);
         let to = filter.get_to_block().unwrap_or(u64::MAX);
 
-        // Build the shared WHERE clause for both count and data queries.
-        let mut where_clause = String::from("l.block_number >= $1 AND l.block_number <= $2");
-        let mut params: Vec<Vec<u8>> = Vec::new();
-        let mut idx = 3u32;
-
-        // Address filter
-        if !filter.address.is_empty() {
-            let addrs: Vec<_> = filter.address.iter().collect();
-            if addrs.len() == 1 {
-                where_clause.push_str(&format!(" AND l.address = ${idx}"));
-                params.push(addrs[0].as_slice().to_vec());
-                idx += 1;
-            } else {
-                let placeholders: String = addrs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| format!("${}", idx + i as u32))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                where_clause.push_str(&format!(" AND l.address IN ({placeholders})"));
-                for addr in &addrs {
-                    params.push(addr.as_slice().to_vec());
-                }
-                idx += addrs.len() as u32;
-            }
-        }
-
-        // Topic filters
-        let topic_cols = ["l.topic0", "l.topic1", "l.topic2", "l.topic3"];
-        for (i, topic_filter) in filter.topics.iter().enumerate() {
-            if topic_filter.is_empty() {
-                continue;
-            }
-            let values: Vec<_> = topic_filter.iter().collect();
-            if values.len() == 1 {
-                where_clause.push_str(&format!(" AND {} = ${idx}", topic_cols[i]));
-                params.push(values[0].as_slice().to_vec());
-                idx += 1;
-            } else {
-                let placeholders: String = values
-                    .iter()
-                    .enumerate()
-                    .map(|(j, _)| format!("${}", idx + j as u32))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                where_clause.push_str(&format!(" AND {} IN ({placeholders})", topic_cols[i]));
-                for v in &values {
-                    params.push(v.as_slice().to_vec());
-                }
-                idx += values.len() as u32;
-            }
-        }
+        // Build WHERE clause: block range ($1, $2) + address/topic filters.
+        let (filter_clause, params) = build_log_filter_clause(&filter, 3);
+        let where_clause = format!("l.block_number >= $1 AND l.block_number <= $2{filter_clause}");
 
         // Run a cheap COUNT(*) query first to reject queries that exceed
         // the limit without loading any row data.
@@ -1250,6 +1293,150 @@ impl ColdStorage for SqlColdBackend {
                 })
             })
             .collect::<ColdResult<Vec<_>>>()
+    }
+
+    async fn stream_logs(&self, filter: Filter, max_logs: usize) -> ColdResult<LogStream> {
+        let permit = self
+            .stream_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ColdStorageError::Cancelled)?;
+        let pool = self.pool.clone();
+        let deadline = tokio::time::Instant::now() + self.stream_deadline;
+        let from = filter.get_from_block().unwrap_or(0);
+
+        // Resolve `to` block.
+        let to = match filter.get_to_block() {
+            Some(to) => to,
+            None => {
+                let row = sqlx::query("SELECT MAX(block_number) as max_bn FROM headers")
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(SqlColdError::from)?;
+                let Some(max) = row.get::<Option<i64>, _>(COL_MAX_BN) else {
+                    // Empty database — return an empty stream.
+                    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+                    return Ok(ReceiverStream::new(rx));
+                };
+                from_i64(max)
+            }
+        };
+
+        // Anchor to the `to` block hash for reorg detection.
+        let anchor_hash: Option<B256> =
+            sqlx::query("SELECT block_hash FROM headers WHERE block_number = $1")
+                .bind(to_i64(to))
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(SqlColdError::from)?
+                .map(|r| B256::from_slice(&r.get::<Vec<u8>, _>(COL_BLOCK_HASH)));
+
+        // Build filter clause with $1 reserved for block_number.
+        let (filter_clause, filter_params) = build_log_filter_clause(&filter, 2);
+
+        let (tx, rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_BUFFER);
+
+        tokio::spawn(async move {
+            let _permit = permit;
+            let mut total = 0usize;
+
+            for block_num in from..=to {
+                if tokio::time::Instant::now() > deadline {
+                    let _ = tx.try_send(Err(ColdStorageError::StreamDeadlineExceeded));
+                    return;
+                }
+
+                // Re-anchor: verify `to` block hash unchanged.
+                let current_hash =
+                    match sqlx::query("SELECT block_hash FROM headers WHERE block_number = $1")
+                        .bind(to_i64(to))
+                        .fetch_optional(&pool)
+                        .await
+                    {
+                        Ok(row) => {
+                            row.map(|r| B256::from_slice(&r.get::<Vec<u8>, _>(COL_BLOCK_HASH)))
+                        }
+                        Err(e) => {
+                            let _ = tx.try_send(Err(ColdStorageError::backend(e)));
+                            return;
+                        }
+                    };
+                if current_hash != anchor_hash {
+                    let _ = tx.try_send(Err(ColdStorageError::ReorgDetected));
+                    return;
+                }
+
+                // Per-block log query.
+                let where_clause = format!("l.block_number = $1{filter_clause}");
+                let data_sql = format!(
+                    "SELECT l.*, h.block_hash, h.timestamp AS block_timestamp, t.tx_hash, \
+                       (SELECT COUNT(*) FROM logs l2 \
+                        WHERE l2.block_number = l.block_number \
+                          AND (l2.tx_index < l.tx_index \
+                               OR (l2.tx_index = l.tx_index \
+                                   AND l2.log_index < l.log_index)) \
+                       ) AS block_log_index \
+                     FROM logs l \
+                     JOIN headers h ON l.block_number = h.block_number \
+                     JOIN transactions t ON l.block_number = t.block_number \
+                       AND l.tx_index = t.tx_index \
+                     WHERE {where_clause} \
+                     ORDER BY l.tx_index, l.log_index"
+                );
+                let mut query = sqlx::query(&data_sql).bind(to_i64(block_num));
+                for param in &filter_params {
+                    query = query.bind(param.as_slice());
+                }
+                let rows = match query.fetch_all(&pool).await {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        let _ = tx.try_send(Err(ColdStorageError::backend(e)));
+                        return;
+                    }
+                };
+
+                let block_logs: Vec<RpcLog> = rows
+                    .into_iter()
+                    .map(|r| {
+                        let log = log_from_row(&r);
+                        let block_number = from_i64(r.get::<i64, _>(COL_BLOCK_NUMBER));
+                        let block_hash_bytes: Vec<u8> = r.get(COL_BLOCK_HASH);
+                        let tx_hash_bytes: Vec<u8> = r.get(COL_TX_HASH);
+                        RpcLog {
+                            inner: log,
+                            block_hash: Some(B256::from_slice(&block_hash_bytes)),
+                            block_number: Some(block_number),
+                            block_timestamp: Some(from_i64(r.get::<i64, _>(COL_BLOCK_TIMESTAMP))),
+                            transaction_hash: Some(B256::from_slice(&tx_hash_bytes)),
+                            transaction_index: Some(from_i64(r.get::<i64, _>(COL_TX_INDEX))),
+                            log_index: Some(from_i64(r.get::<i64, _>(COL_BLOCK_LOG_INDEX))),
+                            removed: false,
+                        }
+                    })
+                    .collect();
+
+                if total + block_logs.len() > max_logs {
+                    let _ = tx.try_send(Err(ColdStorageError::TooManyLogs { limit: max_logs }));
+                    return;
+                }
+
+                total += block_logs.len();
+
+                for log in block_logs {
+                    match tokio::time::timeout_at(deadline, tx.send(Ok(log))).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => return,
+                        Err(_) => {
+                            let _ = tx.try_send(Err(ColdStorageError::StreamDeadlineExceeded));
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(ReceiverStream::new(rx))
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {

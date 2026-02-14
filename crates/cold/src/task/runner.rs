@@ -142,6 +142,9 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
             ColdReadRequest::GetLogs { filter, max_logs, resp } => {
                 let _ = resp.send(self.backend.get_logs(*filter, max_logs).await);
             }
+            ColdReadRequest::StreamLogs { filter, max_logs, resp } => {
+                let _ = resp.send(self.backend.stream_logs(*filter, max_logs).await);
+            }
             ColdReadRequest::GetLatestBlock { resp } => {
                 let _ = resp.send(self.backend.get_latest_block().await);
             }
