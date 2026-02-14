@@ -3,7 +3,7 @@ use crate::{Cursor, FixedSizeInfo, FsiCache, MdbxError};
 use alloy::primitives::B256;
 use signet_hot::{
     KeySer, MAX_FIXED_VAL_SIZE, MAX_KEY_SIZE, ValSer,
-    model::{DualKeyTraverseMut, DualTableTraverse, HotKvRead, HotKvWrite, KvTraverseMut},
+    model::{DualTableTraverse, HotKvRead, HotKvWrite},
     tables::{DualKey, SingleKey, Table},
 };
 use signet_libmdbx::{Rw, RwSync, TransactionKind, WriteFlags, tx::WriteMarker};
@@ -354,10 +354,18 @@ macro_rules! impl_hot_kv_write {
                 key: &T::Key,
                 value: &T::Value,
             ) -> Result<(), Self::Error> {
-                let mut cursor = self.new_cursor::<T>()?;
+                let db = self.inner.open_db(Some(T::NAME))?;
                 let mut key_buf = [0u8; MAX_KEY_SIZE];
                 let key_bytes = key.encode_key(&mut key_buf);
-                cursor.append(key_bytes, &value.encoded()).map_err(MdbxError::from)
+                self.inner
+                    .with_reservation(
+                        db,
+                        key_bytes,
+                        value.encoded_size(),
+                        WriteFlags::APPEND,
+                        |mut reserved| value.encode_value_to(&mut reserved),
+                    )
+                    .map_err(MdbxError::from)
             }
 
             fn queue_append_dual<T: DualKey>(
@@ -366,13 +374,27 @@ macro_rules! impl_hot_kv_write {
                 k2: &T::Key2,
                 value: &T::Value,
             ) -> Result<(), Self::Error> {
-                let mut cursor = self.new_cursor::<T>()?;
+                let db = self.inner.open_db(Some(T::NAME))?;
                 let mut k1_buf = [0u8; MAX_KEY_SIZE];
                 let mut k2_buf = [0u8; MAX_KEY_SIZE];
                 let k1_bytes = k1.encode_key(&mut k1_buf);
                 let k2_bytes = k2.encode_key(&mut k2_buf);
-                let value_bytes = value.encoded();
-                cursor.append_dual(k1_bytes, k2_bytes, &value_bytes).map_err(MdbxError::from)
+                let value_size = value.encoded_size();
+                let total = k2_bytes.len() + value_size;
+
+                if total <= TX_BUFFER_SIZE {
+                    let mut buffer = [0u8; TX_BUFFER_SIZE];
+                    buffer[..k2_bytes.len()].copy_from_slice(k2_bytes);
+                    let mut val_buf = &mut buffer[k2_bytes.len()..k2_bytes.len() + value_size];
+                    value.encode_value_to(&mut val_buf);
+                    self.inner.append_dup(db, k1_bytes, &buffer[..total]).map_err(MdbxError::from)
+                } else {
+                    let mut combined = vec![0u8; total];
+                    combined[..k2_bytes.len()].copy_from_slice(k2_bytes);
+                    let mut val_buf = &mut combined[k2_bytes.len()..];
+                    value.encode_value_to(&mut val_buf);
+                    self.inner.append_dup(db, k1_bytes, &combined).map_err(MdbxError::from)
+                }
             }
 
             fn raw_commit(self) -> Result<(), Self::Error> {
