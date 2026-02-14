@@ -6,10 +6,15 @@
 
 use crate::SqlColdError;
 use crate::convert::{
-    HeaderRow, LogRow, ReceiptRow, SignetEventRow, TxRow, ZenithHeaderRow, encode_u256, from_i64,
-    receipt_from_rows, to_i64,
+    EVENT_ENTER, EVENT_ENTER_TOKEN, EVENT_TRANSACT, build_receipt, decode_access_list_or_empty,
+    decode_authorization_list, decode_b256_vec, decode_u128_required, decode_u256,
+    encode_access_list, encode_authorization_list, encode_b256_vec, encode_u128, encode_u256,
+    from_address, from_i64, to_address, to_i64,
 };
-use alloy::{consensus::Header, primitives::BlockNumber};
+use alloy::{
+    consensus::{Header, Signed, TxEip1559, TxEip2930, TxEip4844, TxEip7702, TxLegacy, TxType},
+    primitives::{Address, B256, BlockNumber, Bloom, Bytes, Log, LogData, Signature},
+};
 use signet_cold::{
     BlockData, ColdResult, ColdStorage, ColdStorageError, Confirmed, HeaderSpecifier,
     ReceiptContext, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
@@ -17,6 +22,11 @@ use signet_cold::{
 };
 use signet_storage_types::{
     ConfirmationMeta, DbSignetEvent, DbZenithHeader, Receipt, TransactionSigned,
+};
+use signet_zenith::{
+    Passage::{Enter, EnterToken},
+    Transactor::Transact,
+    Zenith,
 };
 use sqlx::{AnyPool, Row};
 
@@ -121,7 +131,7 @@ impl SqlColdBackend {
             .fetch_optional(&self.pool)
             .await?;
 
-        row.map(|r| Header::try_from(HeaderRow::from(&r))).transpose()
+        row.map(|r| header_from_row(&r)).transpose()
     }
 
     // ========================================================================
@@ -178,57 +188,22 @@ impl SqlColdBackend {
         .await?;
 
         // Insert transactions
-        for (idx, tx_signed) in data.transactions.iter().enumerate() {
-            let tr = TxRow::from_tx(tx_signed, bn, to_i64(idx as u64))?;
-            sqlx::query(
-                "INSERT INTO transactions (
-                    block_number, tx_index, tx_hash, tx_type,
-                    sig_y_parity, sig_r, sig_s,
-                    chain_id, nonce, gas_limit, to_address, value, input,
-                    gas_price, max_fee_per_gas, max_priority_fee_per_gas,
-                    max_fee_per_blob_gas, blob_versioned_hashes,
-                    access_list, authorization_list
-                ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
-                )",
-            )
-            .bind(tr.block_number)
-            .bind(tr.tx_index)
-            .bind(&tr.tx_hash)
-            .bind(tr.tx_type as i32)
-            .bind(tr.sig_y_parity as i32)
-            .bind(&tr.sig_r)
-            .bind(&tr.sig_s)
-            .bind(tr.chain_id)
-            .bind(tr.nonce)
-            .bind(tr.gas_limit)
-            .bind(&tr.to_address)
-            .bind(&tr.value)
-            .bind(&tr.input)
-            .bind(&tr.gas_price)
-            .bind(&tr.max_fee_per_gas)
-            .bind(&tr.max_priority_fee_per_gas)
-            .bind(&tr.max_fee_per_blob_gas)
-            .bind(&tr.blob_versioned_hashes)
-            .bind(&tr.access_list)
-            .bind(&tr.authorization_list)
-            .execute(&mut *conn)
-            .await?;
+        for (idx, tx) in data.transactions.iter().enumerate() {
+            insert_transaction(&mut *conn, bn, to_i64(idx as u64), tx).await?;
         }
 
         // Insert receipts and logs
         for (idx, receipt) in data.receipts.iter().enumerate() {
-            let rr = ReceiptRow::from_receipt(receipt, bn, to_i64(idx as u64));
+            let tx_idx = to_i64(idx as u64);
             sqlx::query(
                 "INSERT INTO receipts (block_number, tx_index, tx_type, success, cumulative_gas_used)
                  VALUES ($1, $2, $3, $4, $5)",
             )
-            .bind(rr.block_number)
-            .bind(rr.tx_index)
-            .bind(rr.tx_type as i32)
-            .bind(rr.success as i32)
-            .bind(rr.cumulative_gas_used)
+            .bind(bn)
+            .bind(tx_idx)
+            .bind(receipt.tx_type as i32)
+            .bind(receipt.inner.status.coerce_status() as i32)
+            .bind(to_i64(receipt.inner.cumulative_gas_used))
             .execute(&mut *conn)
             .await?;
 
@@ -239,7 +214,7 @@ impl SqlColdBackend {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 )
                 .bind(bn)
-                .bind(to_i64(idx as u64))
+                .bind(tx_idx)
                 .bind(to_i64(log_idx as u64))
                 .bind(log.address.as_slice())
                 .bind(topics.first().map(|t| t.as_slice()))
@@ -291,7 +266,472 @@ impl SqlColdBackend {
     }
 }
 
-/// Insert a signet event, binding directly from source types.
+// ============================================================================
+// Row → domain type conversion (read path)
+// ============================================================================
+
+/// Build a [`Header`] from an [`sqlx::any::AnyRow`].
+///
+/// Accepts optional column-name overrides for `gas_limit` and `nonce`,
+/// which conflict in multi-table JOINs.
+fn header_from_row_with(
+    r: &sqlx::any::AnyRow,
+    gas_limit_col: &str,
+    nonce_col: &str,
+) -> Result<Header, SqlColdError> {
+    let blob = |col: &str| -> Vec<u8> { r.get(col) };
+    let opt_blob = |col: &str| -> Option<Vec<u8>> { r.get(col) };
+
+    Ok(Header {
+        parent_hash: B256::from_slice(&blob("parent_hash")),
+        ommers_hash: B256::from_slice(&blob("ommers_hash")),
+        beneficiary: Address::from_slice(&blob("beneficiary")),
+        state_root: B256::from_slice(&blob("state_root")),
+        transactions_root: B256::from_slice(&blob("transactions_root")),
+        receipts_root: B256::from_slice(&blob("receipts_root")),
+        logs_bloom: Bloom::from_slice(&blob("logs_bloom")),
+        difficulty: decode_u256(&blob("difficulty"))?,
+        number: from_i64(r.get("block_number")),
+        gas_limit: from_i64(r.get(gas_limit_col)),
+        gas_used: from_i64(r.get("gas_used")),
+        timestamp: from_i64(r.get("timestamp")),
+        extra_data: Bytes::from(blob("extra_data")),
+        mix_hash: B256::from_slice(&blob("mix_hash")),
+        nonce: alloy::primitives::B64::from_slice(&blob(nonce_col)),
+        base_fee_per_gas: r.get::<Option<i64>, _>("base_fee_per_gas").map(from_i64),
+        withdrawals_root: opt_blob("withdrawals_root").map(|b| B256::from_slice(&b)),
+        blob_gas_used: r.get::<Option<i64>, _>("blob_gas_used").map(from_i64),
+        excess_blob_gas: r.get::<Option<i64>, _>("excess_blob_gas").map(from_i64),
+        parent_beacon_block_root: opt_blob("parent_beacon_block_root")
+            .map(|b| B256::from_slice(&b)),
+        requests_hash: opt_blob("requests_hash").map(|b| B256::from_slice(&b)),
+    })
+}
+
+/// Build a [`Header`] from a standard `SELECT * FROM headers` row.
+fn header_from_row(r: &sqlx::any::AnyRow) -> Result<Header, SqlColdError> {
+    header_from_row_with(r, "gas_limit", "nonce")
+}
+
+/// Build a [`TransactionSigned`] from an [`sqlx::any::AnyRow`].
+///
+/// Accepts optional column-name overrides for `tx_type`, `nonce`, and
+/// `gas_limit`, which conflict in multi-table JOINs.
+fn tx_from_row_with(
+    r: &sqlx::any::AnyRow,
+    tx_type_col: &str,
+    nonce_col: &str,
+    gas_limit_col: &str,
+) -> Result<TransactionSigned, SqlColdError> {
+    use alloy::consensus::EthereumTxEnvelope;
+
+    let opt_blob = |col: &str| -> Option<Vec<u8>> { r.get(col) };
+
+    let sig = Signature::new(
+        decode_u256(&r.get::<Vec<u8>, _>("sig_r"))?,
+        decode_u256(&r.get::<Vec<u8>, _>("sig_s"))?,
+        r.get::<i32, _>("sig_y_parity") != 0,
+    );
+
+    let tx_type_raw = r.get::<i32, _>(tx_type_col) as u8;
+    let tx_type = TxType::try_from(tx_type_raw)
+        .map_err(|_| SqlColdError::Convert(format!("invalid tx_type: {tx_type_raw}")))?;
+
+    let chain_id: Option<i64> = r.get("chain_id");
+    let nonce = from_i64(r.get(nonce_col));
+    let gas_limit = from_i64(r.get(gas_limit_col));
+    let to_addr = opt_blob("to_address");
+    let value = decode_u256(&r.get::<Vec<u8>, _>("value"))?;
+    let input = Bytes::from(r.get::<Vec<u8>, _>("input"));
+
+    match tx_type {
+        TxType::Legacy => {
+            let tx = TxLegacy {
+                chain_id: chain_id.map(from_i64),
+                nonce,
+                gas_price: decode_u128_required(&opt_blob("gas_price"), "gas_price")?,
+                gas_limit,
+                to: from_address(to_addr.as_deref()),
+                value,
+                input,
+            };
+            Ok(EthereumTxEnvelope::Legacy(Signed::new_unhashed(tx, sig)))
+        }
+        TxType::Eip2930 => {
+            let tx = TxEip2930 {
+                chain_id: from_i64(chain_id.unwrap_or(0)),
+                nonce,
+                gas_price: decode_u128_required(&opt_blob("gas_price"), "gas_price")?,
+                gas_limit,
+                to: from_address(to_addr.as_deref()),
+                value,
+                input,
+                access_list: decode_access_list_or_empty(&opt_blob("access_list"))?,
+            };
+            Ok(EthereumTxEnvelope::Eip2930(Signed::new_unhashed(tx, sig)))
+        }
+        TxType::Eip1559 => {
+            let tx = TxEip1559 {
+                chain_id: from_i64(chain_id.unwrap_or(0)),
+                nonce,
+                gas_limit,
+                max_fee_per_gas: decode_u128_required(
+                    &opt_blob("max_fee_per_gas"),
+                    "max_fee_per_gas",
+                )?,
+                max_priority_fee_per_gas: decode_u128_required(
+                    &opt_blob("max_priority_fee_per_gas"),
+                    "max_priority_fee_per_gas",
+                )?,
+                to: from_address(to_addr.as_deref()),
+                value,
+                input,
+                access_list: decode_access_list_or_empty(&opt_blob("access_list"))?,
+            };
+            Ok(EthereumTxEnvelope::Eip1559(Signed::new_unhashed(tx, sig)))
+        }
+        TxType::Eip4844 => {
+            let tx =
+                TxEip4844 {
+                    chain_id: from_i64(chain_id.unwrap_or(0)),
+                    nonce,
+                    gas_limit,
+                    max_fee_per_gas: decode_u128_required(
+                        &opt_blob("max_fee_per_gas"),
+                        "max_fee_per_gas",
+                    )?,
+                    max_priority_fee_per_gas: decode_u128_required(
+                        &opt_blob("max_priority_fee_per_gas"),
+                        "max_priority_fee_per_gas",
+                    )?,
+                    to: Address::from_slice(to_addr.as_deref().ok_or_else(|| {
+                        SqlColdError::Convert("EIP4844 requires to_address".into())
+                    })?),
+                    value,
+                    input,
+                    access_list: decode_access_list_or_empty(&opt_blob("access_list"))?,
+                    blob_versioned_hashes: decode_b256_vec(
+                        opt_blob("blob_versioned_hashes").as_deref().unwrap_or_default(),
+                    ),
+                    max_fee_per_blob_gas: decode_u128_required(
+                        &opt_blob("max_fee_per_blob_gas"),
+                        "max_fee_per_blob_gas",
+                    )?,
+                };
+            Ok(EthereumTxEnvelope::Eip4844(Signed::new_unhashed(tx, sig)))
+        }
+        TxType::Eip7702 => {
+            let tx =
+                TxEip7702 {
+                    chain_id: from_i64(chain_id.unwrap_or(0)),
+                    nonce,
+                    gas_limit,
+                    max_fee_per_gas: decode_u128_required(
+                        &opt_blob("max_fee_per_gas"),
+                        "max_fee_per_gas",
+                    )?,
+                    max_priority_fee_per_gas: decode_u128_required(
+                        &opt_blob("max_priority_fee_per_gas"),
+                        "max_priority_fee_per_gas",
+                    )?,
+                    to: Address::from_slice(to_addr.as_deref().ok_or_else(|| {
+                        SqlColdError::Convert("EIP7702 requires to_address".into())
+                    })?),
+                    value,
+                    input,
+                    access_list: decode_access_list_or_empty(&opt_blob("access_list"))?,
+                    authorization_list: decode_authorization_list(
+                        opt_blob("authorization_list").as_deref().unwrap_or_default(),
+                    )?,
+                };
+            Ok(EthereumTxEnvelope::Eip7702(Signed::new_unhashed(tx, sig)))
+        }
+    }
+}
+
+/// Build a [`TransactionSigned`] from a standard `SELECT * FROM transactions` row.
+fn tx_from_row(r: &sqlx::any::AnyRow) -> Result<TransactionSigned, SqlColdError> {
+    tx_from_row_with(r, "tx_type", "nonce", "gas_limit")
+}
+
+/// Build a [`Log`] from an [`sqlx::any::AnyRow`].
+fn log_from_row(r: &sqlx::any::AnyRow) -> Log {
+    let topics = ["topic0", "topic1", "topic2", "topic3"]
+        .into_iter()
+        .filter_map(|col| r.get::<Option<Vec<u8>>, _>(col))
+        .map(|t| B256::from_slice(&t))
+        .collect();
+    Log {
+        address: Address::from_slice(&r.get::<Vec<u8>, _>("address")),
+        data: LogData::new_unchecked(topics, Bytes::from(r.get::<Vec<u8>, _>("data"))),
+    }
+}
+
+/// Build a [`DbSignetEvent`] from an [`sqlx::any::AnyRow`].
+fn signet_event_from_row(r: &sqlx::any::AnyRow) -> Result<DbSignetEvent, SqlColdError> {
+    let opt_blob = |col: &str| -> Option<Vec<u8>> { r.get(col) };
+
+    let event_type = r.get::<i32, _>("event_type") as i16;
+    let order = from_i64(r.get("order_index"));
+    let rollup_chain_id = decode_u256(&r.get::<Vec<u8>, _>("rollup_chain_id"))?;
+
+    match event_type {
+        EVENT_TRANSACT => {
+            let sender = Address::from_slice(
+                opt_blob("sender")
+                    .as_deref()
+                    .ok_or_else(|| SqlColdError::Convert("Transact requires sender".into()))?,
+            );
+            let to = Address::from_slice(
+                opt_blob("to_address")
+                    .as_deref()
+                    .ok_or_else(|| SqlColdError::Convert("Transact requires to".into()))?,
+            );
+            let value = decode_u256(
+                opt_blob("value")
+                    .as_deref()
+                    .ok_or_else(|| SqlColdError::Convert("Transact requires value".into()))?,
+            )?;
+            let gas = decode_u256(
+                opt_blob("gas")
+                    .as_deref()
+                    .ok_or_else(|| SqlColdError::Convert("Transact requires gas".into()))?,
+            )?;
+            let max_fee =
+                decode_u256(opt_blob("max_fee_per_gas").as_deref().ok_or_else(|| {
+                    SqlColdError::Convert("Transact requires max_fee_per_gas".into())
+                })?)?;
+            let data = Bytes::from(opt_blob("data").unwrap_or_default());
+
+            Ok(DbSignetEvent::Transact(
+                order,
+                Transact {
+                    rollupChainId: rollup_chain_id,
+                    sender,
+                    to,
+                    value,
+                    gas,
+                    maxFeePerGas: max_fee,
+                    data,
+                },
+            ))
+        }
+        EVENT_ENTER => {
+            let recipient =
+                Address::from_slice(opt_blob("rollup_recipient").as_deref().ok_or_else(|| {
+                    SqlColdError::Convert("Enter requires rollup_recipient".into())
+                })?);
+            let amount = decode_u256(
+                opt_blob("amount")
+                    .as_deref()
+                    .ok_or_else(|| SqlColdError::Convert("Enter requires amount".into()))?,
+            )?;
+
+            Ok(DbSignetEvent::Enter(
+                order,
+                Enter { rollupChainId: rollup_chain_id, rollupRecipient: recipient, amount },
+            ))
+        }
+        EVENT_ENTER_TOKEN => {
+            let token = Address::from_slice(
+                opt_blob("token")
+                    .as_deref()
+                    .ok_or_else(|| SqlColdError::Convert("EnterToken requires token".into()))?,
+            );
+            let recipient =
+                Address::from_slice(opt_blob("rollup_recipient").as_deref().ok_or_else(|| {
+                    SqlColdError::Convert("EnterToken requires rollup_recipient".into())
+                })?);
+            let amount = decode_u256(
+                opt_blob("amount")
+                    .as_deref()
+                    .ok_or_else(|| SqlColdError::Convert("EnterToken requires amount".into()))?,
+            )?;
+
+            Ok(DbSignetEvent::EnterToken(
+                order,
+                EnterToken {
+                    rollupChainId: rollup_chain_id,
+                    token,
+                    rollupRecipient: recipient,
+                    amount,
+                },
+            ))
+        }
+        _ => Err(SqlColdError::Convert(format!("invalid event_type: {event_type}"))),
+    }
+}
+
+/// Build a [`DbZenithHeader`] from an [`sqlx::any::AnyRow`].
+fn zenith_header_from_row(r: &sqlx::any::AnyRow) -> Result<DbZenithHeader, SqlColdError> {
+    let blob = |col: &str| -> Vec<u8> { r.get(col) };
+
+    Ok(DbZenithHeader(Zenith::BlockHeader {
+        hostBlockNumber: decode_u256(&blob("host_block_number"))?,
+        rollupChainId: decode_u256(&blob("rollup_chain_id"))?,
+        gasLimit: decode_u256(&blob("gas_limit"))?,
+        rewardAddress: Address::from_slice(&blob("reward_address")),
+        blockDataHash: alloy::primitives::FixedBytes::<32>::from_slice(&blob("block_data_hash")),
+    }))
+}
+
+// ============================================================================
+// Domain type → SQL INSERT (write path)
+// ============================================================================
+
+/// Insert a transaction, binding directly from the source type.
+async fn insert_transaction(
+    conn: &mut sqlx::AnyConnection,
+    bn: i64,
+    tx_index: i64,
+    tx: &TransactionSigned,
+) -> Result<(), SqlColdError> {
+    use alloy::consensus::EthereumTxEnvelope;
+
+    let tx_hash = tx.tx_hash();
+    let tx_type = tx.tx_type() as i32;
+
+    // Signature — extract from each variant via macro to stay DRY.
+    macro_rules! sig {
+        ($s:expr) => {{
+            let sig = $s.signature();
+            (sig.v() as i32, encode_u256(&sig.r()), encode_u256(&sig.s()))
+        }};
+    }
+    let (sig_y, sig_r, sig_s) = match tx {
+        EthereumTxEnvelope::Legacy(s) => sig!(s),
+        EthereumTxEnvelope::Eip2930(s) => sig!(s),
+        EthereumTxEnvelope::Eip1559(s) => sig!(s),
+        EthereumTxEnvelope::Eip4844(s) => sig!(s),
+        EthereumTxEnvelope::Eip7702(s) => sig!(s),
+    };
+
+    // Common scalar fields.
+    let (chain_id, nonce, gas_limit) = match tx {
+        EthereumTxEnvelope::Legacy(s) => {
+            (s.tx().chain_id.map(to_i64), to_i64(s.tx().nonce), to_i64(s.tx().gas_limit))
+        }
+        EthereumTxEnvelope::Eip2930(s) => {
+            (Some(to_i64(s.tx().chain_id)), to_i64(s.tx().nonce), to_i64(s.tx().gas_limit))
+        }
+        EthereumTxEnvelope::Eip1559(s) => {
+            (Some(to_i64(s.tx().chain_id)), to_i64(s.tx().nonce), to_i64(s.tx().gas_limit))
+        }
+        EthereumTxEnvelope::Eip4844(s) => {
+            (Some(to_i64(s.tx().chain_id)), to_i64(s.tx().nonce), to_i64(s.tx().gas_limit))
+        }
+        EthereumTxEnvelope::Eip7702(s) => {
+            (Some(to_i64(s.tx().chain_id)), to_i64(s.tx().nonce), to_i64(s.tx().gas_limit))
+        }
+    };
+
+    // Value (U256) and to_address.
+    let (value, to_addr) = match tx {
+        EthereumTxEnvelope::Legacy(s) => (encode_u256(&s.tx().value), to_address(&s.tx().to)),
+        EthereumTxEnvelope::Eip2930(s) => (encode_u256(&s.tx().value), to_address(&s.tx().to)),
+        EthereumTxEnvelope::Eip1559(s) => (encode_u256(&s.tx().value), to_address(&s.tx().to)),
+        EthereumTxEnvelope::Eip4844(s) => {
+            (encode_u256(&s.tx().value), Some(s.tx().to.as_slice().to_vec()))
+        }
+        EthereumTxEnvelope::Eip7702(s) => {
+            (encode_u256(&s.tx().value), Some(s.tx().to.as_slice().to_vec()))
+        }
+    };
+
+    // Input (borrow from tx).
+    let input: &[u8] = match tx {
+        EthereumTxEnvelope::Legacy(s) => s.tx().input.as_ref(),
+        EthereumTxEnvelope::Eip2930(s) => s.tx().input.as_ref(),
+        EthereumTxEnvelope::Eip1559(s) => s.tx().input.as_ref(),
+        EthereumTxEnvelope::Eip4844(s) => s.tx().input.as_ref(),
+        EthereumTxEnvelope::Eip7702(s) => s.tx().input.as_ref(),
+    };
+
+    // Fee fields (stack-allocated arrays).
+    let (gas_price, max_fee, max_priority_fee, max_blob_fee) = match tx {
+        EthereumTxEnvelope::Legacy(s) => (Some(encode_u128(s.tx().gas_price)), None, None, None),
+        EthereumTxEnvelope::Eip2930(s) => (Some(encode_u128(s.tx().gas_price)), None, None, None),
+        EthereumTxEnvelope::Eip1559(s) => (
+            None,
+            Some(encode_u128(s.tx().max_fee_per_gas)),
+            Some(encode_u128(s.tx().max_priority_fee_per_gas)),
+            None,
+        ),
+        EthereumTxEnvelope::Eip4844(s) => (
+            None,
+            Some(encode_u128(s.tx().max_fee_per_gas)),
+            Some(encode_u128(s.tx().max_priority_fee_per_gas)),
+            Some(encode_u128(s.tx().max_fee_per_blob_gas)),
+        ),
+        EthereumTxEnvelope::Eip7702(s) => (
+            None,
+            Some(encode_u128(s.tx().max_fee_per_gas)),
+            Some(encode_u128(s.tx().max_priority_fee_per_gas)),
+            None,
+        ),
+    };
+
+    // Variable-length encoded fields.
+    let (access_list, blob_hashes, auth_list) = match tx {
+        EthereumTxEnvelope::Legacy(_) => (None, None, None),
+        EthereumTxEnvelope::Eip2930(s) => {
+            (Some(encode_access_list(&s.tx().access_list)), None, None)
+        }
+        EthereumTxEnvelope::Eip1559(s) => {
+            (Some(encode_access_list(&s.tx().access_list)), None, None)
+        }
+        EthereumTxEnvelope::Eip4844(s) => (
+            Some(encode_access_list(&s.tx().access_list)),
+            Some(encode_b256_vec(&s.tx().blob_versioned_hashes)),
+            None,
+        ),
+        EthereumTxEnvelope::Eip7702(s) => (
+            Some(encode_access_list(&s.tx().access_list)),
+            None,
+            Some(encode_authorization_list(&s.tx().authorization_list)),
+        ),
+    };
+
+    sqlx::query(
+        "INSERT INTO transactions (
+            block_number, tx_index, tx_hash, tx_type,
+            sig_y_parity, sig_r, sig_s,
+            chain_id, nonce, gas_limit, to_address, value, input,
+            gas_price, max_fee_per_gas, max_priority_fee_per_gas,
+            max_fee_per_blob_gas, blob_versioned_hashes,
+            access_list, authorization_list
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+            $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+        )",
+    )
+    .bind(bn)
+    .bind(tx_index)
+    .bind(tx_hash.as_slice())
+    .bind(tx_type)
+    .bind(sig_y)
+    .bind(sig_r.as_slice())
+    .bind(sig_s.as_slice())
+    .bind(chain_id)
+    .bind(nonce)
+    .bind(gas_limit)
+    .bind(to_addr.as_deref())
+    .bind(value.as_slice())
+    .bind(input)
+    .bind(gas_price.as_ref().map(|v| v.as_slice()))
+    .bind(max_fee.as_ref().map(|v| v.as_slice()))
+    .bind(max_priority_fee.as_ref().map(|v| v.as_slice()))
+    .bind(max_blob_fee.as_ref().map(|v| v.as_slice()))
+    .bind(blob_hashes.as_deref())
+    .bind(access_list.as_deref())
+    .bind(auth_list.as_deref())
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
+/// Insert a signet event, binding directly from the source type.
 async fn insert_signet_event(
     conn: &mut sqlx::AnyConnection,
     block_number: i64,
@@ -357,121 +797,6 @@ async fn insert_signet_event(
     .await?;
 
     Ok(())
-}
-
-// ============================================================================
-// From<&AnyRow> impls for row types
-// ============================================================================
-
-impl From<&sqlx::any::AnyRow> for HeaderRow {
-    fn from(r: &sqlx::any::AnyRow) -> Self {
-        Self {
-            block_number: r.get("block_number"),
-            parent_hash: r.get("parent_hash"),
-            ommers_hash: r.get("ommers_hash"),
-            beneficiary: r.get("beneficiary"),
-            state_root: r.get("state_root"),
-            transactions_root: r.get("transactions_root"),
-            receipts_root: r.get("receipts_root"),
-            logs_bloom: r.get("logs_bloom"),
-            difficulty: r.get("difficulty"),
-            gas_limit: r.get("gas_limit"),
-            gas_used: r.get("gas_used"),
-            timestamp: r.get("timestamp"),
-            extra_data: r.get("extra_data"),
-            mix_hash: r.get("mix_hash"),
-            nonce: r.get("nonce"),
-            base_fee_per_gas: r.get("base_fee_per_gas"),
-            withdrawals_root: r.get("withdrawals_root"),
-            blob_gas_used: r.get("blob_gas_used"),
-            excess_blob_gas: r.get("excess_blob_gas"),
-            parent_beacon_block_root: r.get("parent_beacon_block_root"),
-            requests_hash: r.get("requests_hash"),
-        }
-    }
-}
-
-impl From<&sqlx::any::AnyRow> for TxRow {
-    fn from(r: &sqlx::any::AnyRow) -> Self {
-        Self {
-            block_number: r.get("block_number"),
-            tx_index: r.get("tx_index"),
-            tx_hash: r.get("tx_hash"),
-            tx_type: r.get::<i32, _>("tx_type") as i16,
-            sig_y_parity: r.get::<i32, _>("sig_y_parity") != 0,
-            sig_r: r.get("sig_r"),
-            sig_s: r.get("sig_s"),
-            chain_id: r.get("chain_id"),
-            nonce: r.get("nonce"),
-            gas_limit: r.get("gas_limit"),
-            to_address: r.get("to_address"),
-            value: r.get("value"),
-            input: r.get("input"),
-            gas_price: r.get("gas_price"),
-            max_fee_per_gas: r.get("max_fee_per_gas"),
-            max_priority_fee_per_gas: r.get("max_priority_fee_per_gas"),
-            max_fee_per_blob_gas: r.get("max_fee_per_blob_gas"),
-            blob_versioned_hashes: r.get("blob_versioned_hashes"),
-            access_list: r.get("access_list"),
-            authorization_list: r.get("authorization_list"),
-        }
-    }
-}
-
-impl From<&sqlx::any::AnyRow> for LogRow {
-    fn from(r: &sqlx::any::AnyRow) -> Self {
-        Self {
-            address: r.get("address"),
-            topic0: r.get("topic0"),
-            topic1: r.get("topic1"),
-            topic2: r.get("topic2"),
-            topic3: r.get("topic3"),
-            data: r.get("data"),
-        }
-    }
-}
-
-impl From<&sqlx::any::AnyRow> for ReceiptRow {
-    fn from(r: &sqlx::any::AnyRow) -> Self {
-        Self {
-            block_number: r.get("block_number"),
-            tx_index: r.get("tx_index"),
-            tx_type: r.get::<i32, _>("tx_type") as i16,
-            success: r.get::<i32, _>("success") != 0,
-            cumulative_gas_used: r.get("cumulative_gas_used"),
-        }
-    }
-}
-
-impl From<&sqlx::any::AnyRow> for SignetEventRow {
-    fn from(r: &sqlx::any::AnyRow) -> Self {
-        Self {
-            event_type: r.get::<i32, _>("event_type") as i16,
-            order_index: r.get("order_index"),
-            rollup_chain_id: r.get("rollup_chain_id"),
-            sender: r.get("sender"),
-            to_address: r.get("to_address"),
-            value: r.get("value"),
-            gas: r.get("gas"),
-            max_fee_per_gas: r.get("max_fee_per_gas"),
-            data: r.get("data"),
-            rollup_recipient: r.get("rollup_recipient"),
-            amount: r.get("amount"),
-            token: r.get("token"),
-        }
-    }
-}
-
-impl From<&sqlx::any::AnyRow> for ZenithHeaderRow {
-    fn from(r: &sqlx::any::AnyRow) -> Self {
-        Self {
-            host_block_number: r.get("host_block_number"),
-            rollup_chain_id: r.get("rollup_chain_id"),
-            gas_limit: r.get("gas_limit"),
-            reward_address: r.get("reward_address"),
-            block_data_hash: r.get("block_data_hash"),
-        }
-    }
 }
 
 // ============================================================================
@@ -541,8 +866,8 @@ impl ColdStorage for SqlColdBackend {
         let block = from_i64(r.get::<i64, _>("block_number"));
         let index = from_i64(r.get::<i64, _>("tx_index"));
         let hash_bytes: Vec<u8> = r.get("block_hash");
-        let block_hash = alloy::primitives::B256::from_slice(&hash_bytes);
-        let tx = TransactionSigned::try_from(TxRow::from(&r)).map_err(ColdStorageError::from)?;
+        let block_hash = B256::from_slice(&hash_bytes);
+        let tx = tx_from_row(&r).map_err(ColdStorageError::from)?;
         let meta = ConfirmationMeta::new(block, block_hash, index);
         Ok(Some(Confirmed::new(tx, meta)))
     }
@@ -559,9 +884,7 @@ impl ColdStorage for SqlColdBackend {
                 .await
                 .map_err(SqlColdError::from)?;
 
-        rows.into_iter()
-            .map(|r| TransactionSigned::try_from(TxRow::from(&r)).map_err(ColdStorageError::from))
-            .collect()
+        rows.iter().map(|r| tx_from_row(r).map_err(ColdStorageError::from)).collect()
     }
 
     async fn get_transaction_count(&self, block: BlockNumber) -> ColdResult<u64> {
@@ -609,8 +932,10 @@ impl ColdStorage for SqlColdBackend {
         let bn: i64 = rr.get("block_number");
         let tx_idx: i64 = rr.get("tx_index");
         let hash_bytes: Vec<u8> = rr.get("block_hash");
-        let block_hash = alloy::primitives::B256::from_slice(&hash_bytes);
-        let receipt = ReceiptRow::from(&rr);
+        let block_hash = B256::from_slice(&hash_bytes);
+        let tx_type = rr.get::<i32, _>("tx_type") as i16;
+        let success = rr.get::<i32, _>("success") != 0;
+        let cumulative_gas_used: i64 = rr.get("cumulative_gas_used");
 
         let log_rows = sqlx::query(
             "SELECT * FROM logs WHERE block_number = $1 AND tx_index = $2 ORDER BY log_index",
@@ -621,8 +946,9 @@ impl ColdStorage for SqlColdBackend {
         .await
         .map_err(SqlColdError::from)?;
 
-        let logs = log_rows.iter().map(LogRow::from).collect();
-        let built = receipt_from_rows(receipt, logs).map_err(ColdStorageError::from)?;
+        let logs = log_rows.iter().map(log_from_row).collect();
+        let built = build_receipt(tx_type, success, cumulative_gas_used, logs)
+            .map_err(ColdStorageError::from)?;
         let meta = ConfirmationMeta::new(from_i64(bn), block_hash, from_i64(tx_idx));
         Ok(Some(Confirmed::new(built, meta)))
     }
@@ -645,19 +971,23 @@ impl ColdStorage for SqlColdBackend {
                 .map_err(SqlColdError::from)?;
 
         // Group logs by tx_index
-        let mut logs_by_tx: std::collections::BTreeMap<i64, Vec<LogRow>> =
+        let mut logs_by_tx: std::collections::BTreeMap<i64, Vec<Log>> =
             std::collections::BTreeMap::new();
         for r in &all_log_rows {
             let tx_idx: i64 = r.get("tx_index");
-            logs_by_tx.entry(tx_idx).or_default().push(LogRow::from(r));
+            logs_by_tx.entry(tx_idx).or_default().push(log_from_row(r));
         }
 
         receipt_rows
             .iter()
             .map(|rr| {
-                let receipt = ReceiptRow::from(rr);
-                let logs = logs_by_tx.remove(&receipt.tx_index).unwrap_or_default();
-                receipt_from_rows(receipt, logs).map_err(ColdStorageError::from)
+                let tx_idx: i64 = rr.get("tx_index");
+                let tx_type = rr.get::<i32, _>("tx_type") as i16;
+                let success = rr.get::<i32, _>("success") != 0;
+                let cumulative_gas_used: i64 = rr.get("cumulative_gas_used");
+                let logs = logs_by_tx.remove(&tx_idx).unwrap_or_default();
+                build_receipt(tx_type, success, cumulative_gas_used, logs)
+                    .map_err(ColdStorageError::from)
             })
             .collect()
     }
@@ -692,11 +1022,7 @@ impl ColdStorage for SqlColdBackend {
             }
         };
 
-        rows.iter()
-            .map(|r| {
-                DbSignetEvent::try_from(SignetEventRow::from(r)).map_err(ColdStorageError::from)
-            })
-            .collect()
+        rows.iter().map(|r| signet_event_from_row(r).map_err(ColdStorageError::from)).collect()
     }
 
     async fn get_zenith_header(
@@ -714,9 +1040,7 @@ impl ColdStorage for SqlColdBackend {
             .await
             .map_err(SqlColdError::from)?;
 
-        row.map(|r| DbZenithHeader::try_from(ZenithHeaderRow::from(&r)))
-            .transpose()
-            .map_err(ColdStorageError::from)
+        row.map(|r| zenith_header_from_row(&r)).transpose().map_err(ColdStorageError::from)
     }
 
     async fn get_zenith_headers(
@@ -747,11 +1071,7 @@ impl ColdStorage for SqlColdBackend {
             }
         };
 
-        rows.iter()
-            .map(|r| {
-                DbZenithHeader::try_from(ZenithHeaderRow::from(r)).map_err(ColdStorageError::from)
-            })
-            .collect()
+        rows.iter().map(|r| zenith_header_from_row(r).map_err(ColdStorageError::from)).collect()
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
@@ -786,8 +1106,10 @@ impl ColdStorage for SqlColdBackend {
         };
 
         // Step 2: Fetch header + receipt + transaction + prior gas in one
-        // multi-join query. Column aliases resolve name conflicts between
-        // the three tables.
+        // multi-join query.  Header columns `gas_limit` and `nonce` are
+        // aliased to avoid conflicts with the identically-named transaction
+        // columns.  Transaction columns keep their standard names so
+        // `tx_from_row_with` can read them directly.
         let row = sqlx::query(
             "SELECT
                 h.block_number, h.block_hash, h.parent_hash, h.ommers_hash, h.beneficiary,
@@ -796,9 +1118,9 @@ impl ColdStorage for SqlColdBackend {
                 h.extra_data, h.mix_hash, h.nonce as h_nonce, h.base_fee_per_gas,
                 h.withdrawals_root, h.blob_gas_used, h.excess_blob_gas,
                 h.parent_beacon_block_root, h.requests_hash,
-                t.tx_index, t.tx_hash, t.tx_type as t_tx_type,
-                t.sig_y_parity, t.sig_r, t.sig_s, t.chain_id, t.nonce as t_nonce,
-                t.gas_limit as t_gas_limit, t.to_address, t.value, t.input,
+                t.tx_index, t.tx_hash, t.tx_type,
+                t.sig_y_parity, t.sig_r, t.sig_s, t.chain_id, t.nonce,
+                t.gas_limit, t.to_address, t.value, t.input,
                 t.gas_price, t.max_fee_per_gas, t.max_priority_fee_per_gas,
                 t.max_fee_per_blob_gas, t.blob_versioned_hashes,
                 t.access_list, t.authorization_list,
@@ -823,66 +1145,16 @@ impl ColdStorage for SqlColdBackend {
             return Ok(None);
         };
 
-        // Construct rows manually — column aliases differ from standard names.
-        let header = Header::try_from(HeaderRow {
-            block_number: r.get("block_number"),
-            parent_hash: r.get("parent_hash"),
-            ommers_hash: r.get("ommers_hash"),
-            beneficiary: r.get("beneficiary"),
-            state_root: r.get("state_root"),
-            transactions_root: r.get("transactions_root"),
-            receipts_root: r.get("receipts_root"),
-            logs_bloom: r.get("logs_bloom"),
-            difficulty: r.get("difficulty"),
-            gas_limit: r.get("h_gas_limit"),
-            gas_used: r.get("gas_used"),
-            timestamp: r.get("timestamp"),
-            extra_data: r.get("extra_data"),
-            mix_hash: r.get("mix_hash"),
-            nonce: r.get("h_nonce"),
-            base_fee_per_gas: r.get("base_fee_per_gas"),
-            withdrawals_root: r.get("withdrawals_root"),
-            blob_gas_used: r.get("blob_gas_used"),
-            excess_blob_gas: r.get("excess_blob_gas"),
-            parent_beacon_block_root: r.get("parent_beacon_block_root"),
-            requests_hash: r.get("requests_hash"),
-        })
-        .map_err(ColdStorageError::from)?;
+        let header =
+            header_from_row_with(&r, "h_gas_limit", "h_nonce").map_err(ColdStorageError::from)?;
+        let tx = tx_from_row(&r).map_err(ColdStorageError::from)?;
 
-        let tx = TransactionSigned::try_from(TxRow {
-            block_number: bn,
-            tx_index: tx_idx,
-            tx_hash: r.get("tx_hash"),
-            tx_type: r.get::<i32, _>("t_tx_type") as i16,
-            sig_y_parity: r.get::<i32, _>("sig_y_parity") != 0,
-            sig_r: r.get("sig_r"),
-            sig_s: r.get("sig_s"),
-            chain_id: r.get("chain_id"),
-            nonce: r.get("t_nonce"),
-            gas_limit: r.get("t_gas_limit"),
-            to_address: r.get("to_address"),
-            value: r.get("value"),
-            input: r.get("input"),
-            gas_price: r.get("gas_price"),
-            max_fee_per_gas: r.get("max_fee_per_gas"),
-            max_priority_fee_per_gas: r.get("max_priority_fee_per_gas"),
-            max_fee_per_blob_gas: r.get("max_fee_per_blob_gas"),
-            blob_versioned_hashes: r.get("blob_versioned_hashes"),
-            access_list: r.get("access_list"),
-            authorization_list: r.get("authorization_list"),
-        })
-        .map_err(ColdStorageError::from)?;
-
-        let receipt_row = ReceiptRow {
-            block_number: bn,
-            tx_index: tx_idx,
-            tx_type: r.get::<i32, _>("r_tx_type") as i16,
-            success: r.get::<i32, _>("success") != 0,
-            cumulative_gas_used: r.get("cumulative_gas_used"),
-        };
+        let r_tx_type = r.get::<i32, _>("r_tx_type") as i16;
+        let success = r.get::<i32, _>("success") != 0;
+        let cumulative_gas_used: i64 = r.get("cumulative_gas_used");
 
         let block_hash_bytes: Vec<u8> = r.get("block_hash");
-        let block_hash = alloy::primitives::B256::from_slice(&block_hash_bytes);
+        let block_hash = B256::from_slice(&block_hash_bytes);
         let prior_cumulative_gas = from_i64(r.get::<i64, _>("prior_cumulative_gas"));
 
         // Step 3: Fetch logs.
@@ -895,8 +1167,9 @@ impl ColdStorage for SqlColdBackend {
         .await
         .map_err(SqlColdError::from)?;
 
-        let logs = log_rows.iter().map(LogRow::from).collect();
-        let receipt = receipt_from_rows(receipt_row, logs).map_err(ColdStorageError::from)?;
+        let logs = log_rows.iter().map(log_from_row).collect();
+        let receipt = build_receipt(r_tx_type, success, cumulative_gas_used, logs)
+            .map_err(ColdStorageError::from)?;
         let meta = ConfirmationMeta::new(from_i64(bn), block_hash, from_i64(tx_idx));
         let confirmed = Confirmed::new(receipt, meta);
 
