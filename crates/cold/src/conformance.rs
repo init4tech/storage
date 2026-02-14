@@ -26,10 +26,9 @@ pub async fn conformance<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     test_header_hash_lookup(backend).await?;
     test_transaction_lookups(backend).await?;
     test_receipt_lookups(backend).await?;
-    test_confirmation_metadata(backend).await?;
     test_truncation(backend).await?;
     test_batch_append(backend).await?;
-    test_latest_block_tracking(backend).await?;
+    test_confirmation_metadata(backend).await?;
     test_cold_receipt_metadata(backend).await?;
     test_get_logs(backend).await?;
     Ok(())
@@ -250,22 +249,6 @@ pub async fn test_batch_append<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     assert!(backend.get_header(HeaderSpecifier::Number(400)).await?.is_some());
     assert!(backend.get_header(HeaderSpecifier::Number(401)).await?.is_some());
     assert!(backend.get_header(HeaderSpecifier::Number(402)).await?.is_some());
-
-    Ok(())
-}
-
-/// Test latest block tracking.
-pub async fn test_latest_block_tracking<B: ColdStorage>(backend: &B) -> ColdResult<()> {
-    // Append out of order
-    backend.append_block(make_test_block(502)).await?;
-    assert_eq!(backend.get_latest_block().await?, Some(502));
-
-    backend.append_block(make_test_block(500)).await?;
-    // Latest should still be 502
-    assert_eq!(backend.get_latest_block().await?, Some(502));
-
-    backend.append_block(make_test_block(505)).await?;
-    assert_eq!(backend.get_latest_block().await?, Some(505));
 
     Ok(())
 }

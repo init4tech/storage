@@ -52,9 +52,6 @@ pub trait Table: Sized + Send + Sync + 'static {
     /// Otherwise, it is `None`.
     const DUAL_KEY_SIZE: Option<usize> = None;
 
-    /// Indicates that this table uses an integer key (u32 or u64).
-    const INT_KEY: bool = false;
-
     /// Indicates that this table has fixed-size values.
     const IS_FIXED_VAL: bool = Self::FIXED_VAL_SIZE.is_some();
 

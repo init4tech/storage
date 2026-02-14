@@ -1429,7 +1429,6 @@ impl HotKvWrite for MemKvRwTx {
         _table: &'static str,
         _dual_key: Option<usize>,
         _dual_fixed: Option<usize>,
-        _int_key: bool,
     ) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -2142,7 +2141,7 @@ mod tests {
         // Create an empty table first
         {
             let writer = store.writer().unwrap();
-            writer.queue_raw_create(TestTable::NAME, None, None, false).unwrap();
+            writer.queue_raw_create(TestTable::NAME, None, None).unwrap();
             writer.raw_commit().unwrap();
         }
 

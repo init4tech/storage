@@ -559,10 +559,17 @@ impl<K: TransactionKind + WriteMarker> DualKeyTraverseMut<MdbxError> for Cursor<
     }
 
     fn append_dual(&mut self, k1: &[u8], k2: &[u8], value: &[u8]) -> Result<(), MdbxError> {
-        // Concatenate k2 || value for DUPSORT using scratch buffer
+        // Concatenate k2 || value for DUPSORT
         let total = k2.len() + value.len();
-        self.buf[..k2.len()].copy_from_slice(k2);
-        self.buf[k2.len()..total].copy_from_slice(value);
-        self.inner.append_dup(k1, &self.buf[..total]).map_err(MdbxError::from)
+        if total <= self.buf.len() {
+            self.buf[..k2.len()].copy_from_slice(k2);
+            self.buf[k2.len()..total].copy_from_slice(value);
+            self.inner.append_dup(k1, &self.buf[..total]).map_err(MdbxError::from)
+        } else {
+            let mut combined = Vec::with_capacity(total);
+            combined.extend_from_slice(k2);
+            combined.extend_from_slice(value);
+            self.inner.append_dup(k1, &combined).map_err(MdbxError::from)
+        }
     }
 }

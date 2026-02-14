@@ -273,9 +273,6 @@ pub trait HotKvWrite: HotKvRead {
     /// 2. `fixed_val_size`: whether the table has fixed-size values.
     ///    If so, the argument MUST be the size of the fixed value.
     ///    If not, it MUST be `None`.
-    /// 3. `int_key`: whether the table uses an integer key (u32 or u64).
-    ///    If `true`, the backend MAY use optimizations like MDBX's
-    ///    `INTEGER_KEY` flag for native-endian key storage.
     ///
     /// Database implementations can use this information for optimizations.
     fn queue_raw_create(
@@ -283,7 +280,6 @@ pub trait HotKvWrite: HotKvRead {
         table: &'static str,
         dual_key_size: Option<usize>,
         fixed_val_size: Option<usize>,
-        int_key: bool,
     ) -> Result<(), Self::Error>;
 
     /// Traverse a specific table. Returns a mutable typed cursor wrapper.
@@ -382,7 +378,7 @@ pub trait HotKvWrite: HotKvRead {
     where
         T: Table,
     {
-        self.queue_raw_create(T::NAME, T::DUAL_KEY_SIZE, T::FIXED_VAL_SIZE, T::INT_KEY)
+        self.queue_raw_create(T::NAME, T::DUAL_KEY_SIZE, T::FIXED_VAL_SIZE)
     }
 
     /// Queue clearing all entries in a specific table.

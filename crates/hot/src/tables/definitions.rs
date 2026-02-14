@@ -4,7 +4,7 @@ use trevm::revm::bytecode::Bytecode;
 
 table! {
     /// Records recent block Headers, by their number.
-    Headers<BlockNumber => SealedHeader> int_key
+    Headers<BlockNumber => SealedHeader>
 }
 
 table! {
@@ -34,7 +34,7 @@ table! {
 
 table! {
     /// Records account states before transactions, keyed by (block_number, address). This table is used to rollback account states. As such, appends and unwinds are always full replacements, never merges.
-    AccountChangeSets<BlockNumber => Address => Account> is 8 + 32 + 32, FullReplacements, int_key
+    AccountChangeSets<BlockNumber => Address => Account> is 8 + 32 + 32, FullReplacements
 }
 
 table! {
