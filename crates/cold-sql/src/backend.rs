@@ -1143,23 +1143,8 @@ impl ColdStorage for SqlColdBackend {
         let from = filter.get_from_block().unwrap_or(0);
         let to = filter.get_to_block().unwrap_or(u64::MAX);
 
-        // Build dynamic SQL with positional $N placeholders.
-        // The correlated subquery computes block_log_index: the absolute
-        // position of each log among all logs in its block, leveraging the
-        // PK index on (block_number, tx_index, log_index).
-        let mut sql = String::from(
-            "SELECT l.*, h.block_hash, h.timestamp AS block_timestamp, t.tx_hash, \
-               (SELECT COUNT(*) FROM logs l2 \
-                WHERE l2.block_number = l.block_number \
-                  AND (l2.tx_index < l.tx_index \
-                       OR (l2.tx_index = l.tx_index AND l2.log_index < l.log_index)) \
-               ) AS block_log_index \
-             FROM logs l \
-             JOIN headers h ON l.block_number = h.block_number \
-             JOIN transactions t ON l.block_number = t.block_number \
-               AND l.tx_index = t.tx_index \
-             WHERE l.block_number >= $1 AND l.block_number <= $2",
-        );
+        // Build the shared WHERE clause for both count and data queries.
+        let mut where_clause = String::from("l.block_number >= $1 AND l.block_number <= $2");
         let mut params: Vec<Vec<u8>> = Vec::new();
         let mut idx = 3u32;
 
@@ -1167,7 +1152,7 @@ impl ColdStorage for SqlColdBackend {
         if !filter.address.is_empty() {
             let addrs: Vec<_> = filter.address.iter().collect();
             if addrs.len() == 1 {
-                sql.push_str(&format!(" AND l.address = ${idx}"));
+                where_clause.push_str(&format!(" AND l.address = ${idx}"));
                 params.push(addrs[0].as_slice().to_vec());
                 idx += 1;
             } else {
@@ -1177,7 +1162,7 @@ impl ColdStorage for SqlColdBackend {
                     .map(|(i, _)| format!("${}", idx + i as u32))
                     .collect::<Vec<_>>()
                     .join(", ");
-                sql.push_str(&format!(" AND l.address IN ({placeholders})"));
+                where_clause.push_str(&format!(" AND l.address IN ({placeholders})"));
                 for addr in &addrs {
                     params.push(addr.as_slice().to_vec());
                 }
@@ -1193,7 +1178,7 @@ impl ColdStorage for SqlColdBackend {
             }
             let values: Vec<_> = topic_filter.iter().collect();
             if values.len() == 1 {
-                sql.push_str(&format!(" AND {} = ${idx}", topic_cols[i]));
+                where_clause.push_str(&format!(" AND {} = ${idx}", topic_cols[i]));
                 params.push(values[0].as_slice().to_vec());
                 idx += 1;
             } else {
@@ -1203,7 +1188,7 @@ impl ColdStorage for SqlColdBackend {
                     .map(|(j, _)| format!("${}", idx + j as u32))
                     .collect::<Vec<_>>()
                     .join(", ");
-                sql.push_str(&format!(" AND {} IN ({placeholders})", topic_cols[i]));
+                where_clause.push_str(&format!(" AND {} IN ({placeholders})", topic_cols[i]));
                 for v in &values {
                     params.push(v.as_slice().to_vec());
                 }
@@ -1211,22 +1196,38 @@ impl ColdStorage for SqlColdBackend {
             }
         }
 
-        sql.push_str(" ORDER BY l.block_number, l.tx_index, l.log_index");
-
-        // Apply LIMIT to let the database short-circuit early.
-        // Only add when max_logs fits in i64 to avoid overflow.
-        let use_limit = max_logs <= i64::MAX as usize;
-        if use_limit {
-            sql.push_str(&format!(" LIMIT ${idx}"));
+        // Run a cheap COUNT(*) query first to reject queries that exceed
+        // the limit without loading any row data.
+        let count_sql = format!("SELECT COUNT(*) as cnt FROM logs l WHERE {where_clause}");
+        let mut count_query = sqlx::query(&count_sql).bind(to_i64(from)).bind(to_i64(to));
+        for param in &params {
+            count_query = count_query.bind(param.as_slice());
+        }
+        let count_row = count_query.fetch_one(&self.pool).await.map_err(SqlColdError::from)?;
+        let count = from_i64(count_row.get::<i64, _>(COL_CNT)) as usize;
+        if count > max_logs {
+            return Err(ColdStorageError::TooManyLogs { limit: max_logs });
         }
 
-        // Bind parameters and execute.
-        let mut query = sqlx::query(&sql).bind(to_i64(from)).bind(to_i64(to));
+        // Fetch the actual log data with JOINs and the correlated subquery
+        // for block_log_index (absolute position within block).
+        let data_sql = format!(
+            "SELECT l.*, h.block_hash, h.timestamp AS block_timestamp, t.tx_hash, \
+               (SELECT COUNT(*) FROM logs l2 \
+                WHERE l2.block_number = l.block_number \
+                  AND (l2.tx_index < l.tx_index \
+                       OR (l2.tx_index = l.tx_index AND l2.log_index < l.log_index)) \
+               ) AS block_log_index \
+             FROM logs l \
+             JOIN headers h ON l.block_number = h.block_number \
+             JOIN transactions t ON l.block_number = t.block_number \
+               AND l.tx_index = t.tx_index \
+             WHERE {where_clause} \
+             ORDER BY l.block_number, l.tx_index, l.log_index"
+        );
+        let mut query = sqlx::query(&data_sql).bind(to_i64(from)).bind(to_i64(to));
         for param in &params {
             query = query.bind(param.as_slice());
-        }
-        if use_limit {
-            query = query.bind(max_logs as i64);
         }
 
         let rows = query.fetch_all(&self.pool).await.map_err(SqlColdError::from)?;

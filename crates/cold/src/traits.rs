@@ -170,9 +170,11 @@ pub trait ColdStorage: Send + Sync + 'static {
     /// Follows `eth_getLogs` semantics: returns all logs matching the
     /// filter criteria, ordered by `(block_number, tx_index, log_index)`.
     ///
-    /// Backends MUST return at most `max_logs` results. If the limit falls
-    /// mid-block, partial block logs are returned (hard cut at exactly
-    /// `max_logs`).
+    /// # Errors
+    ///
+    /// Returns [`ColdStorageError::TooManyLogs`] if the query would produce
+    /// more than `max_logs` results. No partial results are returned — the
+    /// caller must narrow the filter or increase the limit.
     fn get_logs(
         &self,
         filter: Filter,

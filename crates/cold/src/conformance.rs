@@ -5,8 +5,8 @@
 //! a custom backend, call the test functions with your backend instance.
 
 use crate::{
-    BlockData, ColdResult, ColdStorage, Filter, HeaderSpecifier, ReceiptSpecifier,
-    TransactionSpecifier,
+    BlockData, ColdResult, ColdStorage, ColdStorageError, Filter, HeaderSpecifier,
+    ReceiptSpecifier, TransactionSpecifier,
 };
 use alloy::{
     consensus::transaction::Recovered,
@@ -489,12 +489,13 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
         .await?;
     assert_eq!(addr_a_transfers.len(), 2);
 
-    // --- max_logs limits results ---
-    let limited = backend.get_logs(Filter::new().from_block(800).to_block(801), 2).await?;
-    assert_eq!(limited.len(), 2);
-    // Verify the 2 returned are the first 2 in order
-    assert_eq!((limited[0].block_number, limited[0].log_index), (Some(800), Some(0)));
-    assert_eq!((limited[1].block_number, limited[1].log_index), (Some(800), Some(1)));
+    // --- max_logs errors when exceeded ---
+    let err = backend.get_logs(Filter::new().from_block(800).to_block(801), 2).await;
+    assert!(matches!(err, Err(ColdStorageError::TooManyLogs { limit: 2 })));
+
+    // --- max_logs at exact count succeeds ---
+    let exact = backend.get_logs(Filter::new().from_block(800).to_block(801), 4).await?;
+    assert_eq!(exact.len(), 4);
 
     Ok(())
 }

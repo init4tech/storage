@@ -4,8 +4,9 @@
 //! It is primarily intended for testing and development.
 
 use crate::{
-    BlockData, ColdReceipt, ColdResult, ColdStorage, Confirmed, Filter, HeaderSpecifier,
-    ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter,
+    HeaderSpecifier, ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier,
+    ZenithHeaderSpecifier,
 };
 use alloy::primitives::{B256, BlockNumber};
 use signet_storage_types::{
@@ -211,7 +212,7 @@ impl ColdStorage for MemColdBackend {
 
         let from = filter.get_from_block().unwrap_or(0);
         let to = filter.get_to_block().unwrap_or(u64::MAX);
-        'outer: for (&block_num, receipts) in inner.receipts.range(from..=to) {
+        for (&block_num, receipts) in inner.receipts.range(from..=to) {
             let (block_hash, block_timestamp) =
                 inner.headers.get(&block_num).map(|h| (h.hash(), h.timestamp)).unwrap_or_default();
 
@@ -230,8 +231,8 @@ impl ColdStorage for MemColdBackend {
                         log_index: Some(ir.first_log_index + log_idx as u64),
                         removed: false,
                     });
-                    if results.len() >= max_logs {
-                        break 'outer;
+                    if results.len() > max_logs {
+                        return Err(ColdStorageError::TooManyLogs { limit: max_logs });
                     }
                 }
             }
