@@ -36,6 +36,8 @@ mod error;
 pub use error::SqlColdError;
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod columns;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod convert;
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]

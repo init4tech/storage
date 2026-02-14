@@ -226,19 +226,17 @@ pub(crate) fn encode_b256_vec(hashes: &[B256]) -> Vec<u8> {
     buf
 }
 
-pub(crate) fn decode_b256_vec(data: &[u8]) -> Vec<B256> {
+pub(crate) fn decode_b256_vec(data: &[u8]) -> Result<Vec<B256>, SqlColdError> {
     if data.len() < 2 {
-        return Vec::new();
+        return Err(SqlColdError::Convert("b256_vec too short".into()));
     }
     let count = u16::from_be_bytes([data[0], data[1]]) as usize;
-    let mut result = Vec::with_capacity(count);
-    for i in 0..count {
-        let start = 2 + i * 32;
-        if start + 32 <= data.len() {
-            result.push(B256::from_slice(&data[start..start + 32]));
-        }
+    if data.len() < 2 + count * 32 {
+        return Err(SqlColdError::Convert("b256_vec truncated".into()));
     }
-    result
+    let result =
+        (0..count).map(|i| B256::from_slice(&data[2 + i * 32..2 + (i + 1) * 32])).collect();
+    Ok(result)
 }
 
 // ============================================================================
