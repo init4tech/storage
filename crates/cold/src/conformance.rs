@@ -502,7 +502,7 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     Ok(())
 }
 
-/// Collect a [`LogStream`] into a `Vec`, returning the first error if any.
+/// Collect a [`crate::LogStream`] into a `Vec`, returning the first error if any.
 async fn collect_stream(stream: crate::LogStream) -> ColdResult<Vec<RpcLog>> {
     let mut stream = stream;
     let mut results = Vec::new();
