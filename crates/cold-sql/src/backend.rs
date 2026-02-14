@@ -162,176 +162,185 @@ impl SqlColdBackend {
 
     async fn insert_block(&self, data: BlockData) -> Result<(), SqlColdError> {
         let mut tx = self.pool.begin().await?;
-        let block = data.block_number();
-        let bn = to_i64(block);
-
-        // Insert header
-        let hr = HeaderRow::from_header(&data.header);
-        sqlx::query(
-            "INSERT INTO headers (
-                block_number, block_hash, parent_hash, ommers_hash, beneficiary,
-                state_root, transactions_root, receipts_root, logs_bloom, difficulty,
-                gas_limit, gas_used, timestamp, extra_data, mix_hash, nonce,
-                base_fee_per_gas, withdrawals_root, blob_gas_used, excess_blob_gas,
-                parent_beacon_block_root, requests_hash
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
-            )",
-        )
-        .bind(hr.block_number)
-        .bind(&hr.block_hash)
-        .bind(&hr.parent_hash)
-        .bind(&hr.ommers_hash)
-        .bind(&hr.beneficiary)
-        .bind(&hr.state_root)
-        .bind(&hr.transactions_root)
-        .bind(&hr.receipts_root)
-        .bind(&hr.logs_bloom)
-        .bind(&hr.difficulty)
-        .bind(hr.gas_limit)
-        .bind(hr.gas_used)
-        .bind(hr.timestamp)
-        .bind(&hr.extra_data)
-        .bind(&hr.mix_hash)
-        .bind(&hr.nonce)
-        .bind(hr.base_fee_per_gas)
-        .bind(&hr.withdrawals_root)
-        .bind(hr.blob_gas_used)
-        .bind(hr.excess_blob_gas)
-        .bind(&hr.parent_beacon_block_root)
-        .bind(&hr.requests_hash)
-        .execute(&mut *tx)
-        .await?;
-
-        // Insert transactions
-        for (idx, recovered_tx) in data.transactions.iter().enumerate() {
-            let sender = recovered_tx.signer();
-            let tx_signed: &TransactionSigned = recovered_tx;
-            let tr = TxRow::from_tx(tx_signed, bn, to_i64(idx as u64), &sender)?;
-            sqlx::query(
-                "INSERT INTO transactions (
-                    block_number, tx_index, tx_hash, tx_type,
-                    sig_y_parity, sig_r, sig_s,
-                    chain_id, nonce, gas_limit, to_address, value, input,
-                    gas_price, max_fee_per_gas, max_priority_fee_per_gas,
-                    max_fee_per_blob_gas, blob_versioned_hashes,
-                    access_list, authorization_list, from_address
-                ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
-                )",
-            )
-            .bind(tr.block_number)
-            .bind(tr.tx_index)
-            .bind(&tr.tx_hash)
-            .bind(tr.tx_type as i32)
-            .bind(tr.sig_y_parity as i32)
-            .bind(&tr.sig_r)
-            .bind(&tr.sig_s)
-            .bind(tr.chain_id)
-            .bind(tr.nonce)
-            .bind(tr.gas_limit)
-            .bind(&tr.to_address)
-            .bind(&tr.value)
-            .bind(&tr.input)
-            .bind(&tr.gas_price)
-            .bind(&tr.max_fee_per_gas)
-            .bind(&tr.max_priority_fee_per_gas)
-            .bind(&tr.max_fee_per_blob_gas)
-            .bind(&tr.blob_versioned_hashes)
-            .bind(&tr.access_list)
-            .bind(&tr.authorization_list)
-            .bind(&tr.from_address)
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        // Insert receipts and logs
-        for (idx, receipt) in data.receipts.iter().enumerate() {
-            let rr = ReceiptRow::from_receipt(receipt, bn, to_i64(idx as u64));
-            sqlx::query(
-                "INSERT INTO receipts (block_number, tx_index, tx_type, success, cumulative_gas_used)
-                 VALUES ($1, $2, $3, $4, $5)",
-            )
-            .bind(rr.block_number)
-            .bind(rr.tx_index)
-            .bind(rr.tx_type as i32)
-            .bind(rr.success as i32)
-            .bind(rr.cumulative_gas_used)
-            .execute(&mut *tx)
-            .await?;
-
-            for (log_idx, log) in receipt.inner.logs.iter().enumerate() {
-                let lr = LogRow::from_log(log, bn, to_i64(idx as u64), to_i64(log_idx as u64));
-                sqlx::query(
-                    "INSERT INTO logs (block_number, tx_index, log_index, address, topic0, topic1, topic2, topic3, data)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-                )
-                .bind(lr.block_number)
-                .bind(lr.tx_index)
-                .bind(lr.log_index)
-                .bind(&lr.address)
-                .bind(&lr.topic0)
-                .bind(&lr.topic1)
-                .bind(&lr.topic2)
-                .bind(&lr.topic3)
-                .bind(&lr.data)
-                .execute(&mut *tx)
-                .await?;
-            }
-        }
-
-        // Insert signet events
-        for (idx, event) in data.signet_events.iter().enumerate() {
-            let er = SignetEventRow::from_event(event, bn, to_i64(idx as u64));
-            sqlx::query(
-                "INSERT INTO signet_events (
-                    block_number, event_index, event_type, order_index,
-                    rollup_chain_id, sender, to_address, value, gas,
-                    max_fee_per_gas, data, rollup_recipient, amount, token
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
-            )
-            .bind(er.block_number)
-            .bind(er.event_index)
-            .bind(er.event_type as i32)
-            .bind(er.order_index)
-            .bind(&er.rollup_chain_id)
-            .bind(&er.sender)
-            .bind(&er.to_address)
-            .bind(&er.value)
-            .bind(&er.gas)
-            .bind(&er.max_fee_per_gas)
-            .bind(&er.data)
-            .bind(&er.rollup_recipient)
-            .bind(&er.amount)
-            .bind(&er.token)
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        // Insert zenith header
-        if let Some(zh) = &data.zenith_header {
-            let zr = ZenithHeaderRow::from_zenith(zh, bn);
-            sqlx::query(
-                "INSERT INTO zenith_headers (
-                    block_number, host_block_number, rollup_chain_id,
-                    gas_limit, reward_address, block_data_hash
-                ) VALUES ($1, $2, $3, $4, $5, $6)",
-            )
-            .bind(zr.block_number)
-            .bind(&zr.host_block_number)
-            .bind(&zr.rollup_chain_id)
-            .bind(&zr.gas_limit)
-            .bind(&zr.reward_address)
-            .bind(&zr.block_data_hash)
-            .execute(&mut *tx)
-            .await?;
-        }
-
+        write_block_to_tx(&mut tx, data).await?;
         tx.commit().await?;
         Ok(())
     }
+}
+
+/// Write a single block's data into an open SQL transaction.
+async fn write_block_to_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    data: BlockData,
+) -> Result<(), SqlColdError> {
+    let block = data.block_number();
+    let bn = to_i64(block);
+
+    // Insert header
+    let hr = HeaderRow::from_header(&data.header);
+    sqlx::query(
+        "INSERT INTO headers (
+            block_number, block_hash, parent_hash, ommers_hash, beneficiary,
+            state_root, transactions_root, receipts_root, logs_bloom, difficulty,
+            gas_limit, gas_used, timestamp, extra_data, mix_hash, nonce,
+            base_fee_per_gas, withdrawals_root, blob_gas_used, excess_blob_gas,
+            parent_beacon_block_root, requests_hash
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+            $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+        )",
+    )
+    .bind(hr.block_number)
+    .bind(&hr.block_hash)
+    .bind(&hr.parent_hash)
+    .bind(&hr.ommers_hash)
+    .bind(&hr.beneficiary)
+    .bind(&hr.state_root)
+    .bind(&hr.transactions_root)
+    .bind(&hr.receipts_root)
+    .bind(&hr.logs_bloom)
+    .bind(&hr.difficulty)
+    .bind(hr.gas_limit)
+    .bind(hr.gas_used)
+    .bind(hr.timestamp)
+    .bind(&hr.extra_data)
+    .bind(&hr.mix_hash)
+    .bind(&hr.nonce)
+    .bind(hr.base_fee_per_gas)
+    .bind(&hr.withdrawals_root)
+    .bind(hr.blob_gas_used)
+    .bind(hr.excess_blob_gas)
+    .bind(&hr.parent_beacon_block_root)
+    .bind(&hr.requests_hash)
+    .execute(&mut **tx)
+    .await?;
+
+    // Insert transactions
+    for (idx, recovered_tx) in data.transactions.iter().enumerate() {
+        let sender = recovered_tx.signer();
+        let tx_signed: &TransactionSigned = recovered_tx;
+        let tr = TxRow::from_tx(tx_signed, bn, to_i64(idx as u64), &sender)?;
+        sqlx::query(
+            "INSERT INTO transactions (
+                block_number, tx_index, tx_hash, tx_type,
+                sig_y_parity, sig_r, sig_s,
+                chain_id, nonce, gas_limit, to_address, value, input,
+                gas_price, max_fee_per_gas, max_priority_fee_per_gas,
+                max_fee_per_blob_gas, blob_versioned_hashes,
+                access_list, authorization_list, from_address
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+            )",
+        )
+        .bind(tr.block_number)
+        .bind(tr.tx_index)
+        .bind(&tr.tx_hash)
+        .bind(tr.tx_type as i32)
+        .bind(tr.sig_y_parity as i32)
+        .bind(&tr.sig_r)
+        .bind(&tr.sig_s)
+        .bind(tr.chain_id)
+        .bind(tr.nonce)
+        .bind(tr.gas_limit)
+        .bind(&tr.to_address)
+        .bind(&tr.value)
+        .bind(&tr.input)
+        .bind(&tr.gas_price)
+        .bind(&tr.max_fee_per_gas)
+        .bind(&tr.max_priority_fee_per_gas)
+        .bind(&tr.max_fee_per_blob_gas)
+        .bind(&tr.blob_versioned_hashes)
+        .bind(&tr.access_list)
+        .bind(&tr.authorization_list)
+        .bind(&tr.from_address)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    // Insert receipts and logs
+    for (idx, receipt) in data.receipts.iter().enumerate() {
+        let rr = ReceiptRow::from_receipt(receipt, bn, to_i64(idx as u64));
+        sqlx::query(
+            "INSERT INTO receipts (block_number, tx_index, tx_type, success, cumulative_gas_used)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(rr.block_number)
+        .bind(rr.tx_index)
+        .bind(rr.tx_type as i32)
+        .bind(rr.success as i32)
+        .bind(rr.cumulative_gas_used)
+        .execute(&mut **tx)
+        .await?;
+
+        for (log_idx, log) in receipt.inner.logs.iter().enumerate() {
+            let lr = LogRow::from_log(log, bn, to_i64(idx as u64), to_i64(log_idx as u64));
+            sqlx::query(
+                "INSERT INTO logs (block_number, tx_index, log_index, address, topic0, topic1, topic2, topic3, data)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(lr.block_number)
+            .bind(lr.tx_index)
+            .bind(lr.log_index)
+            .bind(&lr.address)
+            .bind(&lr.topic0)
+            .bind(&lr.topic1)
+            .bind(&lr.topic2)
+            .bind(&lr.topic3)
+            .bind(&lr.data)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+
+    // Insert signet events
+    for (idx, event) in data.signet_events.iter().enumerate() {
+        let er = SignetEventRow::from_event(event, bn, to_i64(idx as u64));
+        sqlx::query(
+            "INSERT INTO signet_events (
+                block_number, event_index, event_type, order_index,
+                rollup_chain_id, sender, to_address, value, gas,
+                max_fee_per_gas, data, rollup_recipient, amount, token
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+        )
+        .bind(er.block_number)
+        .bind(er.event_index)
+        .bind(er.event_type as i32)
+        .bind(er.order_index)
+        .bind(&er.rollup_chain_id)
+        .bind(&er.sender)
+        .bind(&er.to_address)
+        .bind(&er.value)
+        .bind(&er.gas)
+        .bind(&er.max_fee_per_gas)
+        .bind(&er.data)
+        .bind(&er.rollup_recipient)
+        .bind(&er.amount)
+        .bind(&er.token)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    // Insert zenith header
+    if let Some(zh) = &data.zenith_header {
+        let zr = ZenithHeaderRow::from_zenith(zh, bn);
+        sqlx::query(
+            "INSERT INTO zenith_headers (
+                block_number, host_block_number, rollup_chain_id,
+                gas_limit, reward_address, block_data_hash
+            ) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(zr.block_number)
+        .bind(&zr.host_block_number)
+        .bind(&zr.rollup_chain_id)
+        .bind(&zr.gas_limit)
+        .bind(&zr.reward_address)
+        .bind(&zr.block_data_hash)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    Ok(())
 }
 
 /// Convert a sqlx row to a TxRow.
@@ -869,9 +878,11 @@ impl ColdStorage for SqlColdBackend {
     }
 
     async fn append_blocks(&self, data: Vec<BlockData>) -> ColdResult<()> {
+        let mut tx = self.pool.begin().await.map_err(SqlColdError::from)?;
         for block_data in data {
-            self.insert_block(block_data).await?;
+            write_block_to_tx(&mut tx, block_data).await.map_err(ColdStorageError::from)?;
         }
+        tx.commit().await.map_err(SqlColdError::from)?;
         Ok(())
     }
 
