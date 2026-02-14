@@ -22,7 +22,6 @@ pub struct ColdHeaders;
 
 impl Table for ColdHeaders {
     const NAME: &'static str = "ColdHeaders";
-    const INT_KEY: bool = true;
     type Key = BlockNumber;
     type Value = SealedHeader;
 }
@@ -41,7 +40,6 @@ pub struct ColdTransactions;
 
 impl Table for ColdTransactions {
     const NAME: &'static str = "ColdTransactions";
-    const INT_KEY: bool = true;
     const DUAL_KEY_SIZE: Option<usize> = Some(<u64 as KeySer>::SIZE);
     type Key = BlockNumber;
     type Value = TransactionSigned;
@@ -63,7 +61,6 @@ pub struct ColdReceipts;
 
 impl Table for ColdReceipts {
     const NAME: &'static str = "ColdReceipts";
-    const INT_KEY: bool = true;
     const DUAL_KEY_SIZE: Option<usize> = Some(<u64 as KeySer>::SIZE);
     type Key = BlockNumber;
     type Value = IndexedReceipt;
@@ -85,7 +82,6 @@ pub struct ColdSignetEvents;
 
 impl Table for ColdSignetEvents {
     const NAME: &'static str = "ColdSignetEvents";
-    const INT_KEY: bool = true;
     const DUAL_KEY_SIZE: Option<usize> = Some(<u64 as KeySer>::SIZE);
     type Key = BlockNumber;
     type Value = DbSignetEvent;
@@ -105,7 +101,6 @@ pub struct ColdZenithHeaders;
 
 impl Table for ColdZenithHeaders {
     const NAME: &'static str = "ColdZenithHeaders";
-    const INT_KEY: bool = true;
     type Key = BlockNumber;
     type Value = DbZenithHeader;
 }
@@ -121,7 +116,6 @@ pub struct ColdTxSenders;
 
 impl Table for ColdTxSenders {
     const NAME: &'static str = "ColdTxSenders";
-    const INT_KEY: bool = true;
     const DUAL_KEY_SIZE: Option<usize> = Some(<u64 as KeySer>::SIZE);
     const FIXED_VAL_SIZE: Option<usize> = Some(20);
     type Key = BlockNumber;
@@ -205,21 +199,6 @@ mod tests {
         assert_dual_key::<ColdTxSenders>();
         assert_dual_key::<ColdReceipts>();
         assert_dual_key::<ColdSignetEvents>();
-    }
-
-    #[test]
-    fn test_int_key_tables() {
-        // Tables with int_key should have INT_KEY = true
-        const { assert!(ColdHeaders::INT_KEY) };
-        const { assert!(ColdTransactions::INT_KEY) };
-        const { assert!(ColdTxSenders::INT_KEY) };
-        const { assert!(ColdReceipts::INT_KEY) };
-        const { assert!(ColdSignetEvents::INT_KEY) };
-        const { assert!(ColdZenithHeaders::INT_KEY) };
-
-        // Non-int_key tables should have INT_KEY = false
-        const { assert!(!ColdBlockHashIndex::INT_KEY) };
-        const { assert!(!ColdTxHashIndex::INT_KEY) };
     }
 
     #[test]

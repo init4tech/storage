@@ -20,6 +20,7 @@ alloy.workspace = true
 signet-cold.workspace = true
 signet-hot.workspace = true
 signet-hot-mdbx.workspace = true
+signet-libmdbx.workspace = true
 signet-storage-types.workspace = true
 thiserror.workspace = true
 

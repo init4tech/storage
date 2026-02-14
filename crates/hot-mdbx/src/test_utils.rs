@@ -46,7 +46,7 @@ pub fn create_test_rw_db() -> (TempDir, DatabaseEnv) {
 
     // Create DUP_FIXED table for put_multiple tests
     // key2_size=8, value_size=8 means total fixed value size is 16 bytes
-    writer.queue_raw_create("put_multiple_test", Some(8), Some(8), false).unwrap();
+    writer.queue_raw_create("put_multiple_test", Some(8), Some(8)).unwrap();
 
     writer.commit().expect("Failed to commit table creation");
 
@@ -177,7 +177,7 @@ mod tests {
             let writer: Tx<Rw> = db.writer().unwrap();
 
             // Create table
-            writer.queue_raw_create(table_name, None, None, false).unwrap();
+            writer.queue_raw_create(table_name, None, None).unwrap();
 
             // Put raw data
             writer.queue_raw_put(table_name, key, value).unwrap();

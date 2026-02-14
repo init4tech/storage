@@ -2,7 +2,7 @@ macro_rules! table {
     (
         @implement
         #[doc = $doc:expr]
-        $name:ident, $key:ty, $value:ty, $dual:expr, $fixed:expr, $int_key:expr
+        $name:ident, $key:ty, $value:ty, $dual:expr, $fixed:expr
     ) => {
         #[doc = $doc]
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -12,7 +12,6 @@ macro_rules! table {
             const NAME: &'static str = stringify!($name);
             const FIXED_VAL_SIZE: Option<usize> = $fixed;
             const DUAL_KEY_SIZE: Option<usize> = $dual;
-            const INT_KEY: bool = $int_key;
             type Key = $key;
             type Value = $value;
         }
@@ -30,26 +29,7 @@ macro_rules! table {
             $key,
             $value,
             None,
-            None,
-            false
-        );
-
-        impl crate::tables::SingleKey for $name {}
-    };
-
-    // Single key with int_key
-    (
-        #[doc = $doc:expr]
-        $name:ident<$key:ty => $value:ty> int_key
-    ) => {
-        table!(@implement
-            #[doc = $doc]
-            $name,
-            $key,
-            $value,
-            None,
-            None,
-            true
+            None
         );
 
         impl crate::tables::SingleKey for $name {}
@@ -66,28 +46,7 @@ macro_rules! table {
             $key,
             $value,
             Some(<$subkey as crate::ser::KeySer>::SIZE),
-            None,
-            false
-        );
-
-        impl crate::tables::DualKey for $name {
-            type Key2 = $subkey;
-        }
-    };
-
-    // Dual key with int_key
-    (
-        #[doc = $doc:expr]
-        $name:ident<$key:ty => $subkey:ty => $value:ty> int_key
-    ) => {
-        table!(@implement
-            #[doc = $doc]
-            $name,
-            $key,
-            $value,
-            Some(<$subkey as crate::ser::KeySer>::SIZE),
-            None,
-            true
+            None
         );
 
         impl crate::tables::DualKey for $name {
@@ -106,28 +65,7 @@ macro_rules! table {
             $key,
             $value,
             Some(<$subkey as crate::ser::KeySer>::SIZE),
-            Some($fixed),
-            false
-        );
-
-        impl crate::tables::DualKey for $name {
-            type Key2 = $subkey;
-        }
-    };
-
-    // Dual key with fixed size and int_key
-    (
-        #[doc = $doc:expr]
-        $name:ident<$key:ty => $subkey:ty => $value:ty> is $fixed:expr, int_key
-    ) => {
-        table!(@implement
-            #[doc = $doc]
-            $name,
-            $key,
-            $value,
-            Some(<$subkey as crate::ser::KeySer>::SIZE),
-            Some($fixed),
-            true
+            Some($fixed)
         );
 
         impl crate::tables::DualKey for $name {
@@ -146,30 +84,7 @@ macro_rules! table {
             $key,
             $value,
             Some(<$subkey as crate::ser::KeySer>::SIZE),
-            Some($fixed),
-            false
-        );
-
-        impl crate::tables::DualKey for $name {
-            type Key2 = $subkey;
-            const TABLE_MODE: crate::tables::DualTableMode =
-                crate::tables::DualTableMode::$mode;
-        }
-    };
-
-    // Dual key with fixed size, mode, and int_key
-    (
-        #[doc = $doc:expr]
-        $name:ident<$key:ty => $subkey:ty => $value:ty> is $fixed:expr, $mode:ident, int_key
-    ) => {
-        table!(@implement
-            #[doc = $doc]
-            $name,
-            $key,
-            $value,
-            Some(<$subkey as crate::ser::KeySer>::SIZE),
-            Some($fixed),
-            true
+            Some($fixed)
         );
 
         impl crate::tables::DualKey for $name {

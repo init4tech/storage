@@ -304,7 +304,6 @@ macro_rules! impl_hot_kv_write {
                 table: &'static str,
                 dual_key: Option<usize>,
                 fixed_val: Option<usize>,
-                int_key: bool,
             ) -> Result<(), Self::Error> {
                 let mut flags = signet_libmdbx::DatabaseFlags::default();
 
@@ -322,10 +321,6 @@ macro_rules! impl_hot_kv_write {
                         // DUPSORT without DUP_FIXED - variable value size
                         fsi = FixedSizeInfo::DupSort { key2_size };
                     }
-                }
-
-                if int_key {
-                    flags.set(signet_libmdbx::DatabaseFlags::INTEGER_KEY, true);
                 }
 
                 self.inner.create_db(Some(table), flags)?;
