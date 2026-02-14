@@ -80,9 +80,9 @@
 //! [`HotKv`]: model::HotKv
 //! # Feature Flags
 //!
-//! - **`in-memory`**: Enables the [`mem`] module, providing an in-memory
+//! - **`in-memory`**: Enables the `mem` module, providing an in-memory
 //!   [`HotKv`] backend for testing.
-//! - **`test-utils`**: Enables the [`conformance`] module with backend
+//! - **`test-utils`**: Enables the `conformance` module with backend
 //!   conformance tests. Implies `in-memory`.
 //!
 //! [`DualKey`]: tables::DualKey

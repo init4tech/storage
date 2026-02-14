@@ -2,18 +2,18 @@
 //!
 //! The [`ColdStorage`] trait defines the interface that all cold storage
 //! backends must implement. Backends are responsible for data organization,
-//! indexing, and keying - the trait is agnostic to these implementation details.
+//! indexing, and keying - the trait is agnostic to these implementation
+//! details.
 
+use crate::{
+    ColdReceipt, ColdResult, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
+    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+};
 use alloy::primitives::BlockNumber;
 use signet_storage_types::{
     DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, RecoveredTx, SealedHeader,
 };
 use std::future::Future;
-
-use super::{
-    ColdReceipt, ColdResult, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
-    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
-};
 
 /// Data for appending a complete block to cold storage.
 #[derive(Debug, Clone)]
@@ -175,6 +175,8 @@ pub trait ColdStorage: Send + Sync + 'static {
     /// Returns [`ColdStorageError::TooManyLogs`] if the query would produce
     /// more than `max_logs` results. No partial results are returned — the
     /// caller must narrow the filter or increase the limit.
+    ///
+    /// [`ColdStorageError::TooManyLogs`]: crate::ColdStorageError::TooManyLogs
     fn get_logs(
         &self,
         filter: Filter,
