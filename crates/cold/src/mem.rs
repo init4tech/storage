@@ -5,8 +5,8 @@
 
 use crate::{
     BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter,
-    HeaderSpecifier, LogStream, ReceiptSpecifier, RpcLog, SignetEventsSpecifier,
-    TransactionSpecifier, ZenithHeaderSpecifier,
+    HeaderSpecifier, ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier,
+    ZenithHeaderSpecifier,
 };
 use alloy::primitives::{B256, BlockNumber};
 use signet_storage_types::{
@@ -15,16 +15,8 @@ use signet_storage_types::{
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
-    time::Duration,
 };
 use tokio::sync::RwLock;
-use tokio_stream::wrappers::ReceiverStream;
-
-/// Default deadline for streaming operations.
-const DEFAULT_STREAM_DEADLINE: Duration = Duration::from_secs(60);
-
-/// Channel buffer size for streaming operations.
-const STREAM_CHANNEL_BUFFER: usize = 256;
 
 /// Inner storage state.
 #[derive(Default)]
@@ -57,15 +49,11 @@ struct MemColdBackendInner {
 /// All operations are protected by an async read-write lock.
 pub struct MemColdBackend {
     inner: Arc<RwLock<MemColdBackendInner>>,
-    stream_deadline: Duration,
 }
 
 impl Default for MemColdBackend {
     fn default() -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(MemColdBackendInner::default())),
-            stream_deadline: DEFAULT_STREAM_DEADLINE,
-        }
+        Self { inner: Arc::new(RwLock::new(MemColdBackendInner::default())) }
     }
 }
 
@@ -73,12 +61,6 @@ impl MemColdBackend {
     /// Create a new empty in-memory backend.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Set the maximum duration for streaming operations.
-    pub const fn with_stream_deadline(mut self, deadline: Duration) -> Self {
-        self.stream_deadline = deadline;
-        self
     }
 }
 
@@ -264,94 +246,53 @@ impl ColdStorage for MemColdBackend {
         Ok(results)
     }
 
-    async fn stream_logs(&self, filter: Filter, max_logs: usize) -> ColdResult<LogStream> {
-        let inner = Arc::clone(&self.inner);
-        let deadline = tokio::time::Instant::now() + self.stream_deadline;
-        let (tx, rx) = tokio::sync::mpsc::channel(STREAM_CHANNEL_BUFFER);
+    async fn get_block_hash(&self, block: BlockNumber) -> ColdResult<Option<B256>> {
+        let inner = self.inner.read().await;
+        Ok(inner.headers.get(&block).map(|h| h.hash()))
+    }
 
-        // Resolve the `to` block and anchor hash during setup.
-        let from = filter.get_from_block().unwrap_or(0);
-        let to = filter.get_to_block().unwrap_or(u64::MAX);
-        let anchor_hash = {
-            let guard = inner.read().await;
-            // Find the last block <= `to` to anchor against.
-            guard.headers.range(..=to).next_back().map(|(_, h)| h.hash())
+    async fn get_logs_block(
+        &self,
+        filter: &Filter,
+        block_num: BlockNumber,
+        remaining: usize,
+    ) -> ColdResult<Vec<RpcLog>> {
+        let inner = self.inner.read().await;
+        let Some(receipts) = inner.receipts.get(&block_num) else {
+            return Ok(Vec::new());
         };
+        let (block_hash, block_timestamp) =
+            inner.headers.get(&block_num).map(|h| (h.hash(), h.timestamp)).unwrap_or_default();
 
-        tokio::spawn(async move {
-            let mut total = 0usize;
+        let logs: Vec<RpcLog> = receipts
+            .iter()
+            .enumerate()
+            .flat_map(|(tx_idx, ir)| {
+                let tx_hash = ir.tx_hash;
+                let first_log_index = ir.first_log_index;
+                ir.receipt
+                    .inner
+                    .logs
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, log)| filter.matches(log))
+                    .map(move |(log_idx, log)| RpcLog {
+                        inner: log.clone(),
+                        block_hash: Some(block_hash),
+                        block_number: Some(block_num),
+                        block_timestamp: Some(block_timestamp),
+                        transaction_hash: Some(tx_hash),
+                        transaction_index: Some(tx_idx as u64),
+                        log_index: Some(first_log_index + log_idx as u64),
+                        removed: false,
+                    })
+            })
+            .collect();
 
-            for block_num in from..=to {
-                // Deadline check.
-                if tokio::time::Instant::now() > deadline {
-                    let _ = tx.try_send(Err(ColdStorageError::StreamDeadlineExceeded));
-                    return;
-                }
-
-                let guard = inner.read().await;
-
-                // Re-anchor: verify the anchor block hash hasn't changed.
-                if let Some(expected) = anchor_hash {
-                    let current = guard.headers.range(..=to).next_back().map(|(_, h)| h.hash());
-                    if current != Some(expected) {
-                        let _ = tx.try_send(Err(ColdStorageError::ReorgDetected));
-                        return;
-                    }
-                }
-
-                let Some(receipts) = guard.receipts.get(&block_num) else {
-                    drop(guard);
-                    continue;
-                };
-
-                let (block_hash, block_timestamp) = guard
-                    .headers
-                    .get(&block_num)
-                    .map(|h| (h.hash(), h.timestamp))
-                    .unwrap_or_default();
-
-                let mut block_logs = Vec::new();
-                for (tx_idx, ir) in receipts.iter().enumerate() {
-                    for (log_idx, log) in ir.receipt.inner.logs.iter().enumerate() {
-                        if !filter.matches(log) {
-                            continue;
-                        }
-                        if total + block_logs.len() >= max_logs {
-                            let _ =
-                                tx.try_send(Err(ColdStorageError::TooManyLogs { limit: max_logs }));
-                            return;
-                        }
-                        block_logs.push(RpcLog {
-                            inner: log.clone(),
-                            block_hash: Some(block_hash),
-                            block_number: Some(block_num),
-                            block_timestamp: Some(block_timestamp),
-                            transaction_hash: Some(ir.tx_hash),
-                            transaction_index: Some(tx_idx as u64),
-                            log_index: Some(ir.first_log_index + log_idx as u64),
-                            removed: false,
-                        });
-                    }
-                }
-                // Drop the read guard before sending.
-                drop(guard);
-
-                total += block_logs.len();
-
-                for log in block_logs {
-                    match tokio::time::timeout_at(deadline, tx.send(Ok(log))).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(_)) => return,
-                        Err(_) => {
-                            let _ = tx.try_send(Err(ColdStorageError::StreamDeadlineExceeded));
-                            return;
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(ReceiverStream::new(rx))
+        if logs.len() > remaining {
+            return Err(ColdStorageError::TooManyLogs { limit: remaining });
+        }
+        Ok(logs)
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
@@ -449,6 +390,6 @@ mod test {
     #[tokio::test]
     async fn mem_backend_conformance() {
         let backend = MemColdBackend::new();
-        conformance(&backend).await.unwrap();
+        conformance(backend).await.unwrap();
     }
 }

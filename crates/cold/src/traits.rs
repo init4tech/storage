@@ -9,7 +9,7 @@ use crate::{
     ColdReceipt, ColdResult, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
-use alloy::primitives::BlockNumber;
+use alloy::primitives::{B256, BlockNumber};
 use signet_storage_types::{
     DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, RecoveredTx, SealedHeader,
 };
@@ -196,30 +196,32 @@ pub trait ColdStorage: Send + Sync + 'static {
         max_logs: usize,
     ) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send;
 
-    /// Stream logs matching a filter.
+    /// Get the hash of a block header by block number.
     ///
-    /// Returns a [`LogStream`] that yields matching logs in order of
-    /// `(block_number, tx_index, log_index)`. The stream produces
-    /// `Ok(log)` items until complete, or yields a final `Err(e)` on
-    /// failure.
-    ///
-    /// # Deadline
-    ///
-    /// Backends MUST enforce a wall-clock deadline on streaming to
-    /// prevent unbounded resource acquisition. The deadline duration
-    /// is a backend configuration option. The producer task enforces
-    /// the deadline independently of consumer polling, guaranteeing
-    /// resource release within the deadline period.
-    ///
-    /// # Resource Lifetime
-    ///
-    /// Backends SHOULD process one block at a time, releasing
-    /// resources (e.g., MDBX read transactions) between blocks.
-    fn stream_logs(
+    /// Returns `Ok(Some(hash))` if the block exists, `Ok(None)` if not.
+    /// Used by the streaming task for reorg detection.
+    fn get_block_hash(
         &self,
-        filter: Filter,
-        max_logs: usize,
-    ) -> impl Future<Output = ColdResult<LogStream>> + Send;
+        block: BlockNumber,
+    ) -> impl Future<Output = ColdResult<Option<B256>>> + Send;
+
+    /// Fetch matching logs from a single block.
+    ///
+    /// Returns logs ordered by `(tx_index, log_index)` within the block.
+    /// `remaining` is the maximum number of logs to return.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ColdStorageError::TooManyLogs`] if the block contains
+    /// more matching logs than `remaining`.
+    ///
+    /// [`ColdStorageError::TooManyLogs`]: crate::ColdStorageError::TooManyLogs
+    fn get_logs_block(
+        &self,
+        filter: &Filter,
+        block_num: BlockNumber,
+        remaining: usize,
+    ) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send;
 
     // --- Write operations ---
 
