@@ -16,10 +16,17 @@ pub enum MdbxColdError {
     /// Database is read-only.
     #[error("database is read-only")]
     ReadOnly,
+
+    /// Too many logs matched the filter.
+    #[error("too many logs: limit is {0}")]
+    TooManyLogs(usize),
 }
 
 impl From<MdbxColdError> for signet_cold::ColdStorageError {
     fn from(error: MdbxColdError) -> Self {
-        Self::Backend(Box::new(error))
+        match error {
+            MdbxColdError::TooManyLogs(limit) => Self::TooManyLogs { limit },
+            other => Self::Backend(Box::new(other)),
+        }
     }
 }

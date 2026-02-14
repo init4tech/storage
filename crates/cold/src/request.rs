@@ -113,6 +113,8 @@ pub enum ColdReadRequest {
     GetLogs {
         /// The log filter.
         filter: Box<Filter>,
+        /// Maximum number of logs to return.
+        max_logs: usize,
         /// The response channel.
         resp: Responder<Vec<RpcLog>>,
     },

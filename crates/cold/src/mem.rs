@@ -4,8 +4,9 @@
 //! It is primarily intended for testing and development.
 
 use crate::{
-    BlockData, ColdReceipt, ColdResult, ColdStorage, Confirmed, Filter, HeaderSpecifier,
-    ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter,
+    HeaderSpecifier, ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier,
+    ZenithHeaderSpecifier,
 };
 use alloy::primitives::{B256, BlockNumber};
 use signet_storage_types::{
@@ -205,7 +206,7 @@ impl ColdStorage for MemColdBackend {
         })
     }
 
-    async fn get_logs(&self, filter: Filter) -> ColdResult<Vec<RpcLog>> {
+    async fn get_logs(&self, filter: Filter, max_logs: usize) -> ColdResult<Vec<RpcLog>> {
         let inner = self.inner.read().await;
         let mut results = Vec::new();
 
@@ -216,24 +217,24 @@ impl ColdStorage for MemColdBackend {
                 inner.headers.get(&block_num).map(|h| (h.hash(), h.timestamp)).unwrap_or_default();
 
             for (tx_idx, ir) in receipts.iter().enumerate() {
-                results.extend(
-                    ir.receipt
-                        .inner
-                        .logs
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, log)| filter.matches(log))
-                        .map(|(log_idx, log)| RpcLog {
-                            inner: log.clone(),
-                            block_hash: Some(block_hash),
-                            block_number: Some(block_num),
-                            block_timestamp: Some(block_timestamp),
-                            transaction_hash: Some(ir.tx_hash),
-                            transaction_index: Some(tx_idx as u64),
-                            log_index: Some(ir.first_log_index + log_idx as u64),
-                            removed: false,
-                        }),
-                );
+                for (log_idx, log) in ir.receipt.inner.logs.iter().enumerate() {
+                    if !filter.matches(log) {
+                        continue;
+                    }
+                    results.push(RpcLog {
+                        inner: log.clone(),
+                        block_hash: Some(block_hash),
+                        block_number: Some(block_num),
+                        block_timestamp: Some(block_timestamp),
+                        transaction_hash: Some(ir.tx_hash),
+                        transaction_index: Some(tx_idx as u64),
+                        log_index: Some(ir.first_log_index + log_idx as u64),
+                        removed: false,
+                    });
+                    if results.len() > max_logs {
+                        return Err(ColdStorageError::TooManyLogs { limit: max_logs });
+                    }
+                }
             }
         }
 

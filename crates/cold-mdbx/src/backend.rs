@@ -435,7 +435,11 @@ impl MdbxColdBackend {
         Ok(())
     }
 
-    fn get_logs_inner(&self, filter: Filter) -> Result<Vec<signet_cold::RpcLog>, MdbxColdError> {
+    fn get_logs_inner(
+        &self,
+        filter: Filter,
+        max_logs: usize,
+    ) -> Result<Vec<signet_cold::RpcLog>, MdbxColdError> {
         let tx = self.env.tx()?;
         let mut results = Vec::new();
 
@@ -463,24 +467,26 @@ impl MdbxColdBackend {
 
             for item in receipt_cursor.iter_k2(&block_num)? {
                 let (tx_idx, ir) = item?;
-                results.extend(
-                    ir.receipt
-                        .inner
-                        .logs
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, log)| filter.matches(log))
-                        .map(|(log_idx, log)| signet_cold::RpcLog {
-                            inner: log.clone(),
-                            block_hash: Some(block_hash),
-                            block_number: Some(block_num),
-                            block_timestamp: Some(block_timestamp),
-                            transaction_hash: Some(ir.tx_hash),
-                            transaction_index: Some(tx_idx),
-                            log_index: Some(ir.first_log_index + log_idx as u64),
-                            removed: false,
-                        }),
-                );
+                let tx_hash = ir.tx_hash;
+                let first_log_index = ir.first_log_index;
+                for (log_idx, log) in ir.receipt.inner.logs.into_iter().enumerate() {
+                    if !filter.matches(&log) {
+                        continue;
+                    }
+                    if results.len() >= max_logs {
+                        return Err(MdbxColdError::TooManyLogs(max_logs));
+                    }
+                    results.push(signet_cold::RpcLog {
+                        inner: log,
+                        block_hash: Some(block_hash),
+                        block_number: Some(block_num),
+                        block_timestamp: Some(block_timestamp),
+                        transaction_hash: Some(tx_hash),
+                        transaction_index: Some(tx_idx),
+                        log_index: Some(first_log_index + log_idx as u64),
+                        removed: false,
+                    });
+                }
             }
         }
 
@@ -562,8 +568,12 @@ impl ColdStorage for MdbxColdBackend {
         Ok(headers)
     }
 
-    async fn get_logs(&self, filter: Filter) -> ColdResult<Vec<signet_cold::RpcLog>> {
-        Ok(self.get_logs_inner(filter)?)
+    async fn get_logs(
+        &self,
+        filter: Filter,
+        max_logs: usize,
+    ) -> ColdResult<Vec<signet_cold::RpcLog>> {
+        Ok(self.get_logs_inner(filter, max_logs)?)
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {

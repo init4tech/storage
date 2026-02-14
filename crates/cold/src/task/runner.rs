@@ -139,8 +139,8 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
             ColdReadRequest::GetZenithHeaders { spec, resp } => {
                 let _ = resp.send(self.backend.get_zenith_headers(spec).await);
             }
-            ColdReadRequest::GetLogs { filter, resp } => {
-                let _ = resp.send(self.backend.get_logs(*filter).await);
+            ColdReadRequest::GetLogs { filter, max_logs, resp } => {
+                let _ = resp.send(self.backend.get_logs(*filter, max_logs).await);
             }
             ColdReadRequest::GetLatestBlock { resp } => {
                 let _ = resp.send(self.backend.get_latest_block().await);
