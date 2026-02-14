@@ -387,11 +387,11 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     backend.append_block(block_801).await?;
 
     // --- Empty range returns empty ---
-    let empty = backend.get_logs(Filter::new().from_block(900).to_block(999)).await?;
+    let empty = backend.get_logs(Filter::new().from_block(900).to_block(999), usize::MAX).await?;
     assert!(empty.is_empty());
 
     // --- All logs in range 800..=801 (no address/topic filter) ---
-    let all = backend.get_logs(Filter::new().from_block(800).to_block(801)).await?;
+    let all = backend.get_logs(Filter::new().from_block(800).to_block(801), usize::MAX).await?;
     assert_eq!(all.len(), 4);
     // Verify ordering by (block_number, transaction_index)
     assert_eq!((all[0].block_number, all[0].transaction_index), (Some(800), Some(0)));
@@ -415,24 +415,32 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     assert_eq!(all[2].transaction_hash, Some(tx1_hash_800));
 
     // --- Block range filtering ---
-    let only_800 = backend.get_logs(Filter::new().from_block(800).to_block(800)).await?;
+    let only_800 =
+        backend.get_logs(Filter::new().from_block(800).to_block(800), usize::MAX).await?;
     assert_eq!(only_800.len(), 3);
 
     // --- Single address filter ---
-    let addr_a_logs =
-        backend.get_logs(Filter::new().from_block(800).to_block(801).address(addr_a)).await?;
+    let addr_a_logs = backend
+        .get_logs(Filter::new().from_block(800).to_block(801).address(addr_a), usize::MAX)
+        .await?;
     assert_eq!(addr_a_logs.len(), 2);
     assert!(addr_a_logs.iter().all(|l| l.inner.address == addr_a));
 
     // --- Multi-address filter ---
     let both_addr = backend
-        .get_logs(Filter::new().from_block(800).to_block(801).address(vec![addr_a, addr_b]))
+        .get_logs(
+            Filter::new().from_block(800).to_block(801).address(vec![addr_a, addr_b]),
+            usize::MAX,
+        )
         .await?;
     assert_eq!(both_addr.len(), 4);
 
     // --- Topic0 filter ---
     let transfers = backend
-        .get_logs(Filter::new().from_block(800).to_block(801).event_signature(topic0_transfer))
+        .get_logs(
+            Filter::new().from_block(800).to_block(801).event_signature(topic0_transfer),
+            usize::MAX,
+        )
         .await?;
     assert_eq!(transfers.len(), 3);
 
@@ -443,6 +451,7 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
                 .from_block(800)
                 .to_block(801)
                 .event_signature(vec![topic0_transfer, topic0_approval]),
+            usize::MAX,
         )
         .await?;
     assert_eq!(transfer_or_approval.len(), 4);
@@ -455,14 +464,16 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
                 .to_block(801)
                 .event_signature(topic0_transfer)
                 .topic1(topic1_sender),
+            usize::MAX,
         )
         .await?;
     assert_eq!(specific.len(), 1);
     assert_eq!(specific[0].inner.address, addr_a);
 
     // --- Topic1 filter with topic0 wildcard ---
-    let by_sender =
-        backend.get_logs(Filter::new().from_block(800).to_block(801).topic1(topic1_sender)).await?;
+    let by_sender = backend
+        .get_logs(Filter::new().from_block(800).to_block(801).topic1(topic1_sender), usize::MAX)
+        .await?;
     assert_eq!(by_sender.len(), 1);
 
     // --- Combined address + topic filter ---
@@ -473,9 +484,17 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
                 .to_block(801)
                 .address(addr_a)
                 .event_signature(topic0_transfer),
+            usize::MAX,
         )
         .await?;
     assert_eq!(addr_a_transfers.len(), 2);
+
+    // --- max_logs limits results ---
+    let limited = backend.get_logs(Filter::new().from_block(800).to_block(801), 2).await?;
+    assert_eq!(limited.len(), 2);
+    // Verify the 2 returned are the first 2 in order
+    assert_eq!((limited[0].block_number, limited[0].log_index), (Some(800), Some(0)));
+    assert_eq!((limited[1].block_number, limited[1].log_index), (Some(800), Some(1)));
 
     Ok(())
 }

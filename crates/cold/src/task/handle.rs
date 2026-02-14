@@ -254,11 +254,11 @@ impl ColdStorageReadHandle {
 
     /// Filter logs by block range, address, and topics.
     ///
-    /// Follows `eth_getLogs` semantics. Returns all matching logs ordered
-    /// by (block_number, tx_index, log_index).
-    pub async fn get_logs(&self, filter: Filter) -> ColdResult<Vec<RpcLog>> {
+    /// Follows `eth_getLogs` semantics. Returns at most `max_logs` matching
+    /// logs ordered by `(block_number, tx_index, log_index)`.
+    pub async fn get_logs(&self, filter: Filter, max_logs: usize) -> ColdResult<Vec<RpcLog>> {
         let (resp, rx) = oneshot::channel();
-        self.send(ColdReadRequest::GetLogs { filter: Box::new(filter), resp }, rx).await
+        self.send(ColdReadRequest::GetLogs { filter: Box::new(filter), max_logs, resp }, rx).await
     }
 
     // ==========================================================================

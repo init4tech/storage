@@ -1139,7 +1139,7 @@ impl ColdStorage for SqlColdBackend {
         rows.iter().map(|r| zenith_header_from_row(r).map_err(ColdStorageError::from)).collect()
     }
 
-    async fn get_logs(&self, filter: Filter) -> ColdResult<Vec<RpcLog>> {
+    async fn get_logs(&self, filter: Filter, max_logs: usize) -> ColdResult<Vec<RpcLog>> {
         let from = filter.get_from_block().unwrap_or(0);
         let to = filter.get_to_block().unwrap_or(u64::MAX);
 
@@ -1213,10 +1213,20 @@ impl ColdStorage for SqlColdBackend {
 
         sql.push_str(" ORDER BY l.block_number, l.tx_index, l.log_index");
 
+        // Apply LIMIT to let the database short-circuit early.
+        // Only add when max_logs fits in i64 to avoid overflow.
+        let use_limit = max_logs <= i64::MAX as usize;
+        if use_limit {
+            sql.push_str(&format!(" LIMIT ${idx}"));
+        }
+
         // Bind parameters and execute.
         let mut query = sqlx::query(&sql).bind(to_i64(from)).bind(to_i64(to));
         for param in &params {
             query = query.bind(param.as_slice());
+        }
+        if use_limit {
+            query = query.bind(max_logs as i64);
         }
 
         let rows = query.fetch_all(&self.pool).await.map_err(SqlColdError::from)?;

@@ -168,8 +168,16 @@ pub trait ColdStorage: Send + Sync + 'static {
     /// Filter logs by block range, address, and topics.
     ///
     /// Follows `eth_getLogs` semantics: returns all logs matching the
-    /// filter criteria, ordered by (block_number, tx_index, log_index).
-    fn get_logs(&self, filter: Filter) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send;
+    /// filter criteria, ordered by `(block_number, tx_index, log_index)`.
+    ///
+    /// Backends MUST return at most `max_logs` results. If the limit falls
+    /// mid-block, partial block logs are returned (hard cut at exactly
+    /// `max_logs`).
+    fn get_logs(
+        &self,
+        filter: Filter,
+        max_logs: usize,
+    ) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send;
 
     // --- Write operations ---
 
