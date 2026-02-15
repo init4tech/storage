@@ -946,23 +946,37 @@ async fn insert_signet_event(
 /// For a single value, generates ` AND {column} = ${idx}`.
 /// For multiple values, generates ` AND {column} IN (${idx}, ...)`.
 /// Returns the next available parameter index.
-fn append_filter_clause(
+/// Append a SQL filter clause for a set of byte-encoded values.
+///
+/// For a single value, generates ` AND {column} = ${idx}`.
+/// For multiple values, generates ` AND {column} IN (${idx}, ...)`.
+/// Returns the next available parameter index.
+fn append_filter_clause<'a>(
     clause: &mut String,
     params: &mut Vec<Vec<u8>>,
-    idx: u32,
+    mut idx: u32,
     column: &str,
-    values: &[&[u8]],
+    values: impl ExactSizeIterator<Item = &'a [u8]>,
 ) -> u32 {
-    if values.len() == 1 {
-        clause.push_str(&format!(" AND {column} = ${idx}"));
-        params.push(values[0].to_vec());
+    use std::fmt::Write;
+
+    let len = values.len();
+    if len == 1 {
+        write!(clause, " AND {column} = ${idx}").unwrap();
+        values.for_each(|v: &[u8]| params.push(v.to_vec()));
         return idx + 1;
     }
-    let placeholders: String =
-        (0..values.len()).map(|i| format!("${}", idx + i as u32)).collect::<Vec<_>>().join(", ");
-    clause.push_str(&format!(" AND {column} IN ({placeholders})"));
-    params.extend(values.iter().map(|v| v.to_vec()));
-    idx + values.len() as u32
+    write!(clause, " AND {column} IN (").unwrap();
+    for (i, v) in values.enumerate() {
+        if i > 0 {
+            clause.push_str(", ");
+        }
+        write!(clause, "${idx}").unwrap();
+        params.push(v.to_vec());
+        idx += 1;
+    }
+    clause.push(')');
+    idx
 }
 
 fn build_log_filter_clause(filter: &Filter, start_idx: u32) -> (String, Vec<Vec<u8>>) {
@@ -971,8 +985,13 @@ fn build_log_filter_clause(filter: &Filter, start_idx: u32) -> (String, Vec<Vec<
     let mut idx = start_idx;
 
     if !filter.address.is_empty() {
-        let addrs: Vec<&[u8]> = filter.address.iter().map(|a| a.as_slice()).collect();
-        idx = append_filter_clause(&mut clause, &mut params, idx, "l.address", &addrs);
+        idx = append_filter_clause(
+            &mut clause,
+            &mut params,
+            idx,
+            "l.address",
+            filter.address.iter().map(|a| a.as_slice()),
+        );
     }
 
     let topic_cols = ["l.topic0", "l.topic1", "l.topic2", "l.topic3"];
@@ -980,8 +999,13 @@ fn build_log_filter_clause(filter: &Filter, start_idx: u32) -> (String, Vec<Vec<
         if topic_filter.is_empty() {
             continue;
         }
-        let values: Vec<&[u8]> = topic_filter.iter().map(|v| v.as_slice()).collect();
-        idx = append_filter_clause(&mut clause, &mut params, idx, topic_cols[i], &values);
+        idx = append_filter_clause(
+            &mut clause,
+            &mut params,
+            idx,
+            topic_cols[i],
+            topic_filter.iter().map(|v| v.as_slice()),
+        );
     }
 
     (clause, params)

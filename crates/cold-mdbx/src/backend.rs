@@ -96,33 +96,30 @@ fn collect_logs_block(
     let block_hash = sealed.hash();
     let block_timestamp = sealed.timestamp;
 
-    // Collect the fallible MDBX iterator first (borrows the transaction),
-    // then flat_map over the inner logs functionally.
-    let receipts: Vec<_> =
-        tx.traverse_dual::<ColdReceipts>()?.iter_k2(&block_num)?.collect::<Result<_, _>>()?;
-
-    let logs: Vec<RpcLog> = receipts
-        .into_iter()
-        .flat_map(|(tx_idx, ir): (u64, IndexedReceipt)| {
-            let tx_hash = ir.tx_hash;
-            let first_log_index = ir.first_log_index;
-            ir.receipt.inner.logs.into_iter().enumerate().filter_map(move |(log_idx, log)| {
-                filter.matches(&log).then(|| RpcLog {
-                    inner: log,
-                    block_hash: Some(block_hash),
-                    block_number: Some(block_num),
-                    block_timestamp: Some(block_timestamp),
-                    transaction_hash: Some(tx_hash),
-                    transaction_index: Some(tx_idx),
-                    log_index: Some(first_log_index + log_idx as u64),
-                    removed: false,
-                })
-            })
-        })
-        .collect();
-
-    if logs.len() > remaining {
-        return Err(MdbxColdError::TooManyLogs(remaining));
+    let mut logs = Vec::new();
+    let mut cursor = tx.traverse_dual::<ColdReceipts>()?;
+    for result in cursor.iter_k2(&block_num)? {
+        let (tx_idx, ir): (u64, IndexedReceipt) = result?;
+        let tx_hash = ir.tx_hash;
+        let first_log_index = ir.first_log_index;
+        for (log_idx, log) in ir.receipt.inner.logs.into_iter().enumerate() {
+            if !filter.matches(&log) {
+                continue;
+            }
+            if logs.len() >= remaining {
+                return Err(MdbxColdError::TooManyLogs(remaining));
+            }
+            logs.push(RpcLog {
+                inner: log,
+                block_hash: Some(block_hash),
+                block_number: Some(block_num),
+                block_timestamp: Some(block_timestamp),
+                transaction_hash: Some(tx_hash),
+                transaction_index: Some(tx_idx),
+                log_index: Some(first_log_index + log_idx as u64),
+                removed: false,
+            });
+        }
     }
     Ok(logs)
 }
@@ -197,11 +194,8 @@ fn produce_log_stream_blocking(
         let block_hash = sealed.hash();
         let block_timestamp = sealed.timestamp;
 
-        let receipts: Vec<_> = match receipt_cursor
-            .iter_k2(&block_num)
-            .and_then(|iter| iter.collect::<Result<_, _>>())
-        {
-            Ok(v) => v,
+        let iter = match receipt_cursor.iter_k2(&block_num) {
+            Ok(iter) => iter,
             Err(e) => {
                 let _ =
                     sender.blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
@@ -212,7 +206,15 @@ fn produce_log_stream_blocking(
         let remaining = max_logs.saturating_sub(total);
         let mut block_count = 0usize;
 
-        for (tx_idx, ir) in receipts.into_iter().map(|(idx, ir): (u64, IndexedReceipt)| (idx, ir)) {
+        for result in iter {
+            let (tx_idx, ir): (u64, IndexedReceipt) = match result {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = sender
+                        .blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
+                    return;
+                }
+            };
             let tx_hash = ir.tx_hash;
             let first_log_index = ir.first_log_index;
             for (log_idx, log) in ir.receipt.inner.logs.into_iter().enumerate() {
