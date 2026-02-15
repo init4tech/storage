@@ -166,7 +166,7 @@ fn produce_log_stream_blocking(
                 block_count += 1;
                 if block_count > remaining {
                     let _ = sender
-                        .blocking_send(Err(ColdStorageError::TooManyLogs { limit: remaining }));
+                        .blocking_send(Err(ColdStorageError::TooManyLogs { limit: max_logs }));
                     return;
                 }
                 let rpc_log = RpcLog {

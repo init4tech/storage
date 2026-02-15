@@ -59,6 +59,10 @@ pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
         let block_filter = filter.clone().from_block(block_num).to_block(block_num);
         let block_logs = match backend.get_logs(block_filter, remaining).await {
             Ok(logs) => logs,
+            Err(ColdStorageError::TooManyLogs { .. }) => {
+                let _ = sender.send(Err(ColdStorageError::TooManyLogs { limit: max_logs })).await;
+                return;
+            }
             Err(e) => {
                 let _ = sender.send(Err(e)).await;
                 return;

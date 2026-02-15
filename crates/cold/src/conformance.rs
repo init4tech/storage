@@ -588,5 +588,25 @@ pub async fn test_stream_logs(handle: &ColdStorageHandle) -> ColdResult<()> {
     let result = collect_stream(stream).await;
     assert!(matches!(result, Err(ColdStorageError::TooManyLogs { limit: 2 })));
 
+    // --- max_logs across block boundary: limit reports the original max_logs ---
+    // Block 860 has 2 logs, block 861 has 2 logs.  With max_logs=3 the limit
+    // is exceeded during block 861 and the error must report `limit: 3`.
+    let receipts_860 = vec![make_receipt_from_logs(vec![
+        make_test_log(addr_a, vec![topic0_transfer], vec![10]),
+        make_test_log(addr_b, vec![topic0_transfer], vec![11]),
+    ])];
+    let receipts_861 = vec![make_receipt_from_logs(vec![
+        make_test_log(addr_a, vec![topic0_transfer], vec![12]),
+        make_test_log(addr_b, vec![topic0_transfer], vec![13]),
+    ])];
+    handle.append_block(make_test_block_with_receipts(860, receipts_860)).await?;
+    handle.append_block(make_test_block_with_receipts(861, receipts_861)).await?;
+
+    let stream = handle
+        .stream_logs(Filter::new().from_block(860).to_block(861), 3, Duration::from_secs(60))
+        .await?;
+    let result = collect_stream(stream).await;
+    assert!(matches!(result, Err(ColdStorageError::TooManyLogs { limit: 3 })));
+
     Ok(())
 }
