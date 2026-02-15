@@ -10,15 +10,15 @@ use crate::columns::{
     COL_BENEFICIARY, COL_BLOB_GAS_USED, COL_BLOB_VERSIONED_HASHES, COL_BLOCK_DATA_HASH,
     COL_BLOCK_HASH, COL_BLOCK_LOG_INDEX, COL_BLOCK_NUMBER, COL_BLOCK_TIMESTAMP, COL_CHAIN_ID,
     COL_CNT, COL_CUMULATIVE_GAS_USED, COL_DATA, COL_DIFFICULTY, COL_EVENT_TYPE,
-    COL_EXCESS_BLOB_GAS, COL_EXTRA_DATA, COL_FROM_ADDRESS, COL_GAS, COL_GAS_LIMIT, COL_GAS_PRICE,
-    COL_GAS_USED, COL_HOST_BLOCK_NUMBER, COL_INPUT, COL_LOG_COUNT, COL_LOGS_BLOOM, COL_MAX_BN,
-    COL_MAX_FEE_PER_BLOB_GAS, COL_MAX_FEE_PER_GAS, COL_MAX_PRIORITY_FEE_PER_GAS, COL_MIX_HASH,
-    COL_NONCE, COL_OMMERS_HASH, COL_ORDER_INDEX, COL_PARENT_BEACON_BLOCK_ROOT, COL_PARENT_HASH,
-    COL_PRIOR_GAS, COL_RECEIPTS_ROOT, COL_REQUESTS_HASH, COL_REWARD_ADDRESS, COL_ROLLUP_CHAIN_ID,
-    COL_ROLLUP_RECIPIENT, COL_SENDER, COL_SIG_R, COL_SIG_S, COL_SIG_Y_PARITY, COL_STATE_ROOT,
-    COL_SUCCESS, COL_TIMESTAMP, COL_TO_ADDRESS, COL_TOKEN, COL_TOPIC0, COL_TOPIC1, COL_TOPIC2,
-    COL_TOPIC3, COL_TRANSACTIONS_ROOT, COL_TX_HASH, COL_TX_INDEX, COL_TX_TYPE, COL_VALUE,
-    COL_WITHDRAWALS_ROOT,
+    COL_EXCESS_BLOB_GAS, COL_EXTRA_DATA, COL_FIRST_LOG_INDEX, COL_FROM_ADDRESS, COL_GAS,
+    COL_GAS_LIMIT, COL_GAS_PRICE, COL_GAS_USED, COL_HOST_BLOCK_NUMBER, COL_INPUT, COL_LOGS_BLOOM,
+    COL_MAX_BN, COL_MAX_FEE_PER_BLOB_GAS, COL_MAX_FEE_PER_GAS, COL_MAX_PRIORITY_FEE_PER_GAS,
+    COL_MIX_HASH, COL_NONCE, COL_OMMERS_HASH, COL_ORDER_INDEX, COL_PARENT_BEACON_BLOCK_ROOT,
+    COL_PARENT_HASH, COL_PRIOR_GAS, COL_RECEIPTS_ROOT, COL_REQUESTS_HASH, COL_REWARD_ADDRESS,
+    COL_ROLLUP_CHAIN_ID, COL_ROLLUP_RECIPIENT, COL_SENDER, COL_SIG_R, COL_SIG_S, COL_SIG_Y_PARITY,
+    COL_STATE_ROOT, COL_SUCCESS, COL_TIMESTAMP, COL_TO_ADDRESS, COL_TOKEN, COL_TOPIC0, COL_TOPIC1,
+    COL_TOPIC2, COL_TOPIC3, COL_TRANSACTIONS_ROOT, COL_TX_HASH, COL_TX_INDEX, COL_TX_TYPE,
+    COL_VALUE, COL_WITHDRAWALS_ROOT,
 };
 use crate::convert::{
     EVENT_ENTER, EVENT_ENTER_TOKEN, EVENT_TRANSACT, build_receipt, decode_access_list_or_empty,
@@ -71,6 +71,7 @@ use sqlx::{AnyPool, Row};
 #[derive(Debug, Clone)]
 pub struct SqlColdBackend {
     pool: AnyPool,
+    is_postgres: bool,
 }
 
 impl SqlColdBackend {
@@ -97,8 +98,9 @@ impl SqlColdBackend {
         };
         // Execute via pool to ensure the migration uses the same
         // connection that subsequent queries will use.
+        let is_postgres = backend == "PostgreSQL";
         sqlx::raw_sql(migration).execute(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self { pool, is_postgres })
     }
 
     /// Connect to a database URL and create the backend.
@@ -162,6 +164,119 @@ impl SqlColdBackend {
         write_block_to_tx(&mut tx, data).await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    // ========================================================================
+    // Streaming helpers
+    // ========================================================================
+
+    /// Stream logs using a PostgreSQL REPEATABLE READ transaction.
+    ///
+    /// The transaction provides a consistent snapshot across all per-block
+    /// queries, eliminating the need for anchor-hash reorg detection.
+    /// Rows are streamed individually rather than materialised per block.
+    #[cfg(feature = "postgres")]
+    #[allow(clippy::too_many_arguments)]
+    async fn produce_log_stream_pg(
+        &self,
+        filter: &Filter,
+        from: BlockNumber,
+        to: BlockNumber,
+        max_logs: usize,
+        sender: tokio::sync::mpsc::Sender<ColdResult<RpcLog>>,
+        deadline: tokio::time::Instant,
+    ) {
+        use tokio_stream::StreamExt;
+
+        let mut tx = match self.pool.begin().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                let _ = sender.send(Err(ColdStorageError::backend(SqlColdError::from(e)))).await;
+                return;
+            }
+        };
+
+        if let Err(e) =
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ").execute(&mut *tx).await
+        {
+            let _ = sender.send(Err(ColdStorageError::backend(SqlColdError::from(e)))).await;
+            return;
+        }
+
+        let (filter_clause, filter_params) = build_log_filter_clause(filter, 2);
+        let data_sql = format!(
+            "SELECT l.*, h.block_hash, h.timestamp AS block_timestamp, t.tx_hash, \
+               (r.first_log_index + l.log_index) AS block_log_index \
+             FROM logs l \
+             JOIN headers h ON l.block_number = h.block_number \
+             JOIN transactions t ON l.block_number = t.block_number \
+               AND l.tx_index = t.tx_index \
+             JOIN receipts r ON l.block_number = r.block_number \
+               AND l.tx_index = r.tx_index \
+             WHERE l.block_number = $1{filter_clause} \
+             ORDER BY l.tx_index, l.log_index"
+        );
+
+        let mut total = 0usize;
+
+        for block_num in from..=to {
+            if tokio::time::Instant::now() > deadline {
+                let _ = sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
+                return;
+            }
+
+            let mut query = sqlx::query(&data_sql).bind(to_i64(block_num));
+            for param in &filter_params {
+                query = query.bind(param.as_slice());
+            }
+
+            let mut stream = query.fetch(&mut *tx);
+            while let Some(row_result) = stream.next().await {
+                let r = match row_result {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = sender
+                            .send(Err(ColdStorageError::backend(SqlColdError::from(e))))
+                            .await;
+                        return;
+                    }
+                };
+
+                total += 1;
+                if total > max_logs {
+                    let _ =
+                        sender.send(Err(ColdStorageError::TooManyLogs { limit: max_logs })).await;
+                    return;
+                }
+
+                let log = log_from_row(&r);
+                let block_number = from_i64(r.get::<i64, _>(COL_BLOCK_NUMBER));
+                let block_hash_bytes: Vec<u8> = r.get(COL_BLOCK_HASH);
+                let tx_hash_bytes: Vec<u8> = r.get(COL_TX_HASH);
+                let rpc_log = RpcLog {
+                    inner: log,
+                    block_hash: Some(B256::from_slice(&block_hash_bytes)),
+                    block_number: Some(block_number),
+                    block_timestamp: Some(from_i64(r.get::<i64, _>(COL_BLOCK_TIMESTAMP))),
+                    transaction_hash: Some(B256::from_slice(&tx_hash_bytes)),
+                    transaction_index: Some(from_i64(r.get::<i64, _>(COL_TX_INDEX))),
+                    log_index: Some(from_i64(r.get::<i64, _>(COL_BLOCK_LOG_INDEX))),
+                    removed: false,
+                };
+                match tokio::time::timeout_at(deadline, sender.send(Ok(rpc_log))).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => return,
+                    Err(_) => {
+                        let _ = sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
+                        return;
+                    }
+                }
+            }
+
+            if total >= max_logs {
+                return;
+            }
+        }
     }
 }
 
@@ -531,20 +646,24 @@ async fn write_block_to_tx(
         insert_transaction(tx, bn, to_i64(idx as u64), recovered_tx).await?;
     }
 
-    // Insert receipts and logs
+    // Insert receipts and logs, computing first_log_index as a running
+    // sum of log counts (same algorithm as the MDBX IndexedReceipt path).
+    let mut first_log_index = 0i64;
     for (idx, receipt) in data.receipts.iter().enumerate() {
         let tx_idx = to_i64(idx as u64);
         sqlx::query(
-            "INSERT INTO receipts (block_number, tx_index, tx_type, success, cumulative_gas_used)
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO receipts (block_number, tx_index, tx_type, success, cumulative_gas_used, first_log_index)
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(bn)
         .bind(tx_idx)
         .bind(receipt.tx_type as i32)
         .bind(receipt.inner.status.coerce_status() as i32)
         .bind(to_i64(receipt.inner.cumulative_gas_used))
+        .bind(first_log_index)
         .execute(&mut **tx)
         .await?;
+        first_log_index += receipt.inner.logs.len() as i64;
 
         for (log_idx, log) in receipt.inner.logs.iter().enumerate() {
             let topics = log.topics();
@@ -1029,12 +1148,11 @@ impl ColdStorage for SqlColdBackend {
         let built = build_receipt(tx_type, success, cumulative_gas_used, logs)
             .map_err(ColdStorageError::from)?;
 
-        // Compute gas_used and first_log_index by querying prior receipts
+        // Read first_log_index directly from the receipt row; compute
+        // gas_used from the prior receipt's cumulative gas.
+        let first_log_index: u64 = from_i64(rr.get::<i64, _>(COL_FIRST_LOG_INDEX));
         let prior = sqlx::query(
-            "SELECT CAST(SUM(
-                (SELECT COUNT(*) FROM logs l WHERE l.block_number = $1 AND l.tx_index = r.tx_index)
-             ) AS bigint) as log_count,
-             CAST(MAX(r.cumulative_gas_used) AS bigint) as prior_gas
+            "SELECT CAST(MAX(r.cumulative_gas_used) AS bigint) as prior_gas
              FROM receipts r WHERE r.block_number = $1 AND r.tx_index < $2",
         )
         .bind(to_i64(block))
@@ -1042,8 +1160,6 @@ impl ColdStorage for SqlColdBackend {
         .fetch_one(&self.pool)
         .await
         .map_err(SqlColdError::from)?;
-
-        let first_log_index: u64 = prior.get::<Option<i64>, _>(COL_LOG_COUNT).unwrap_or(0) as u64;
         let prior_cumulative_gas: u64 =
             prior.get::<Option<i64>, _>(COL_PRIOR_GAS).unwrap_or(0) as u64;
         let gas_used = built.inner.cumulative_gas_used - prior_cumulative_gas;
@@ -1220,15 +1336,13 @@ impl ColdStorage for SqlColdBackend {
         // for block_log_index (absolute position within block).
         let data_sql = format!(
             "SELECT l.*, h.block_hash, h.timestamp AS block_timestamp, t.tx_hash, \
-               (SELECT COUNT(*) FROM logs l2 \
-                WHERE l2.block_number = l.block_number \
-                  AND (l2.tx_index < l.tx_index \
-                       OR (l2.tx_index = l.tx_index AND l2.log_index < l.log_index)) \
-               ) AS block_log_index \
+               (r.first_log_index + l.log_index) AS block_log_index \
              FROM logs l \
              JOIN headers h ON l.block_number = h.block_number \
              JOIN transactions t ON l.block_number = t.block_number \
                AND l.tx_index = t.tx_index \
+             JOIN receipts r ON l.block_number = r.block_number \
+               AND l.tx_index = r.tx_index \
              WHERE {where_clause} \
              ORDER BY l.block_number, l.tx_index, l.log_index"
         );
@@ -1278,16 +1392,13 @@ impl ColdStorage for SqlColdBackend {
         let where_clause = format!("l.block_number = $1{filter_clause}");
         let data_sql = format!(
             "SELECT l.*, h.block_hash, h.timestamp AS block_timestamp, t.tx_hash, \
-               (SELECT COUNT(*) FROM logs l2 \
-                WHERE l2.block_number = l.block_number \
-                  AND (l2.tx_index < l.tx_index \
-                       OR (l2.tx_index = l.tx_index \
-                           AND l2.log_index < l.log_index)) \
-               ) AS block_log_index \
+               (r.first_log_index + l.log_index) AS block_log_index \
              FROM logs l \
              JOIN headers h ON l.block_number = h.block_number \
              JOIN transactions t ON l.block_number = t.block_number \
                AND l.tx_index = t.tx_index \
+             JOIN receipts r ON l.block_number = r.block_number \
+               AND l.tx_index = r.tx_index \
              WHERE {where_clause} \
              ORDER BY l.tx_index, l.log_index"
         );
@@ -1327,115 +1438,16 @@ impl ColdStorage for SqlColdBackend {
         filter: &Filter,
         from: BlockNumber,
         to: BlockNumber,
-        anchor_hash: B256,
         max_logs: usize,
         sender: tokio::sync::mpsc::Sender<ColdResult<RpcLog>>,
         deadline: tokio::time::Instant,
     ) {
-        let mut tx = match self.pool.begin().await {
-            Ok(tx) => tx,
-            Err(e) => {
-                let _ = sender.send(Err(ColdStorageError::backend(SqlColdError::from(e)))).await;
-                return;
-            }
-        };
-
-        // Reorg check within the transaction.
-        let hash_row = match sqlx::query("SELECT block_hash FROM headers WHERE block_number = $1")
-            .bind(to_i64(to))
-            .fetch_optional(&mut *tx)
-            .await
-        {
-            Ok(row) => row,
-            Err(e) => {
-                let _ = sender.send(Err(ColdStorageError::backend(SqlColdError::from(e)))).await;
-                return;
-            }
-        };
-        let matches = hash_row
-            .as_ref()
-            .map(|r| B256::from_slice(&r.get::<Vec<u8>, _>(COL_BLOCK_HASH)) == anchor_hash)
-            .unwrap_or(false);
-        if !matches {
-            let _ = sender.send(Err(ColdStorageError::ReorgDetected)).await;
-            return;
+        #[cfg(feature = "postgres")]
+        if self.is_postgres {
+            return self.produce_log_stream_pg(filter, from, to, max_logs, sender, deadline).await;
         }
-
-        let (filter_clause, filter_params) = build_log_filter_clause(filter, 2);
-        let data_sql = format!(
-            "SELECT l.*, h.block_hash, h.timestamp AS block_timestamp, t.tx_hash, \
-               (SELECT COUNT(*) FROM logs l2 \
-                WHERE l2.block_number = l.block_number \
-                  AND (l2.tx_index < l.tx_index \
-                       OR (l2.tx_index = l.tx_index \
-                           AND l2.log_index < l.log_index)) \
-               ) AS block_log_index \
-             FROM logs l \
-             JOIN headers h ON l.block_number = h.block_number \
-             JOIN transactions t ON l.block_number = t.block_number \
-               AND l.tx_index = t.tx_index \
-             WHERE l.block_number = $1{filter_clause} \
-             ORDER BY l.tx_index, l.log_index"
-        );
-
-        let mut total = 0usize;
-
-        for block_num in from..=to {
-            if tokio::time::Instant::now() > deadline {
-                let _ = sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
-                return;
-            }
-
-            let mut query = sqlx::query(&data_sql).bind(to_i64(block_num));
-            for param in &filter_params {
-                query = query.bind(param.as_slice());
-            }
-            let rows = match query.fetch_all(&mut *tx).await {
-                Ok(rows) => rows,
-                Err(e) => {
-                    let _ =
-                        sender.send(Err(ColdStorageError::backend(SqlColdError::from(e)))).await;
-                    return;
-                }
-            };
-
-            let remaining = max_logs.saturating_sub(total);
-            if rows.len() > remaining {
-                let _ = sender.send(Err(ColdStorageError::TooManyLogs { limit: remaining })).await;
-                return;
-            }
-
-            total += rows.len();
-
-            for r in rows {
-                let log = log_from_row(&r);
-                let block_number = from_i64(r.get::<i64, _>(COL_BLOCK_NUMBER));
-                let block_hash_bytes: Vec<u8> = r.get(COL_BLOCK_HASH);
-                let tx_hash_bytes: Vec<u8> = r.get(COL_TX_HASH);
-                let rpc_log = RpcLog {
-                    inner: log,
-                    block_hash: Some(B256::from_slice(&block_hash_bytes)),
-                    block_number: Some(block_number),
-                    block_timestamp: Some(from_i64(r.get::<i64, _>(COL_BLOCK_TIMESTAMP))),
-                    transaction_hash: Some(B256::from_slice(&tx_hash_bytes)),
-                    transaction_index: Some(from_i64(r.get::<i64, _>(COL_TX_INDEX))),
-                    log_index: Some(from_i64(r.get::<i64, _>(COL_BLOCK_LOG_INDEX))),
-                    removed: false,
-                };
-                match tokio::time::timeout_at(deadline, sender.send(Ok(rpc_log))).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(_)) => return,
-                    Err(_) => {
-                        let _ = sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
-                        return;
-                    }
-                }
-            }
-
-            if total >= max_logs {
-                return;
-            }
-        }
+        signet_cold::produce_log_stream_default(self, filter, from, to, max_logs, sender, deadline)
+            .await;
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {

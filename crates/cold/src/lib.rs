@@ -157,7 +157,7 @@ pub use specifier::{
 mod cold_receipt;
 pub use cold_receipt::ColdReceipt;
 mod traits;
-pub use traits::{BlockData, ColdStorage, LogStream};
+pub use traits::{BlockData, ColdStorage, LogStream, produce_log_stream_default};
 
 /// Task module containing the storage task runner and handles.
 pub mod task;

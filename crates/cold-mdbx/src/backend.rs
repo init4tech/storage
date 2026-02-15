@@ -142,15 +142,13 @@ fn check_block_hash(env: &DatabaseEnv, block: BlockNumber) -> Result<Option<B256
 /// Produce a log stream using a single MDBX read transaction.
 ///
 /// Runs synchronously on a blocking thread. The `Tx<Ro>` snapshot
-/// provides MVCC consistency — a single anchor hash check at the
-/// start is sufficient for reorg detection.
-#[allow(clippy::too_many_arguments)]
+/// provides MVCC consistency — the snapshot is self-consistent and
+/// no reorg detection is needed within it.
 fn produce_log_stream_blocking(
     env: Arc<DatabaseEnv>,
     filter: Filter,
     from: BlockNumber,
     to: BlockNumber,
-    anchor_hash: B256,
     max_logs: usize,
     sender: tokio::sync::mpsc::Sender<ColdResult<RpcLog>>,
     deadline: std::time::Instant,
@@ -162,19 +160,6 @@ fn produce_log_stream_blocking(
             return;
         }
     };
-
-    // Reorg check: verify anchor hash within this snapshot.
-    match tx.traverse::<ColdHeaders>().and_then(|mut c| c.exact(&to)) {
-        Ok(Some(h)) if h.hash() == anchor_hash => {}
-        Ok(_) => {
-            let _ = sender.blocking_send(Err(ColdStorageError::ReorgDetected));
-            return;
-        }
-        Err(e) => {
-            let _ = sender.blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
-            return;
-        }
-    }
 
     // Reuse cursors across blocks (same pattern as get_logs_inner).
     let mut header_cursor = match tx.traverse::<ColdHeaders>() {
@@ -790,7 +775,6 @@ impl ColdStorage for MdbxColdBackend {
         filter: &Filter,
         from: BlockNumber,
         to: BlockNumber,
-        anchor_hash: B256,
         max_logs: usize,
         sender: tokio::sync::mpsc::Sender<ColdResult<RpcLog>>,
         deadline: tokio::time::Instant,
@@ -799,16 +783,7 @@ impl ColdStorage for MdbxColdBackend {
         let filter = filter.clone();
         let std_deadline = deadline.into_std();
         let _ = tokio::task::spawn_blocking(move || {
-            produce_log_stream_blocking(
-                env,
-                filter,
-                from,
-                to,
-                anchor_hash,
-                max_logs,
-                sender,
-                std_deadline,
-            );
+            produce_log_stream_blocking(env, filter, from, to, max_logs, sender, std_deadline);
         })
         .await;
     }

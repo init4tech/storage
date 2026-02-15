@@ -23,6 +23,7 @@ signet-zenith = { workspace = true, optional = true }
 sqlx = { workspace = true }
 thiserror.workspace = true
 tokio = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
 
 [dev-dependencies]
 signet-cold = { workspace = true, features = ["test-utils"] }
@@ -30,6 +31,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [features]
 default = []
-postgres = ["sqlx/postgres", "sqlx/any", "sqlx/runtime-tokio-rustls", "dep:alloy", "dep:signet-storage-types", "dep:signet-zenith", "dep:tokio"]
+postgres = ["sqlx/postgres", "sqlx/any", "sqlx/runtime-tokio-rustls", "dep:alloy", "dep:signet-storage-types", "dep:signet-zenith", "dep:tokio", "dep:tokio-stream"]
 sqlite = ["sqlx/sqlite", "sqlx/any", "sqlx/runtime-tokio-rustls", "dep:alloy", "dep:signet-storage-types", "dep:signet-zenith", "dep:tokio"]
 test-utils = ["signet-cold/test-utils", "sqlite", "postgres"]

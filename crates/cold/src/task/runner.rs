@@ -173,9 +173,9 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
 
     /// Stream logs matching a filter.
     ///
-    /// Acquires a concurrency permit, resolves the block range, anchors
-    /// to the `to` block hash, then spawns a producer task that delegates
-    /// to [`ColdStorage::produce_log_stream`].
+    /// Acquires a concurrency permit, resolves the block range, then
+    /// spawns a producer task that delegates to
+    /// [`ColdStorage::produce_log_stream`].
     async fn handle_stream_logs(
         self: &Arc<Self>,
         filter: crate::Filter,
@@ -201,15 +201,6 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
             }
         };
 
-        // Anchor to the `to` block hash for reorg detection.
-        let Some(anchor_header) = self.backend.get_header(HeaderSpecifier::Number(to)).await?
-        else {
-            // Block disappeared between range resolution and anchor fetch.
-            let (_tx, rx) = mpsc::channel(1);
-            return Ok(ReceiverStream::new(rx));
-        };
-        let anchor_hash = anchor_header.hash();
-
         let effective = deadline.min(self.max_stream_deadline);
         let deadline_instant = tokio::time::Instant::now() + effective;
         let (sender, rx) = mpsc::channel(STREAM_CHANNEL_BUFFER);
@@ -219,15 +210,7 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
             let _permit = permit;
             inner
                 .backend
-                .produce_log_stream(
-                    &filter,
-                    from,
-                    to,
-                    anchor_hash,
-                    max_logs,
-                    sender,
-                    deadline_instant,
-                )
+                .produce_log_stream(&filter, from, to, max_logs, sender, deadline_instant)
                 .await;
         });
 

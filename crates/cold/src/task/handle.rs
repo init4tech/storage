@@ -275,6 +275,13 @@ impl ColdStorageReadHandle {
     ///
     /// The `deadline` is clamped to the task's configured maximum.
     ///
+    /// # Partial Delivery
+    ///
+    /// One or more `Ok(log)` items may be delivered before a terminal
+    /// `Err(...)`. Consumers must be prepared for partial results — for
+    /// example, a reorg or deadline expiry can interrupt a stream that
+    /// has already yielded some logs.
+    ///
     /// # Resource Management
     ///
     /// The stream holds a backend concurrency permit. Dropping the

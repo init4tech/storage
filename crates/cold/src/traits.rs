@@ -23,6 +23,13 @@ use tokio_stream::wrappers::ReceiverStream;
 /// until complete, or yields a final `Err(e)` on failure. The stream ends
 /// (`None`) when all matching logs have been delivered or after an error.
 ///
+/// # Partial Delivery
+///
+/// One or more `Ok(log)` items may be delivered before a terminal
+/// `Err(...)`. Consumers must be prepared for partial results — for
+/// example, a reorg or deadline expiry can interrupt a stream that has
+/// already yielded some logs.
+///
 /// # Resource Management
 ///
 /// The stream holds a backend concurrency permit. Dropping the stream
@@ -229,80 +236,30 @@ pub trait ColdStorage: Send + Sync + 'static {
     /// Produce a log stream by iterating blocks and sending matching logs.
     ///
     /// Implementations should hold a consistent read snapshot for the
-    /// duration when possible. The `anchor_hash` is the expected hash at
-    /// block `to` — implementations verify it for reorg detection.
+    /// duration when possible — backends with snapshot semantics (MDBX,
+    /// PostgreSQL with REPEATABLE READ) need no additional reorg detection.
     ///
-    /// The default implementation calls [`get_block_hash`] and
-    /// [`get_logs_block`] per block. Backends that can hold a single
-    /// transaction (MDBX, SQL) should override for efficiency and
-    /// consistency.
+    /// The default implementation calls [`produce_log_stream_default`],
+    /// which uses per-block [`get_block_hash`] checks for reorg detection.
+    /// Backends that hold a single transaction should override for
+    /// efficiency and consistency.
     ///
     /// All errors are sent through `sender`. When this method returns,
     /// the sender is dropped, closing the stream.
     ///
     /// [`get_block_hash`]: ColdStorage::get_block_hash
-    /// [`get_logs_block`]: ColdStorage::get_logs_block
+    /// [`produce_log_stream_default`]: crate::produce_log_stream_default
     #[allow(clippy::too_many_arguments)]
     fn produce_log_stream(
         &self,
         filter: &Filter,
         from: BlockNumber,
         to: BlockNumber,
-        anchor_hash: B256,
         max_logs: usize,
         sender: mpsc::Sender<ColdResult<RpcLog>>,
         deadline: tokio::time::Instant,
     ) -> impl Future<Output = ()> + Send {
-        async move {
-            let mut total = 0usize;
-
-            for block_num in from..=to {
-                if tokio::time::Instant::now() > deadline {
-                    let _ = sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
-                    return;
-                }
-
-                // Reorg detection: verify anchor block hash unchanged.
-                match self.get_block_hash(to).await {
-                    Ok(h) if h == Some(anchor_hash) => {}
-                    Ok(_) => {
-                        let _ = sender.send(Err(ColdStorageError::ReorgDetected)).await;
-                        return;
-                    }
-                    Err(e) => {
-                        let _ = sender.send(Err(e)).await;
-                        return;
-                    }
-                }
-
-                let remaining = max_logs.saturating_sub(total);
-                let block_logs = match self.get_logs_block(filter, block_num, remaining).await {
-                    Ok(logs) => logs,
-                    Err(e) => {
-                        let _ = sender.send(Err(e)).await;
-                        return;
-                    }
-                };
-
-                total += block_logs.len();
-
-                for log in block_logs {
-                    match tokio::time::timeout_at(deadline, sender.send(Ok(log))).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(_)) => return, // receiver dropped
-                        Err(_) => {
-                            let _ =
-                                sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
-                            return;
-                        }
-                    }
-                }
-
-                if total >= max_logs {
-                    return;
-                }
-            }
-        }
+        produce_log_stream_default(self, filter, from, to, max_logs, sender, deadline)
     }
 
     // --- Write operations ---
@@ -317,4 +274,83 @@ pub trait ColdStorage: Send + Sync + 'static {
     ///
     /// This removes block N+1 and higher from all tables. Used for reorg handling.
     fn truncate_above(&self, block: BlockNumber) -> impl Future<Output = ColdResult<()>> + Send;
+}
+
+/// Default log-streaming implementation for backends without snapshot
+/// semantics.
+///
+/// Captures an anchor hash from the `to` block at the start and
+/// re-checks it before each block to detect reorgs. Calls
+/// [`ColdStorage::get_logs_block`] per block.
+///
+/// Backends that hold a consistent read snapshot (MDBX, PostgreSQL
+/// with REPEATABLE READ) should override
+/// [`ColdStorage::produce_log_stream`] instead of using this function.
+#[allow(clippy::too_many_arguments)]
+pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
+    backend: &B,
+    filter: &Filter,
+    from: BlockNumber,
+    to: BlockNumber,
+    max_logs: usize,
+    sender: mpsc::Sender<ColdResult<RpcLog>>,
+    deadline: tokio::time::Instant,
+) {
+    // Capture anchor hash for reorg detection.
+    let anchor_hash = match backend.get_block_hash(to).await {
+        Ok(Some(h)) => h,
+        Ok(None) => return, // block doesn't exist; empty stream
+        Err(e) => {
+            let _ = sender.send(Err(e)).await;
+            return;
+        }
+    };
+
+    let mut total = 0usize;
+
+    for block_num in from..=to {
+        if tokio::time::Instant::now() > deadline {
+            let _ = sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
+            return;
+        }
+
+        // Reorg detection: verify anchor block hash unchanged.
+        match backend.get_block_hash(to).await {
+            Ok(Some(h)) if h == anchor_hash => {}
+            Ok(_) => {
+                let _ = sender.send(Err(ColdStorageError::ReorgDetected)).await;
+                return;
+            }
+            Err(e) => {
+                let _ = sender.send(Err(e)).await;
+                return;
+            }
+        }
+
+        let remaining = max_logs.saturating_sub(total);
+        let block_logs = match backend.get_logs_block(filter, block_num, remaining).await {
+            Ok(logs) => logs,
+            Err(e) => {
+                let _ = sender.send(Err(e)).await;
+                return;
+            }
+        };
+
+        total += block_logs.len();
+
+        for log in block_logs {
+            match tokio::time::timeout_at(deadline, sender.send(Ok(log))).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return, // receiver dropped
+                Err(_) => {
+                    let _ = sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
+                    return;
+                }
+            }
+        }
+
+        if total >= max_logs {
+            return;
+        }
+    }
 }

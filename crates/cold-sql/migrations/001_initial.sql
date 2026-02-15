@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS receipts (
     tx_type                   INTEGER NOT NULL,
     success                   INTEGER NOT NULL,
     cumulative_gas_used       INTEGER NOT NULL,
+    first_log_index           INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (block_number, tx_index)
 );
 
