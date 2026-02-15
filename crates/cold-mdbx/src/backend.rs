@@ -701,20 +701,20 @@ impl ColdStorage for MdbxColdBackend {
         Ok(self.get_logs_inner(filter, max_logs)?)
     }
 
-    async fn produce_log_stream(
-        &self,
-        filter: &Filter,
-        from: BlockNumber,
-        to: BlockNumber,
-        max_logs: usize,
-        sender: tokio::sync::mpsc::Sender<ColdResult<RpcLog>>,
-        deadline: tokio::time::Instant,
-    ) {
+    async fn produce_log_stream(&self, filter: &Filter, params: signet_cold::StreamParams) {
         let env = self.env.clone();
         let filter = filter.clone();
-        let std_deadline = deadline.into_std();
+        let std_deadline = params.deadline.into_std();
         let _ = tokio::task::spawn_blocking(move || {
-            produce_log_stream_blocking(env, filter, from, to, max_logs, sender, std_deadline);
+            produce_log_stream_blocking(
+                env,
+                filter,
+                params.from,
+                params.to,
+                params.max_logs,
+                params.sender,
+                std_deadline,
+            );
         })
         .await;
     }

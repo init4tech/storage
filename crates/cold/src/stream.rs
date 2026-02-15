@@ -4,6 +4,26 @@ use crate::{ColdResult, ColdStorage, ColdStorageError, Filter, HeaderSpecifier, 
 use alloy::primitives::BlockNumber;
 use tokio::sync::mpsc;
 
+/// Parameters for a log-streaming request.
+///
+/// Bundles the block range, limits, channel, and deadline that every
+/// [`ColdStorage::produce_log_stream`] implementation needs.
+#[derive(Debug)]
+pub struct StreamParams {
+    /// First block in range (inclusive).
+    pub from: BlockNumber,
+    /// Last block in range (inclusive).
+    pub to: BlockNumber,
+    /// Maximum number of matching logs before aborting with
+    /// [`ColdStorageError::TooManyLogs`].
+    pub max_logs: usize,
+    /// Channel for sending log results.
+    pub sender: mpsc::Sender<ColdResult<RpcLog>>,
+    /// Deadline after which the stream is aborted with
+    /// [`ColdStorageError::StreamDeadlineExceeded`].
+    pub deadline: tokio::time::Instant,
+}
+
 /// Log-streaming implementation for backends without snapshot semantics.
 ///
 /// Captures an anchor hash from the `to` block at the start and
@@ -14,16 +34,13 @@ use tokio::sync::mpsc;
 /// Backends that hold a consistent read snapshot (MDBX, PostgreSQL
 /// with REPEATABLE READ) should provide their own
 /// [`ColdStorage::produce_log_stream`] implementation instead.
-#[allow(clippy::too_many_arguments)]
 pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
     backend: &B,
     filter: &Filter,
-    from: BlockNumber,
-    to: BlockNumber,
-    max_logs: usize,
-    sender: mpsc::Sender<ColdResult<RpcLog>>,
-    deadline: tokio::time::Instant,
+    params: StreamParams,
 ) {
+    let StreamParams { from, to, max_logs, sender, deadline } = params;
+
     // Capture anchor hash for reorg detection.
     let anchor_hash = match backend.get_header(HeaderSpecifier::Number(to)).await {
         Ok(Some(h)) => h.hash(),

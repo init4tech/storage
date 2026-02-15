@@ -1387,21 +1387,21 @@ impl ColdStorage for SqlColdBackend {
             .collect::<ColdResult<Vec<_>>>()
     }
 
-    async fn produce_log_stream(
-        &self,
-        filter: &Filter,
-        from: BlockNumber,
-        to: BlockNumber,
-        max_logs: usize,
-        sender: tokio::sync::mpsc::Sender<ColdResult<RpcLog>>,
-        deadline: tokio::time::Instant,
-    ) {
+    async fn produce_log_stream(&self, filter: &Filter, params: signet_cold::StreamParams) {
         #[cfg(feature = "postgres")]
         if self.is_postgres {
-            return self.produce_log_stream_pg(filter, from, to, max_logs, sender, deadline).await;
+            return self
+                .produce_log_stream_pg(
+                    filter,
+                    params.from,
+                    params.to,
+                    params.max_logs,
+                    params.sender,
+                    params.deadline,
+                )
+                .await;
         }
-        signet_cold::produce_log_stream_default(self, filter, from, to, max_logs, sender, deadline)
-            .await;
+        signet_cold::produce_log_stream_default(self, filter, params).await;
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {

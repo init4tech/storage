@@ -246,16 +246,8 @@ impl ColdStorage for MemColdBackend {
         Ok(results)
     }
 
-    async fn produce_log_stream(
-        &self,
-        filter: &Filter,
-        from: BlockNumber,
-        to: BlockNumber,
-        max_logs: usize,
-        sender: tokio::sync::mpsc::Sender<ColdResult<RpcLog>>,
-        deadline: tokio::time::Instant,
-    ) {
-        crate::produce_log_stream_default(self, filter, from, to, max_logs, sender, deadline).await;
+    async fn produce_log_stream(&self, filter: &Filter, params: crate::StreamParams) {
+        crate::produce_log_stream_default(self, filter, params).await;
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {

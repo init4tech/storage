@@ -208,10 +208,9 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
 
         tokio::spawn(async move {
             let _permit = permit;
-            inner
-                .backend
-                .produce_log_stream(&filter, from, to, max_logs, sender, deadline_instant)
-                .await;
+            let params =
+                crate::StreamParams { from, to, max_logs, sender, deadline: deadline_instant };
+            inner.backend.produce_log_stream(&filter, params).await;
         });
 
         Ok(ReceiverStream::new(rx))

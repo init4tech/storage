@@ -7,14 +7,13 @@
 
 use crate::{
     ColdReceipt, ColdResult, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
-    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    SignetEventsSpecifier, StreamParams, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::primitives::BlockNumber;
 use signet_storage_types::{
     DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, RecoveredTx, SealedHeader,
 };
 use std::future::Future;
-use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 /// A stream of log results backed by a bounded channel.
@@ -223,15 +222,10 @@ pub trait ColdStorage: Send + Sync + 'static {
     /// [`get_header`]: ColdStorage::get_header
     /// [`get_logs`]: ColdStorage::get_logs
     /// [`produce_log_stream_default`]: crate::produce_log_stream_default
-    #[allow(clippy::too_many_arguments)]
     fn produce_log_stream(
         &self,
         filter: &Filter,
-        from: BlockNumber,
-        to: BlockNumber,
-        max_logs: usize,
-        sender: mpsc::Sender<ColdResult<RpcLog>>,
-        deadline: tokio::time::Instant,
+        params: StreamParams,
     ) -> impl Future<Output = ()> + Send;
 
     // --- Write operations ---
