@@ -17,10 +17,11 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 alloy.workspace = true
-bitflags = "2.10.0"
 bytes.workspace = true
 roaring = "0.11.3"
 serde.workspace = true
+signet-evm.workspace = true
+signet-types.workspace = true
 signet-zenith.workspace = true
 thiserror.workspace = true
 trevm.workspace = true

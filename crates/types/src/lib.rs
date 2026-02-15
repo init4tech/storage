@@ -15,19 +15,12 @@
 #![deny(unused_must_use, rust_2018_idioms)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod account;
-pub use account::Account;
-mod confirmed;
-pub use confirmed::Confirmed;
 mod execution;
 pub use ::alloy::consensus::transaction::Recovered;
 pub use execution::{ExecutedBlock, ExecutedBlockBuilder, MissingFieldError};
 
 mod alloy;
-pub use alloy::{Receipt, TransactionSigned};
-mod confirmation;
-pub use confirmation::ConfirmationMeta;
-
+pub use alloy::TransactionSigned;
 mod events;
 pub use events::{DbSignetEvent, DbZenithHeader};
 mod indexed_receipt;
@@ -36,12 +29,8 @@ mod int_list;
 pub use int_list::{BlockNumberList, IntegerList, IntegerListError};
 mod sharded;
 pub use sharded::ShardedKey;
-
-mod tx_location;
-pub use tx_location::TxLocation;
-
-mod util;
-pub use util::{EthereumHardfork, genesis_header};
+pub use signet_evm::{Account, EthereumHardfork, genesis_header};
+pub use signet_types::{ConfirmationMeta, Confirmed, Receipt, TxLocation};
 
 use ::alloy::consensus::{Header, Sealed};
 
