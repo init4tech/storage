@@ -16,6 +16,7 @@ use alloy::{
     },
 };
 use signet_storage_types::{Receipt, RecoveredTx, TransactionSigned};
+use std::time::Duration;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -567,7 +568,7 @@ pub async fn test_stream_logs(handle: &ColdStorageHandle) -> ColdResult<()> {
 
     for filter in filters {
         let expected = handle.get_logs(filter.clone(), usize::MAX).await?;
-        let stream = handle.stream_logs(filter, usize::MAX).await?;
+        let stream = handle.stream_logs(filter, usize::MAX, Duration::from_secs(60)).await?;
         let streamed = collect_stream(stream).await?;
         assert_eq!(expected.len(), streamed.len(), "stream length mismatch");
         for (e, s) in expected.iter().zip(streamed.iter()) {
@@ -581,7 +582,9 @@ pub async fn test_stream_logs(handle: &ColdStorageHandle) -> ColdResult<()> {
     }
 
     // --- max_logs: stream yields TooManyLogs error ---
-    let stream = handle.stream_logs(Filter::new().from_block(850).to_block(851), 2).await?;
+    let stream = handle
+        .stream_logs(Filter::new().from_block(850).to_block(851), 2, Duration::from_secs(60))
+        .await?;
     let result = collect_stream(stream).await;
     assert!(matches!(result, Err(ColdStorageError::TooManyLogs { limit: 2 })));
 

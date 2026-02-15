@@ -11,8 +11,9 @@ use crate::{
 use alloy::primitives::B256;
 use alloy::{consensus::transaction::Recovered, primitives::BlockNumber};
 use signet_cold::{
-    BlockData, ColdReceipt, ColdResult, ColdStorage, Confirmed, Filter, HeaderSpecifier,
-    ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter,
+    HeaderSpecifier, ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier,
+    ZenithHeaderSpecifier,
 };
 use signet_hot::{
     KeySer, MAX_KEY_SIZE, ValSer,
@@ -136,6 +137,130 @@ fn check_block_hash(env: &DatabaseEnv, block: BlockNumber) -> Result<Option<B256
         .exact(&block)
         .map(|opt| opt.map(|h| h.hash()))
         .map_err(Into::into)
+}
+
+/// Produce a log stream using a single MDBX read transaction.
+///
+/// Runs synchronously on a blocking thread. The `Tx<Ro>` snapshot
+/// provides MVCC consistency — a single anchor hash check at the
+/// start is sufficient for reorg detection.
+#[allow(clippy::too_many_arguments)]
+fn produce_log_stream_blocking(
+    env: Arc<DatabaseEnv>,
+    filter: Filter,
+    from: BlockNumber,
+    to: BlockNumber,
+    anchor_hash: B256,
+    max_logs: usize,
+    sender: tokio::sync::mpsc::Sender<ColdResult<RpcLog>>,
+    deadline: std::time::Instant,
+) {
+    let tx = match env.tx() {
+        Ok(tx) => tx,
+        Err(e) => {
+            let _ = sender.blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
+            return;
+        }
+    };
+
+    // Reorg check: verify anchor hash within this snapshot.
+    match tx.traverse::<ColdHeaders>().and_then(|mut c| c.exact(&to)) {
+        Ok(Some(h)) if h.hash() == anchor_hash => {}
+        Ok(_) => {
+            let _ = sender.blocking_send(Err(ColdStorageError::ReorgDetected));
+            return;
+        }
+        Err(e) => {
+            let _ = sender.blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
+            return;
+        }
+    }
+
+    // Reuse cursors across blocks (same pattern as get_logs_inner).
+    let mut header_cursor = match tx.traverse::<ColdHeaders>() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = sender.blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
+            return;
+        }
+    };
+    let mut receipt_cursor = match tx.traverse_dual::<ColdReceipts>() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = sender.blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
+            return;
+        }
+    };
+
+    let mut total = 0usize;
+
+    for block_num in from..=to {
+        if std::time::Instant::now() > deadline {
+            let _ = sender.blocking_send(Err(ColdStorageError::StreamDeadlineExceeded));
+            return;
+        }
+
+        let sealed = match header_cursor.exact(&block_num) {
+            Ok(Some(v)) => v,
+            Ok(None) => continue,
+            Err(e) => {
+                let _ =
+                    sender.blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
+                return;
+            }
+        };
+        let block_hash = sealed.hash();
+        let block_timestamp = sealed.timestamp;
+
+        let receipts: Vec<_> = match receipt_cursor
+            .iter_k2(&block_num)
+            .and_then(|iter| iter.collect::<Result<_, _>>())
+        {
+            Ok(v) => v,
+            Err(e) => {
+                let _ =
+                    sender.blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
+                return;
+            }
+        };
+
+        let remaining = max_logs.saturating_sub(total);
+        let mut block_count = 0usize;
+
+        for (tx_idx, ir) in receipts.into_iter().map(|(idx, ir): (u64, IndexedReceipt)| (idx, ir)) {
+            let tx_hash = ir.tx_hash;
+            let first_log_index = ir.first_log_index;
+            for (log_idx, log) in ir.receipt.inner.logs.into_iter().enumerate() {
+                if !filter.matches(&log) {
+                    continue;
+                }
+                block_count += 1;
+                if block_count > remaining {
+                    let _ = sender
+                        .blocking_send(Err(ColdStorageError::TooManyLogs { limit: remaining }));
+                    return;
+                }
+                let rpc_log = RpcLog {
+                    inner: log,
+                    block_hash: Some(block_hash),
+                    block_number: Some(block_num),
+                    block_timestamp: Some(block_timestamp),
+                    transaction_hash: Some(tx_hash),
+                    transaction_index: Some(tx_idx),
+                    log_index: Some(first_log_index + log_idx as u64),
+                    removed: false,
+                };
+                if sender.blocking_send(Ok(rpc_log)).is_err() {
+                    return; // receiver dropped
+                }
+            }
+        }
+
+        total += block_count;
+        if total >= max_logs {
+            return;
+        }
+    }
 }
 
 /// MDBX-based cold storage backend.
@@ -658,6 +783,34 @@ impl ColdStorage for MdbxColdBackend {
         remaining: usize,
     ) -> ColdResult<Vec<RpcLog>> {
         Ok(collect_logs_block(&self.env, filter, block_num, remaining)?)
+    }
+
+    async fn produce_log_stream(
+        &self,
+        filter: &Filter,
+        from: BlockNumber,
+        to: BlockNumber,
+        anchor_hash: B256,
+        max_logs: usize,
+        sender: tokio::sync::mpsc::Sender<ColdResult<RpcLog>>,
+        deadline: tokio::time::Instant,
+    ) {
+        let env = Arc::clone(&self.env);
+        let filter = filter.clone();
+        let std_deadline = deadline.into_std();
+        let _ = tokio::task::spawn_blocking(move || {
+            produce_log_stream_blocking(
+                env,
+                filter,
+                from,
+                to,
+                anchor_hash,
+                max_logs,
+                sender,
+                std_deadline,
+            );
+        })
+        .await;
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {

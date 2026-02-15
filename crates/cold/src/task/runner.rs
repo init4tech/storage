@@ -11,9 +11,10 @@
 //!
 //! # Log Streaming
 //!
-//! The task owns the streaming configuration (deadline, concurrency limit)
-//! and implements the streaming loop. Backends only provide per-block log
-//! fetching and block hash lookups.
+//! The task owns the streaming configuration (max deadline, concurrency
+//! limit) and delegates the streaming loop to the backend via
+//! [`ColdStorage::produce_log_stream`]. Callers supply a per-request
+//! deadline that is clamped to the task's configured maximum.
 
 use super::cache::ColdCache;
 use crate::{
@@ -28,6 +29,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, instrument};
 
+/// Default maximum deadline for streaming operations.
+const DEFAULT_MAX_STREAM_DEADLINE: Duration = Duration::from_secs(60);
+
 /// Channel size for cold storage read requests.
 const READ_CHANNEL_SIZE: usize = 256;
 
@@ -36,9 +40,6 @@ const WRITE_CHANNEL_SIZE: usize = 256;
 
 /// Maximum concurrent read request handlers.
 const MAX_CONCURRENT_READERS: usize = 64;
-
-/// Default deadline for streaming operations.
-const DEFAULT_STREAM_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Maximum concurrent streaming operations.
 const MAX_CONCURRENT_STREAMS: usize = 8;
@@ -53,7 +54,7 @@ const STREAM_CHANNEL_BUFFER: usize = 256;
 struct ColdStorageTaskInner<B> {
     backend: B,
     cache: Mutex<ColdCache>,
-    stream_deadline: Duration,
+    max_stream_deadline: Duration,
     stream_semaphore: Arc<Semaphore>,
 }
 
@@ -161,8 +162,8 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
             ColdReadRequest::GetLogs { filter, max_logs, resp } => {
                 let _ = resp.send(self.backend.get_logs(*filter, max_logs).await);
             }
-            ColdReadRequest::StreamLogs { filter, max_logs, resp } => {
-                let _ = resp.send(self.handle_stream_logs(*filter, max_logs).await);
+            ColdReadRequest::StreamLogs { filter, max_logs, deadline, resp } => {
+                let _ = resp.send(self.handle_stream_logs(*filter, max_logs, deadline).await);
             }
             ColdReadRequest::GetLatestBlock { resp } => {
                 let _ = resp.send(self.backend.get_latest_block().await);
@@ -173,12 +174,13 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
     /// Stream logs matching a filter.
     ///
     /// Acquires a concurrency permit, resolves the block range, anchors
-    /// to the `to` block hash, then spawns a producer task that iterates
-    /// block-by-block, fetching logs and sending them over a channel.
+    /// to the `to` block hash, then spawns a producer task that delegates
+    /// to [`ColdStorage::produce_log_stream`].
     async fn handle_stream_logs(
         self: &Arc<Self>,
         filter: crate::Filter,
         max_logs: usize,
+        deadline: Duration,
     ) -> ColdResult<LogStream> {
         let permit = self
             .stream_semaphore
@@ -199,59 +201,34 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
             }
         };
 
-        let anchor_hash = self.backend.get_block_hash(to).await?;
-        let deadline = tokio::time::Instant::now() + self.stream_deadline;
+        // Anchor to the `to` block hash for reorg detection.
+        let Some(anchor_header) = self.backend.get_header(HeaderSpecifier::Number(to)).await?
+        else {
+            // Block disappeared between range resolution and anchor fetch.
+            let (_tx, rx) = mpsc::channel(1);
+            return Ok(ReceiverStream::new(rx));
+        };
+        let anchor_hash = anchor_header.hash();
+
+        let effective = deadline.min(self.max_stream_deadline);
+        let deadline_instant = tokio::time::Instant::now() + effective;
         let (sender, rx) = mpsc::channel(STREAM_CHANNEL_BUFFER);
         let inner = Arc::clone(self);
 
         tokio::spawn(async move {
             let _permit = permit;
-            let mut total = 0usize;
-
-            for block_num in from..=to {
-                if tokio::time::Instant::now() > deadline {
-                    let _ = sender.try_send(Err(ColdStorageError::StreamDeadlineExceeded));
-                    return;
-                }
-
-                // Reorg detection: verify anchor block hash unchanged.
-                let current_hash = match inner.backend.get_block_hash(to).await {
-                    Ok(h) => h,
-                    Err(e) => {
-                        let _ = sender.try_send(Err(e));
-                        return;
-                    }
-                };
-                if current_hash != anchor_hash {
-                    let _ = sender.try_send(Err(ColdStorageError::ReorgDetected));
-                    return;
-                }
-
-                let block_logs = match inner
-                    .backend
-                    .get_logs_block(&filter, block_num, max_logs - total)
-                    .await
-                {
-                    Ok(logs) => logs,
-                    Err(e) => {
-                        let _ = sender.try_send(Err(e));
-                        return;
-                    }
-                };
-
-                total += block_logs.len();
-
-                for log in block_logs {
-                    match tokio::time::timeout_at(deadline, sender.send(Ok(log))).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(_)) => return,
-                        Err(_) => {
-                            let _ = sender.try_send(Err(ColdStorageError::StreamDeadlineExceeded));
-                            return;
-                        }
-                    }
-                }
-            }
+            inner
+                .backend
+                .produce_log_stream(
+                    &filter,
+                    from,
+                    to,
+                    anchor_hash,
+                    max_logs,
+                    sender,
+                    deadline_instant,
+                )
+                .await;
         });
 
         Ok(ReceiverStream::new(rx))
@@ -297,10 +274,10 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
 ///
 /// # Log Streaming
 ///
-/// The task owns the streaming configuration (deadline, concurrency limit)
-/// and implements the shared streaming loop. Backends provide per-block log
-/// fetching via [`ColdStorage::get_logs_block`] and reorg detection via
-/// [`ColdStorage::get_block_hash`].
+/// The task owns the streaming configuration (max deadline, concurrency
+/// limit) and delegates the streaming loop to the backend via
+/// [`ColdStorage::produce_log_stream`]. Callers supply a per-request
+/// deadline that is clamped to the task's configured maximum.
 ///
 /// # Caching
 ///
@@ -331,7 +308,7 @@ impl<B: ColdStorage> ColdStorageTask<B> {
             inner: Arc::new(ColdStorageTaskInner {
                 backend,
                 cache: Mutex::new(ColdCache::new()),
-                stream_deadline: DEFAULT_STREAM_DEADLINE,
+                max_stream_deadline: DEFAULT_MAX_STREAM_DEADLINE,
                 stream_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS)),
             }),
             read_receiver,

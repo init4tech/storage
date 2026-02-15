@@ -6,14 +6,15 @@
 //! details.
 
 use crate::{
-    ColdReceipt, ColdResult, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
-    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    ColdReceipt, ColdResult, ColdStorageError, Confirmed, Filter, HeaderSpecifier,
+    ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::primitives::{B256, BlockNumber};
 use signet_storage_types::{
     DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, RecoveredTx, SealedHeader,
 };
 use std::future::Future;
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 /// A stream of log results backed by a bounded channel.
@@ -222,6 +223,87 @@ pub trait ColdStorage: Send + Sync + 'static {
         block_num: BlockNumber,
         remaining: usize,
     ) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send;
+
+    // --- Streaming ---
+
+    /// Produce a log stream by iterating blocks and sending matching logs.
+    ///
+    /// Implementations should hold a consistent read snapshot for the
+    /// duration when possible. The `anchor_hash` is the expected hash at
+    /// block `to` — implementations verify it for reorg detection.
+    ///
+    /// The default implementation calls [`get_block_hash`] and
+    /// [`get_logs_block`] per block. Backends that can hold a single
+    /// transaction (MDBX, SQL) should override for efficiency and
+    /// consistency.
+    ///
+    /// All errors are sent through `sender`. When this method returns,
+    /// the sender is dropped, closing the stream.
+    ///
+    /// [`get_block_hash`]: ColdStorage::get_block_hash
+    /// [`get_logs_block`]: ColdStorage::get_logs_block
+    #[allow(clippy::too_many_arguments)]
+    fn produce_log_stream(
+        &self,
+        filter: &Filter,
+        from: BlockNumber,
+        to: BlockNumber,
+        anchor_hash: B256,
+        max_logs: usize,
+        sender: mpsc::Sender<ColdResult<RpcLog>>,
+        deadline: tokio::time::Instant,
+    ) -> impl Future<Output = ()> + Send {
+        async move {
+            let mut total = 0usize;
+
+            for block_num in from..=to {
+                if tokio::time::Instant::now() > deadline {
+                    let _ = sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
+                    return;
+                }
+
+                // Reorg detection: verify anchor block hash unchanged.
+                match self.get_block_hash(to).await {
+                    Ok(h) if h == Some(anchor_hash) => {}
+                    Ok(_) => {
+                        let _ = sender.send(Err(ColdStorageError::ReorgDetected)).await;
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = sender.send(Err(e)).await;
+                        return;
+                    }
+                }
+
+                let remaining = max_logs.saturating_sub(total);
+                let block_logs = match self.get_logs_block(filter, block_num, remaining).await {
+                    Ok(logs) => logs,
+                    Err(e) => {
+                        let _ = sender.send(Err(e)).await;
+                        return;
+                    }
+                };
+
+                total += block_logs.len();
+
+                for log in block_logs {
+                    match tokio::time::timeout_at(deadline, sender.send(Ok(log))).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => return, // receiver dropped
+                        Err(_) => {
+                            let _ =
+                                sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
+                            return;
+                        }
+                    }
+                }
+
+                if total >= max_logs {
+                    return;
+                }
+            }
+        }
+    }
 
     // --- Write operations ---
 

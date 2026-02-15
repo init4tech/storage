@@ -9,6 +9,7 @@ use crate::{
 };
 use alloy::primitives::BlockNumber;
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
+use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// Response sender type alias that propagates Result types.
@@ -124,6 +125,8 @@ pub enum ColdReadRequest {
         filter: Box<Filter>,
         /// Maximum number of logs to stream.
         max_logs: usize,
+        /// Requested stream deadline (clamped to the task's max).
+        deadline: Duration,
         /// Response channel returning the log stream.
         resp: Responder<LogStream>,
     },
