@@ -47,9 +47,14 @@ struct MemColdBackendInner {
 ///
 /// This backend is thread-safe and suitable for concurrent access.
 /// All operations are protected by an async read-write lock.
-#[derive(Default)]
 pub struct MemColdBackend {
     inner: Arc<RwLock<MemColdBackendInner>>,
+}
+
+impl Default for MemColdBackend {
+    fn default() -> Self {
+        Self { inner: Arc::new(RwLock::new(MemColdBackendInner::default())) }
+    }
 }
 
 impl MemColdBackend {
@@ -241,6 +246,18 @@ impl ColdStorage for MemColdBackend {
         Ok(results)
     }
 
+    async fn produce_log_stream(
+        &self,
+        filter: &Filter,
+        from: BlockNumber,
+        to: BlockNumber,
+        max_logs: usize,
+        sender: tokio::sync::mpsc::Sender<ColdResult<RpcLog>>,
+        deadline: tokio::time::Instant,
+    ) {
+        crate::produce_log_stream_default(self, filter, from, to, max_logs, sender, deadline).await;
+    }
+
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
         let inner = self.inner.read().await;
         Ok(inner.headers.last_key_value().map(|(k, _)| *k))
@@ -336,6 +353,6 @@ mod test {
     #[tokio::test]
     async fn mem_backend_conformance() {
         let backend = MemColdBackend::new();
-        conformance(&backend).await.unwrap();
+        conformance(backend).await.unwrap();
     }
 }

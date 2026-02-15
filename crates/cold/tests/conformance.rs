@@ -5,5 +5,5 @@ use signet_cold::{conformance::conformance, mem::MemColdBackend};
 #[tokio::test]
 async fn mem_backend_conformance() {
     let backend = MemColdBackend::new();
-    conformance(&backend).await.unwrap();
+    conformance(backend).await.unwrap();
 }

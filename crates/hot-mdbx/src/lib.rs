@@ -248,7 +248,7 @@ impl DatabaseArguments {
 /// MDBX database environment. Wraps the low-level [Environment], and
 /// implements the [`HotKv`] trait.
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DatabaseEnv {
     /// Libmdbx-sys environment.
     inner: Environment,
