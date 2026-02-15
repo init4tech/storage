@@ -33,19 +33,6 @@ pub(crate) const fn from_i64(v: i64) -> u64 {
 // Fixed-size type encoding
 // ============================================================================
 
-/// Encode a U256 as 32 big-endian bytes.
-pub(crate) const fn encode_u256(v: &U256) -> [u8; 32] {
-    v.to_be_bytes::<32>()
-}
-
-/// Decode a U256 from big-endian bytes.
-pub(crate) fn decode_u256(data: &[u8]) -> Result<U256, SqlColdError> {
-    if data.len() < 32 {
-        return Err(SqlColdError::Convert(format!("U256 requires 32 bytes, got {}", data.len())));
-    }
-    Ok(U256::from_be_slice(data))
-}
-
 /// Encode a u128 as 16 big-endian bytes.
 pub(crate) const fn encode_u128(v: u128) -> [u8; 16] {
     v.to_be_bytes()

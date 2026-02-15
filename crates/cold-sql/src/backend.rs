@@ -22,9 +22,8 @@ use crate::columns::{
 };
 use crate::convert::{
     EVENT_ENTER, EVENT_ENTER_TOKEN, EVENT_TRANSACT, build_receipt, decode_access_list_or_empty,
-    decode_authorization_list, decode_b256_vec, decode_u128_required, decode_u256,
-    encode_access_list, encode_authorization_list, encode_b256_vec, encode_u128, encode_u256,
-    from_i64, to_address, to_i64,
+    decode_authorization_list, decode_b256_vec, decode_u128_required, encode_access_list,
+    encode_authorization_list, encode_b256_vec, encode_u128, from_i64, to_address, to_i64,
 };
 use alloy::{
     consensus::{
@@ -32,7 +31,7 @@ use alloy::{
         transaction::Recovered,
     },
     primitives::{
-        Address, B256, BlockNumber, Bloom, Bytes, Log, LogData, Sealable, Signature, TxKind,
+        Address, B256, BlockNumber, Bloom, Bytes, Log, LogData, Sealable, Signature, TxKind, U256,
     },
 };
 use signet_cold::{
@@ -312,7 +311,7 @@ fn header_from_row(r: &sqlx::any::AnyRow) -> Result<Header, SqlColdError> {
         transactions_root: r.get(COL_TRANSACTIONS_ROOT),
         receipts_root: r.get(COL_RECEIPTS_ROOT),
         logs_bloom: Bloom::from_slice(blob(r, COL_LOGS_BLOOM)),
-        difficulty: decode_u256(blob(r, COL_DIFFICULTY))?,
+        difficulty: r.get(COL_DIFFICULTY),
         number: from_i64(r.get(COL_BLOCK_NUMBER)),
         gas_limit: from_i64(r.get(COL_GAS_LIMIT)),
         gas_used: from_i64(r.get(COL_GAS_USED)),
@@ -333,11 +332,8 @@ fn header_from_row(r: &sqlx::any::AnyRow) -> Result<Header, SqlColdError> {
 fn tx_from_row(r: &sqlx::any::AnyRow) -> Result<TransactionSigned, SqlColdError> {
     use alloy::consensus::EthereumTxEnvelope;
 
-    let sig = Signature::new(
-        decode_u256(blob(r, COL_SIG_R))?,
-        decode_u256(blob(r, COL_SIG_S))?,
-        r.get::<i32, _>(COL_SIG_Y_PARITY) != 0,
-    );
+    let sig =
+        Signature::new(r.get(COL_SIG_R), r.get(COL_SIG_S), r.get::<i32, _>(COL_SIG_Y_PARITY) != 0);
 
     let tx_type_raw = r.get::<i32, _>(COL_TX_TYPE) as u8;
     let tx_type = TxType::try_from(tx_type_raw)
@@ -347,7 +343,7 @@ fn tx_from_row(r: &sqlx::any::AnyRow) -> Result<TransactionSigned, SqlColdError>
     let nonce = from_i64(r.get(COL_NONCE));
     let gas_limit = from_i64(r.get(COL_GAS_LIMIT));
     let to_addr: Option<Address> = r.get(COL_TO_ADDRESS);
-    let value = decode_u256(blob(r, COL_VALUE))?;
+    let value: U256 = r.get(COL_VALUE);
     let input: Bytes = r.get(COL_INPUT);
 
     match tx_type {
@@ -488,7 +484,7 @@ fn log_from_row(r: &sqlx::any::AnyRow) -> Log {
 fn signet_event_from_row(r: &sqlx::any::AnyRow) -> Result<DbSignetEvent, SqlColdError> {
     let event_type = r.get::<i32, _>(COL_EVENT_TYPE) as i16;
     let order = from_i64(r.get(COL_ORDER_INDEX));
-    let rollup_chain_id = decode_u256(blob(r, COL_ROLLUP_CHAIN_ID))?;
+    let rollup_chain_id: U256 = r.get(COL_ROLLUP_CHAIN_ID);
 
     match event_type {
         EVENT_TRANSACT => {
@@ -498,17 +494,15 @@ fn signet_event_from_row(r: &sqlx::any::AnyRow) -> Result<DbSignetEvent, SqlCold
             let to: Address = r
                 .get::<Option<Address>, _>(COL_TO_ADDRESS)
                 .ok_or_else(|| SqlColdError::Convert("Transact requires to".into()))?;
-            let value = decode_u256(
-                opt_blob(r, COL_VALUE)
-                    .ok_or_else(|| SqlColdError::Convert("Transact requires value".into()))?,
-            )?;
-            let gas = decode_u256(
-                opt_blob(r, COL_GAS)
-                    .ok_or_else(|| SqlColdError::Convert("Transact requires gas".into()))?,
-            )?;
-            let max_fee = decode_u256(opt_blob(r, COL_MAX_FEE_PER_GAS).ok_or_else(|| {
-                SqlColdError::Convert("Transact requires max_fee_per_gas".into())
-            })?)?;
+            let value: U256 = r
+                .get::<Option<U256>, _>(COL_VALUE)
+                .ok_or_else(|| SqlColdError::Convert("Transact requires value".into()))?;
+            let gas: U256 = r
+                .get::<Option<U256>, _>(COL_GAS)
+                .ok_or_else(|| SqlColdError::Convert("Transact requires gas".into()))?;
+            let max_fee: U256 = r
+                .get::<Option<U256>, _>(COL_MAX_FEE_PER_GAS)
+                .ok_or_else(|| SqlColdError::Convert("Transact requires max_fee_per_gas".into()))?;
             let data: Bytes = r.get::<Option<Bytes>, _>(COL_DATA).unwrap_or_default();
 
             Ok(DbSignetEvent::Transact(
@@ -528,10 +522,9 @@ fn signet_event_from_row(r: &sqlx::any::AnyRow) -> Result<DbSignetEvent, SqlCold
             let recipient: Address = r
                 .get::<Option<Address>, _>(COL_ROLLUP_RECIPIENT)
                 .ok_or_else(|| SqlColdError::Convert("Enter requires rollup_recipient".into()))?;
-            let amount = decode_u256(
-                opt_blob(r, COL_AMOUNT)
-                    .ok_or_else(|| SqlColdError::Convert("Enter requires amount".into()))?,
-            )?;
+            let amount: U256 = r
+                .get::<Option<U256>, _>(COL_AMOUNT)
+                .ok_or_else(|| SqlColdError::Convert("Enter requires amount".into()))?;
 
             Ok(DbSignetEvent::Enter(
                 order,
@@ -546,10 +539,9 @@ fn signet_event_from_row(r: &sqlx::any::AnyRow) -> Result<DbSignetEvent, SqlCold
                 r.get::<Option<Address>, _>(COL_ROLLUP_RECIPIENT).ok_or_else(|| {
                     SqlColdError::Convert("EnterToken requires rollup_recipient".into())
                 })?;
-            let amount = decode_u256(
-                opt_blob(r, COL_AMOUNT)
-                    .ok_or_else(|| SqlColdError::Convert("EnterToken requires amount".into()))?,
-            )?;
+            let amount: U256 = r
+                .get::<Option<U256>, _>(COL_AMOUNT)
+                .ok_or_else(|| SqlColdError::Convert("EnterToken requires amount".into()))?;
 
             Ok(DbSignetEvent::EnterToken(
                 order,
@@ -568,9 +560,9 @@ fn signet_event_from_row(r: &sqlx::any::AnyRow) -> Result<DbSignetEvent, SqlCold
 /// Build a [`DbZenithHeader`] from an [`sqlx::any::AnyRow`].
 fn zenith_header_from_row(r: &sqlx::any::AnyRow) -> Result<DbZenithHeader, SqlColdError> {
     Ok(DbZenithHeader(Zenith::BlockHeader {
-        hostBlockNumber: decode_u256(blob(r, COL_HOST_BLOCK_NUMBER))?,
-        rollupChainId: decode_u256(blob(r, COL_ROLLUP_CHAIN_ID))?,
-        gasLimit: decode_u256(blob(r, COL_GAS_LIMIT))?,
+        hostBlockNumber: r.get(COL_HOST_BLOCK_NUMBER),
+        rollupChainId: r.get(COL_ROLLUP_CHAIN_ID),
+        gasLimit: r.get(COL_GAS_LIMIT),
         rewardAddress: r.get(COL_REWARD_ADDRESS),
         blockDataHash: r.get(COL_BLOCK_DATA_HASH),
     }))
@@ -589,7 +581,7 @@ async fn write_block_to_tx(
 
     // Insert header
     let block_hash = data.header.hash_slow();
-    let difficulty = encode_u256(&data.header.difficulty);
+    let difficulty = &data.header.difficulty;
     sqlx::query(
         "INSERT INTO headers (
             block_number, block_hash, parent_hash, ommers_hash, beneficiary,
@@ -611,7 +603,7 @@ async fn write_block_to_tx(
     .bind(data.header.transactions_root.as_slice())
     .bind(data.header.receipts_root.as_slice())
     .bind(data.header.logs_bloom.as_slice())
-    .bind(difficulty.as_slice())
+    .bind(difficulty)
     .bind(to_i64(data.header.gas_limit))
     .bind(to_i64(data.header.gas_used))
     .bind(to_i64(data.header.timestamp))
@@ -679,9 +671,6 @@ async fn write_block_to_tx(
     // Insert zenith header
     if let Some(zh) = &data.zenith_header {
         let h = &zh.0;
-        let host_bn = encode_u256(&h.hostBlockNumber);
-        let chain_id = encode_u256(&h.rollupChainId);
-        let gas_limit = encode_u256(&h.gasLimit);
         sqlx::query(
             "INSERT INTO zenith_headers (
                 block_number, host_block_number, rollup_chain_id,
@@ -689,9 +678,9 @@ async fn write_block_to_tx(
             ) VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(bn)
-        .bind(host_bn.as_slice())
-        .bind(chain_id.as_slice())
-        .bind(gas_limit.as_slice())
+        .bind(h.hostBlockNumber)
+        .bind(h.rollupChainId)
+        .bind(h.gasLimit)
         .bind(h.rewardAddress.as_slice())
         .bind(h.blockDataHash.as_slice())
         .execute(&mut **tx)
@@ -718,7 +707,7 @@ async fn insert_transaction(
     macro_rules! sig {
         ($s:expr) => {{
             let sig = $s.signature();
-            (sig.v() as i32, encode_u256(&sig.r()), encode_u256(&sig.s()))
+            (sig.v() as i32, sig.r(), sig.s())
         }};
     }
     let (sig_y, sig_r, sig_s) = match tx {
@@ -748,15 +737,11 @@ async fn insert_transaction(
     };
 
     let (value, to_addr) = match tx {
-        EthereumTxEnvelope::Legacy(s) => (encode_u256(&s.tx().value), to_address(&s.tx().to)),
-        EthereumTxEnvelope::Eip2930(s) => (encode_u256(&s.tx().value), to_address(&s.tx().to)),
-        EthereumTxEnvelope::Eip1559(s) => (encode_u256(&s.tx().value), to_address(&s.tx().to)),
-        EthereumTxEnvelope::Eip4844(s) => {
-            (encode_u256(&s.tx().value), Some(s.tx().to.as_slice().to_vec()))
-        }
-        EthereumTxEnvelope::Eip7702(s) => {
-            (encode_u256(&s.tx().value), Some(s.tx().to.as_slice().to_vec()))
-        }
+        EthereumTxEnvelope::Legacy(s) => (s.tx().value, to_address(&s.tx().to)),
+        EthereumTxEnvelope::Eip2930(s) => (s.tx().value, to_address(&s.tx().to)),
+        EthereumTxEnvelope::Eip1559(s) => (s.tx().value, to_address(&s.tx().to)),
+        EthereumTxEnvelope::Eip4844(s) => (s.tx().value, Some(s.tx().to.as_slice().to_vec())),
+        EthereumTxEnvelope::Eip7702(s) => (s.tx().value, Some(s.tx().to.as_slice().to_vec())),
     };
 
     let input: &[u8] = match tx {
@@ -828,13 +813,13 @@ async fn insert_transaction(
     .bind(tx_hash.as_slice())
     .bind(tx_type)
     .bind(sig_y)
-    .bind(sig_r.as_slice())
-    .bind(sig_s.as_slice())
+    .bind(sig_r)
+    .bind(sig_s)
     .bind(chain_id)
     .bind(nonce)
     .bind(gas_limit)
     .bind(to_addr.as_deref())
-    .bind(value.as_slice())
+    .bind(value)
     .bind(input)
     .bind(gas_price.as_ref().map(|v| v.as_slice()))
     .bind(max_fee.as_ref().map(|v| v.as_slice()))
@@ -858,20 +843,17 @@ async fn insert_signet_event(
     event: &DbSignetEvent,
 ) -> Result<(), SqlColdError> {
     let (event_type, order, chain_id) = match event {
-        DbSignetEvent::Transact(o, t) => (0i32, to_i64(*o), encode_u256(&t.rollupChainId)),
-        DbSignetEvent::Enter(o, e) => (1i32, to_i64(*o), encode_u256(&e.rollupChainId)),
-        DbSignetEvent::EnterToken(o, e) => (2i32, to_i64(*o), encode_u256(&e.rollupChainId)),
+        DbSignetEvent::Transact(o, t) => (0i32, to_i64(*o), &t.rollupChainId),
+        DbSignetEvent::Enter(o, e) => (1i32, to_i64(*o), &e.rollupChainId),
+        DbSignetEvent::EnterToken(o, e) => (2i32, to_i64(*o), &e.rollupChainId),
     };
 
     let (value, gas, max_fee, amount) = match event {
-        DbSignetEvent::Transact(_, t) => (
-            Some(encode_u256(&t.value)),
-            Some(encode_u256(&t.gas)),
-            Some(encode_u256(&t.maxFeePerGas)),
-            None,
-        ),
-        DbSignetEvent::Enter(_, e) => (None, None, None, Some(encode_u256(&e.amount))),
-        DbSignetEvent::EnterToken(_, e) => (None, None, None, Some(encode_u256(&e.amount))),
+        DbSignetEvent::Transact(_, t) => {
+            (Some(&t.value), Some(&t.gas), Some(&t.maxFeePerGas), None)
+        }
+        DbSignetEvent::Enter(_, e) => (None, None, None, Some(&e.amount)),
+        DbSignetEvent::EnterToken(_, e) => (None, None, None, Some(&e.amount)),
     };
 
     sqlx::query(
@@ -885,7 +867,7 @@ async fn insert_signet_event(
     .bind(event_index)
     .bind(event_type)
     .bind(order)
-    .bind(chain_id.as_slice())
+    .bind(chain_id)
     .bind(match event {
         DbSignetEvent::Transact(_, t) => Some(t.sender.as_slice()),
         _ => None,
@@ -894,9 +876,9 @@ async fn insert_signet_event(
         DbSignetEvent::Transact(_, t) => Some(t.to.as_slice()),
         _ => None,
     })
-    .bind(value.as_ref().map(|v| v.as_slice()))
-    .bind(gas.as_ref().map(|v| v.as_slice()))
-    .bind(max_fee.as_ref().map(|v| v.as_slice()))
+    .bind(value)
+    .bind(gas)
+    .bind(max_fee)
     .bind(match event {
         DbSignetEvent::Transact(_, t) => Some(t.data.as_ref()),
         _ => None,
@@ -906,7 +888,7 @@ async fn insert_signet_event(
         DbSignetEvent::EnterToken(_, e) => Some(e.rollupRecipient.as_slice()),
         _ => None,
     })
-    .bind(amount.as_ref().map(|v| v.as_slice()))
+    .bind(amount)
     .bind(match event {
         DbSignetEvent::EnterToken(_, e) => Some(e.token.as_slice()),
         _ => None,
