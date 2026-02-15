@@ -24,7 +24,7 @@ use signet_storage_types::{
     ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, RecoveredTx, SealedHeader,
     TransactionSigned, TxLocation,
 };
-use std::{path::Path, sync::Arc};
+use std::path::Path;
 
 /// Write a single block's data into an open read-write transaction.
 ///
@@ -84,7 +84,7 @@ fn write_block_to_tx(
 /// provides MVCC consistency — the snapshot is self-consistent and
 /// no reorg detection is needed within it.
 fn produce_log_stream_blocking(
-    env: Arc<DatabaseEnv>,
+    env: DatabaseEnv,
     filter: Filter,
     from: BlockNumber,
     to: BlockNumber,
@@ -199,7 +199,7 @@ fn produce_log_stream_blocking(
 /// task runner.
 pub struct MdbxColdBackend {
     /// The MDBX environment.
-    env: Arc<DatabaseEnv>,
+    env: DatabaseEnv,
 }
 
 impl std::fmt::Debug for MdbxColdBackend {
@@ -210,8 +210,8 @@ impl std::fmt::Debug for MdbxColdBackend {
 
 impl MdbxColdBackend {
     /// Create a new backend from an existing MDBX environment.
-    fn from_env(env: DatabaseEnv) -> Self {
-        Self { env: Arc::new(env) }
+    const fn from_env(env: DatabaseEnv) -> Self {
+        Self { env }
     }
 
     /// Open an existing MDBX cold storage database in read-only mode.
@@ -710,7 +710,7 @@ impl ColdStorage for MdbxColdBackend {
         sender: tokio::sync::mpsc::Sender<ColdResult<RpcLog>>,
         deadline: tokio::time::Instant,
     ) {
-        let env = Arc::clone(&self.env);
+        let env = self.env.clone();
         let filter = filter.clone();
         let std_deadline = deadline.into_std();
         let _ = tokio::task::spawn_blocking(move || {

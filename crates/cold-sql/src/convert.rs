@@ -81,20 +81,13 @@ pub(crate) fn from_address(data: Option<&[u8]>) -> TxKind {
 // ============================================================================
 
 /// Decode a required u128 from a nullable blob column.
-pub(crate) fn decode_u128_required(
-    data: &Option<Vec<u8>>,
-    field: &str,
-) -> Result<u128, SqlColdError> {
-    data.as_ref()
-        .ok_or_else(|| SqlColdError::Convert(format!("{field} is required")))
-        .and_then(|b| decode_u128(b))
+pub(crate) fn decode_u128_required(data: Option<&[u8]>, field: &str) -> Result<u128, SqlColdError> {
+    data.ok_or_else(|| SqlColdError::Convert(format!("{field} is required"))).and_then(decode_u128)
 }
 
 /// Decode an access list from a nullable blob column, defaulting to empty.
-pub(crate) fn decode_access_list_or_empty(
-    data: &Option<Vec<u8>>,
-) -> Result<AccessList, SqlColdError> {
-    data.as_ref().map(|b| decode_access_list(b)).transpose().map(|opt| opt.unwrap_or_default())
+pub(crate) fn decode_access_list_or_empty(data: Option<&[u8]>) -> Result<AccessList, SqlColdError> {
+    data.map(decode_access_list).transpose().map(|opt| opt.unwrap_or_default())
 }
 
 // ============================================================================
