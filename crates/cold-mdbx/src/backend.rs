@@ -78,6 +78,20 @@ fn write_block_to_tx(
     Ok(())
 }
 
+/// Unwrap a `Result` or send the error through the stream and return.
+macro_rules! try_stream {
+    ($sender:expr, $expr:expr) => {
+        match $expr {
+            Ok(v) => v,
+            Err(e) => {
+                let _ =
+                    $sender.blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
+                return;
+            }
+        }
+    };
+}
+
 /// Produce a log stream using a single MDBX read transaction.
 ///
 /// Runs synchronously on a blocking thread. The `Tx<Ro>` snapshot
@@ -92,29 +106,11 @@ fn produce_log_stream_blocking(
     sender: tokio::sync::mpsc::Sender<ColdResult<RpcLog>>,
     deadline: std::time::Instant,
 ) {
-    let tx = match env.tx() {
-        Ok(tx) => tx,
-        Err(e) => {
-            let _ = sender.blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
-            return;
-        }
-    };
+    let tx = try_stream!(sender, env.tx());
 
     // Reuse cursors across blocks (same pattern as get_logs_inner).
-    let mut header_cursor = match tx.traverse::<ColdHeaders>() {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = sender.blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
-            return;
-        }
-    };
-    let mut receipt_cursor = match tx.traverse_dual::<ColdReceipts>() {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = sender.blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
-            return;
-        }
-    };
+    let mut header_cursor = try_stream!(sender, tx.traverse::<ColdHeaders>());
+    let mut receipt_cursor = try_stream!(sender, tx.traverse_dual::<ColdReceipts>());
 
     let mut total = 0usize;
 
@@ -124,39 +120,20 @@ fn produce_log_stream_blocking(
             return;
         }
 
-        let sealed = match header_cursor.exact(&block_num) {
-            Ok(Some(v)) => v,
-            Ok(None) => continue,
-            Err(e) => {
-                let _ =
-                    sender.blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
-                return;
-            }
+        let sealed = match try_stream!(sender, header_cursor.exact(&block_num)) {
+            Some(v) => v,
+            None => continue,
         };
         let block_hash = sealed.hash();
         let block_timestamp = sealed.timestamp;
 
-        let iter = match receipt_cursor.iter_k2(&block_num) {
-            Ok(iter) => iter,
-            Err(e) => {
-                let _ =
-                    sender.blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
-                return;
-            }
-        };
+        let iter = try_stream!(sender, receipt_cursor.iter_k2(&block_num));
 
         let remaining = max_logs.saturating_sub(total);
         let mut block_count = 0usize;
 
         for result in iter {
-            let (tx_idx, ir): (u64, IndexedReceipt) = match result {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = sender
-                        .blocking_send(Err(ColdStorageError::backend(MdbxColdError::from(e))));
-                    return;
-                }
-            };
+            let (tx_idx, ir): (u64, IndexedReceipt) = try_stream!(sender, result);
             let tx_hash = ir.tx_hash;
             let first_log_index = ir.first_log_index;
             for (log_idx, log) in ir.receipt.inner.logs.into_iter().enumerate() {

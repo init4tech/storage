@@ -176,32 +176,31 @@ impl SqlColdBackend {
     /// queries, eliminating the need for anchor-hash reorg detection.
     /// Rows are streamed individually rather than materialised per block.
     #[cfg(feature = "postgres")]
-    #[allow(clippy::too_many_arguments)]
-    async fn produce_log_stream_pg(
-        &self,
-        filter: &Filter,
-        from: BlockNumber,
-        to: BlockNumber,
-        max_logs: usize,
-        sender: tokio::sync::mpsc::Sender<ColdResult<RpcLog>>,
-        deadline: tokio::time::Instant,
-    ) {
+    async fn produce_log_stream_pg(&self, filter: &Filter, params: signet_cold::StreamParams) {
         use tokio_stream::StreamExt;
 
-        let mut tx = match self.pool.begin().await {
-            Ok(tx) => tx,
-            Err(e) => {
-                let _ = sender.send(Err(ColdStorageError::backend(SqlColdError::from(e)))).await;
-                return;
-            }
-        };
-
-        if let Err(e) =
-            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ").execute(&mut *tx).await
-        {
-            let _ = sender.send(Err(ColdStorageError::backend(SqlColdError::from(e)))).await;
-            return;
+        /// Unwrap a `Result` or send the error through the stream and return.
+        macro_rules! try_stream {
+            ($sender:expr, $expr:expr) => {
+                match $expr {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = $sender
+                            .send(Err(ColdStorageError::backend(SqlColdError::from(e))))
+                            .await;
+                        return;
+                    }
+                }
+            };
         }
+
+        let signet_cold::StreamParams { from, to, max_logs, sender, deadline } = params;
+
+        let mut tx = try_stream!(sender, self.pool.begin().await);
+        try_stream!(
+            sender,
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ").execute(&mut *tx).await
+        );
 
         let (filter_clause, filter_params) = build_log_filter_clause(filter, 2);
         let data_sql = format!(
@@ -232,15 +231,7 @@ impl SqlColdBackend {
 
             let mut stream = query.fetch(&mut *tx);
             while let Some(row_result) = stream.next().await {
-                let r = match row_result {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = sender
-                            .send(Err(ColdStorageError::backend(SqlColdError::from(e))))
-                            .await;
-                        return;
-                    }
-                };
+                let r = try_stream!(sender, row_result);
 
                 total += 1;
                 if total > max_logs {
@@ -1390,16 +1381,7 @@ impl ColdStorage for SqlColdBackend {
     async fn produce_log_stream(&self, filter: &Filter, params: signet_cold::StreamParams) {
         #[cfg(feature = "postgres")]
         if self.is_postgres {
-            return self
-                .produce_log_stream_pg(
-                    filter,
-                    params.from,
-                    params.to,
-                    params.max_logs,
-                    params.sender,
-                    params.deadline,
-                )
-                .await;
+            return self.produce_log_stream_pg(filter, params).await;
         }
         signet_cold::produce_log_stream_default(self, filter, params).await;
     }
