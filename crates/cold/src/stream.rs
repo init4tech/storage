@@ -41,7 +41,10 @@ pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
 ) {
     let StreamParams { from, to, max_logs, sender, deadline } = params;
 
-    // Capture anchor hash for reorg detection.
+    // Capture the hash of the `to` block before we start iterating.
+    // Without snapshot isolation we have no guarantee that the
+    // underlying data stays consistent, so we re-check this hash
+    // before each block to detect reorgs.
     let anchor_hash = match backend.get_header(HeaderSpecifier::Number(to)).await {
         Ok(Some(h)) => h.hash(),
         Ok(None) => return, // block doesn't exist; empty stream
@@ -58,13 +61,18 @@ pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
     // and topic arrays.
     let mut block_filter = filter.clone();
 
+    // Walk through blocks one at a time, fetching matching logs from
+    // each block and sending them over the channel individually.
     for block_num in from..=to {
+        // Check the deadline before starting each block so we
+        // don't begin a new query after the caller's timeout.
         if tokio::time::Instant::now() > deadline {
             let _ = sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
             return;
         }
 
-        // Reorg detection: verify anchor block hash unchanged.
+        // Re-check the anchor hash to detect reorgs that may have
+        // occurred since we started streaming.
         match backend.get_header(HeaderSpecifier::Number(to)).await {
             Ok(Some(h)) if h.hash() == anchor_hash => {}
             Ok(_) => {
@@ -77,6 +85,9 @@ pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
             }
         }
 
+        // Fetch all matching logs for this single block. The
+        // remaining budget shrinks as we accumulate results so
+        // `get_logs` can reject early if a single block overflows.
         let remaining = max_logs.saturating_sub(total);
         block_filter.block_option = FilterBlockOption::Range {
             from_block: Some(block_num.into()),
@@ -96,6 +107,9 @@ pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
 
         total += block_logs.len();
 
+        // Send each log individually over the channel. The timeout
+        // ensures we stop if the deadline passes while back-pressured
+        // by a slow receiver.
         for log in block_logs {
             match tokio::time::timeout_at(deadline, sender.send(Ok(log))).await {
                 Ok(Ok(())) => {}
@@ -107,6 +121,8 @@ pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
             }
         }
 
+        // Early exit if we've already hit the limit — no need to
+        // query the next block.
         if total >= max_logs {
             return;
         }

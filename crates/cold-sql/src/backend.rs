@@ -198,12 +198,18 @@ impl SqlColdBackend {
 
         let signet_cold::StreamParams { from, to, max_logs, sender, deadline } = params;
 
+        // Open a REPEATABLE READ transaction so all per-block queries see a
+        // consistent snapshot. This makes reorg detection unnecessary — if a
+        // reorg lands mid-stream the transaction still reads the old data.
         let mut tx = try_stream!(sender, self.pool.begin().await);
         try_stream!(
             sender,
             sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ").execute(&mut *tx).await
         );
 
+        // Build the parameterised query once. $1 is the block number
+        // (bound per iteration); remaining parameters are the address
+        // and topic filters from the user's request.
         let (filter_clause, filter_params) = build_log_filter_clause(filter, 2);
         let data_sql = format!(
             "SELECT l.*, h.block_hash, h.timestamp AS block_timestamp, t.tx_hash, \
@@ -220,7 +226,11 @@ impl SqlColdBackend {
 
         let mut total = 0usize;
 
+        // Walk through blocks one at a time, streaming matching log rows
+        // from each block directly to the channel.
         for block_num in from..=to {
+            // Check the deadline before starting each block so we
+            // don't begin a new query after the caller's timeout.
             if tokio::time::Instant::now() > deadline {
                 let _ = sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
                 return;
@@ -231,10 +241,14 @@ impl SqlColdBackend {
                 query = query.bind(*param);
             }
 
+            // Stream rows from this block's query. Each row is converted
+            // to an RpcLog and sent over the channel immediately rather
+            // than being collected into a Vec first.
             let mut stream = query.fetch(&mut *tx);
             while let Some(row_result) = stream.next().await {
                 let r = try_stream!(sender, row_result);
 
+                // Enforce the global log limit across all blocks.
                 total += 1;
                 if total > max_logs {
                     let _ =
@@ -253,9 +267,11 @@ impl SqlColdBackend {
                     log_index: Some(from_i64(r.get::<i64, _>(COL_BLOCK_LOG_INDEX))),
                     removed: false,
                 };
+                // Send the log to the caller. The timeout ensures we
+                // stop if the deadline passes while back-pressured.
                 match tokio::time::timeout_at(deadline, sender.send(Ok(rpc_log))).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(_)) => return,
+                    Ok(Err(_)) => return, // receiver dropped
                     Err(_) => {
                         let _ = sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
                         return;
@@ -263,6 +279,8 @@ impl SqlColdBackend {
                 }
             }
 
+            // Early exit if we've already hit the limit — no need to
+            // query the next block.
             if total >= max_logs {
                 return;
             }
