@@ -246,55 +246,6 @@ impl ColdStorage for MemColdBackend {
         Ok(results)
     }
 
-    async fn get_block_hash(&self, block: BlockNumber) -> ColdResult<Option<B256>> {
-        let inner = self.inner.read().await;
-        Ok(inner.headers.get(&block).map(|h| h.hash()))
-    }
-
-    async fn get_logs_block(
-        &self,
-        filter: &Filter,
-        block_num: BlockNumber,
-        remaining: usize,
-    ) -> ColdResult<Vec<RpcLog>> {
-        let inner = self.inner.read().await;
-        let Some(receipts) = inner.receipts.get(&block_num) else {
-            return Ok(Vec::new());
-        };
-        let (block_hash, block_timestamp) =
-            inner.headers.get(&block_num).map(|h| (h.hash(), h.timestamp)).unwrap_or_default();
-
-        let logs: Vec<RpcLog> = receipts
-            .iter()
-            .enumerate()
-            .flat_map(|(tx_idx, ir)| {
-                let tx_hash = ir.tx_hash;
-                let first_log_index = ir.first_log_index;
-                ir.receipt
-                    .inner
-                    .logs
-                    .iter()
-                    .enumerate()
-                    .filter(move |(_, log)| filter.matches(log))
-                    .map(move |(log_idx, log)| RpcLog {
-                        inner: log.clone(),
-                        block_hash: Some(block_hash),
-                        block_number: Some(block_num),
-                        block_timestamp: Some(block_timestamp),
-                        transaction_hash: Some(tx_hash),
-                        transaction_index: Some(tx_idx as u64),
-                        log_index: Some(first_log_index + log_idx as u64),
-                        removed: false,
-                    })
-            })
-            .collect();
-
-        if logs.len() > remaining {
-            return Err(ColdStorageError::TooManyLogs { limit: remaining });
-        }
-        Ok(logs)
-    }
-
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
         let inner = self.inner.read().await;
         Ok(inner.headers.last_key_value().map(|(k, _)| *k))

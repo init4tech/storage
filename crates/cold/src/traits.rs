@@ -9,7 +9,7 @@ use crate::{
     ColdReceipt, ColdResult, ColdStorageError, Confirmed, Filter, HeaderSpecifier,
     ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
-use alloy::primitives::{B256, BlockNumber};
+use alloy::primitives::BlockNumber;
 use signet_storage_types::{
     DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, RecoveredTx, SealedHeader,
 };
@@ -204,33 +204,6 @@ pub trait ColdStorage: Send + Sync + 'static {
         max_logs: usize,
     ) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send;
 
-    /// Get the hash of a block header by block number.
-    ///
-    /// Returns `Ok(Some(hash))` if the block exists, `Ok(None)` if not.
-    /// Used by the streaming task for reorg detection.
-    fn get_block_hash(
-        &self,
-        block: BlockNumber,
-    ) -> impl Future<Output = ColdResult<Option<B256>>> + Send;
-
-    /// Fetch matching logs from a single block.
-    ///
-    /// Returns logs ordered by `(tx_index, log_index)` within the block.
-    /// `remaining` is the maximum number of logs to return.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ColdStorageError::TooManyLogs`] if the block contains
-    /// more matching logs than `remaining`.
-    ///
-    /// [`ColdStorageError::TooManyLogs`]: crate::ColdStorageError::TooManyLogs
-    fn get_logs_block(
-        &self,
-        filter: &Filter,
-        block_num: BlockNumber,
-        remaining: usize,
-    ) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send;
-
     // --- Streaming ---
 
     /// Produce a log stream by iterating blocks and sending matching logs.
@@ -240,14 +213,15 @@ pub trait ColdStorage: Send + Sync + 'static {
     /// PostgreSQL with REPEATABLE READ) need no additional reorg detection.
     ///
     /// The default implementation calls [`produce_log_stream_default`],
-    /// which uses per-block [`get_block_hash`] checks for reorg detection.
-    /// Backends that hold a single transaction should override for
-    /// efficiency and consistency.
+    /// which uses per-block [`get_header`] and [`get_logs`] calls with
+    /// anchor-hash reorg detection. Backends that hold a single
+    /// transaction should override for efficiency and consistency.
     ///
     /// All errors are sent through `sender`. When this method returns,
     /// the sender is dropped, closing the stream.
     ///
-    /// [`get_block_hash`]: ColdStorage::get_block_hash
+    /// [`get_header`]: ColdStorage::get_header
+    /// [`get_logs`]: ColdStorage::get_logs
     /// [`produce_log_stream_default`]: crate::produce_log_stream_default
     #[allow(clippy::too_many_arguments)]
     fn produce_log_stream(
@@ -280,8 +254,9 @@ pub trait ColdStorage: Send + Sync + 'static {
 /// semantics.
 ///
 /// Captures an anchor hash from the `to` block at the start and
-/// re-checks it before each block to detect reorgs. Calls
-/// [`ColdStorage::get_logs_block`] per block.
+/// re-checks it before each block to detect reorgs. Uses
+/// [`ColdStorage::get_header`] for anchor checks and
+/// [`ColdStorage::get_logs`] with single-block filters per block.
 ///
 /// Backends that hold a consistent read snapshot (MDBX, PostgreSQL
 /// with REPEATABLE READ) should override
@@ -297,8 +272,8 @@ pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
     deadline: tokio::time::Instant,
 ) {
     // Capture anchor hash for reorg detection.
-    let anchor_hash = match backend.get_block_hash(to).await {
-        Ok(Some(h)) => h,
+    let anchor_hash = match backend.get_header(HeaderSpecifier::Number(to)).await {
+        Ok(Some(h)) => h.hash(),
         Ok(None) => return, // block doesn't exist; empty stream
         Err(e) => {
             let _ = sender.send(Err(e)).await;
@@ -315,8 +290,8 @@ pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
         }
 
         // Reorg detection: verify anchor block hash unchanged.
-        match backend.get_block_hash(to).await {
-            Ok(Some(h)) if h == anchor_hash => {}
+        match backend.get_header(HeaderSpecifier::Number(to)).await {
+            Ok(Some(h)) if h.hash() == anchor_hash => {}
             Ok(_) => {
                 let _ = sender.send(Err(ColdStorageError::ReorgDetected)).await;
                 return;
@@ -328,7 +303,8 @@ pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
         }
 
         let remaining = max_logs.saturating_sub(total);
-        let block_logs = match backend.get_logs_block(filter, block_num, remaining).await {
+        let block_filter = filter.clone().from_block(block_num).to_block(block_num);
+        let block_logs = match backend.get_logs(block_filter, remaining).await {
             Ok(logs) => logs,
             Err(e) => {
                 let _ = sender.send(Err(e)).await;

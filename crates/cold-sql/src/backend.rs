@@ -1397,66 +1397,6 @@ impl ColdStorage for SqlColdBackend {
             .collect::<ColdResult<Vec<_>>>()
     }
 
-    async fn get_block_hash(&self, block: BlockNumber) -> ColdResult<Option<B256>> {
-        Ok(sqlx::query("SELECT block_hash FROM headers WHERE block_number = $1")
-            .bind(to_i64(block))
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(SqlColdError::from)?
-            .map(|r| B256::from_slice(&r.get::<Vec<u8>, _>(COL_BLOCK_HASH))))
-    }
-
-    async fn get_logs_block(
-        &self,
-        filter: &Filter,
-        block_num: BlockNumber,
-        remaining: usize,
-    ) -> ColdResult<Vec<RpcLog>> {
-        let (filter_clause, filter_params) = build_log_filter_clause(filter, 2);
-        let where_clause = format!("l.block_number = $1{filter_clause}");
-        let data_sql = format!(
-            "SELECT l.*, h.block_hash, h.timestamp AS block_timestamp, t.tx_hash, \
-               (r.first_log_index + l.log_index) AS block_log_index \
-             FROM logs l \
-             JOIN headers h ON l.block_number = h.block_number \
-             JOIN transactions t ON l.block_number = t.block_number \
-               AND l.tx_index = t.tx_index \
-             JOIN receipts r ON l.block_number = r.block_number \
-               AND l.tx_index = r.tx_index \
-             WHERE {where_clause} \
-             ORDER BY l.tx_index, l.log_index"
-        );
-        let mut query = sqlx::query(&data_sql).bind(to_i64(block_num));
-        for param in &filter_params {
-            query = query.bind(param.as_slice());
-        }
-        let rows = query.fetch_all(&self.pool).await.map_err(SqlColdError::from)?;
-
-        if rows.len() > remaining {
-            return Err(ColdStorageError::TooManyLogs { limit: remaining });
-        }
-
-        Ok(rows
-            .into_iter()
-            .map(|r| {
-                let log = log_from_row(&r);
-                let block_number = from_i64(r.get::<i64, _>(COL_BLOCK_NUMBER));
-                let block_hash_bytes: Vec<u8> = r.get(COL_BLOCK_HASH);
-                let tx_hash_bytes: Vec<u8> = r.get(COL_TX_HASH);
-                RpcLog {
-                    inner: log,
-                    block_hash: Some(B256::from_slice(&block_hash_bytes)),
-                    block_number: Some(block_number),
-                    block_timestamp: Some(from_i64(r.get::<i64, _>(COL_BLOCK_TIMESTAMP))),
-                    transaction_hash: Some(B256::from_slice(&tx_hash_bytes)),
-                    transaction_index: Some(from_i64(r.get::<i64, _>(COL_TX_INDEX))),
-                    log_index: Some(from_i64(r.get::<i64, _>(COL_BLOCK_LOG_INDEX))),
-                    removed: false,
-                }
-            })
-            .collect())
-    }
-
     async fn produce_log_stream(
         &self,
         filter: &Filter,

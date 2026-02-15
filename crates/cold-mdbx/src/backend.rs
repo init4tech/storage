@@ -8,7 +8,6 @@ use crate::{
     ColdBlockHashIndex, ColdHeaders, ColdReceipts, ColdSignetEvents, ColdTransactions,
     ColdTxHashIndex, ColdTxSenders, ColdZenithHeaders, MdbxColdError,
 };
-use alloy::primitives::B256;
 use alloy::{consensus::transaction::Recovered, primitives::BlockNumber};
 use signet_cold::{
     BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter,
@@ -77,63 +76,6 @@ fn write_block_to_tx(
     }
 
     Ok(())
-}
-
-/// Collect matching logs from a single block.
-///
-/// Opens a short-lived read transaction, processes the block, and returns.
-/// The read transaction is dropped when this function returns.
-fn collect_logs_block(
-    env: &DatabaseEnv,
-    filter: &Filter,
-    block_num: BlockNumber,
-    remaining: usize,
-) -> Result<Vec<RpcLog>, MdbxColdError> {
-    let tx = env.tx()?;
-    let Some(sealed) = tx.traverse::<ColdHeaders>()?.exact(&block_num)? else {
-        return Ok(Vec::new());
-    };
-    let block_hash = sealed.hash();
-    let block_timestamp = sealed.timestamp;
-
-    let mut logs = Vec::new();
-    let mut cursor = tx.traverse_dual::<ColdReceipts>()?;
-    for result in cursor.iter_k2(&block_num)? {
-        let (tx_idx, ir): (u64, IndexedReceipt) = result?;
-        let tx_hash = ir.tx_hash;
-        let first_log_index = ir.first_log_index;
-        for (log_idx, log) in ir.receipt.inner.logs.into_iter().enumerate() {
-            if !filter.matches(&log) {
-                continue;
-            }
-            if logs.len() >= remaining {
-                return Err(MdbxColdError::TooManyLogs(remaining));
-            }
-            logs.push(RpcLog {
-                inner: log,
-                block_hash: Some(block_hash),
-                block_number: Some(block_num),
-                block_timestamp: Some(block_timestamp),
-                transaction_hash: Some(tx_hash),
-                transaction_index: Some(tx_idx),
-                log_index: Some(first_log_index + log_idx as u64),
-                removed: false,
-            });
-        }
-    }
-    Ok(logs)
-}
-
-/// Check the current hash of a block in the database.
-///
-/// Returns `Ok(Some(hash))` if the block exists, `Ok(None)` if it
-/// does not, or `Err` on database error.
-fn check_block_hash(env: &DatabaseEnv, block: BlockNumber) -> Result<Option<B256>, MdbxColdError> {
-    let rtx = env.tx()?;
-    rtx.traverse::<ColdHeaders>()?
-        .exact(&block)
-        .map(|opt| opt.map(|h| h.hash()))
-        .map_err(Into::into)
 }
 
 /// Produce a log stream using a single MDBX read transaction.
@@ -757,19 +699,6 @@ impl ColdStorage for MdbxColdBackend {
         max_logs: usize,
     ) -> ColdResult<Vec<signet_cold::RpcLog>> {
         Ok(self.get_logs_inner(filter, max_logs)?)
-    }
-
-    async fn get_block_hash(&self, block: BlockNumber) -> ColdResult<Option<B256>> {
-        Ok(check_block_hash(&self.env, block)?)
-    }
-
-    async fn get_logs_block(
-        &self,
-        filter: &Filter,
-        block_num: BlockNumber,
-        remaining: usize,
-    ) -> ColdResult<Vec<RpcLog>> {
-        Ok(collect_logs_block(&self.env, filter, block_num, remaining)?)
     }
 
     async fn produce_log_stream(
