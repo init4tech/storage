@@ -211,7 +211,7 @@ impl ColdStorage for MemColdBackend {
         })
     }
 
-    async fn get_logs(&self, filter: Filter, max_logs: usize) -> ColdResult<Vec<RpcLog>> {
+    async fn get_logs(&self, filter: &Filter, max_logs: usize) -> ColdResult<Vec<RpcLog>> {
         let inner = self.inner.read().await;
         let mut results = Vec::new();
 

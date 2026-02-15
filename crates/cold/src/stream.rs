@@ -1,7 +1,7 @@
 //! Log-streaming helper for backends without snapshot semantics.
 
 use crate::{ColdResult, ColdStorage, ColdStorageError, Filter, HeaderSpecifier, RpcLog};
-use alloy::primitives::BlockNumber;
+use alloy::{primitives::BlockNumber, rpc::types::FilterBlockOption};
 use tokio::sync::mpsc;
 
 /// Parameters for a log-streaming request.
@@ -53,6 +53,11 @@ pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
 
     let mut total = 0usize;
 
+    // Clone the filter once; we reuse it across blocks by mutating
+    // only the block range, avoiding per-block clones of the address
+    // and topic arrays.
+    let mut block_filter = filter.clone();
+
     for block_num in from..=to {
         if tokio::time::Instant::now() > deadline {
             let _ = sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
@@ -73,8 +78,11 @@ pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
         }
 
         let remaining = max_logs.saturating_sub(total);
-        let block_filter = filter.clone().from_block(block_num).to_block(block_num);
-        let block_logs = match backend.get_logs(block_filter, remaining).await {
+        block_filter.block_option = FilterBlockOption::Range {
+            from_block: Some(block_num.into()),
+            to_block: Some(block_num.into()),
+        };
+        let block_logs = match backend.get_logs(&block_filter, remaining).await {
             Ok(logs) => logs,
             Err(ColdStorageError::TooManyLogs { .. }) => {
                 let _ = sender.send(Err(ColdStorageError::TooManyLogs { limit: max_logs })).await;

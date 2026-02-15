@@ -160,7 +160,7 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
                 let _ = resp.send(self.backend.get_zenith_headers(spec).await);
             }
             ColdReadRequest::GetLogs { filter, max_logs, resp } => {
-                let _ = resp.send(self.backend.get_logs(*filter, max_logs).await);
+                let _ = resp.send(self.backend.get_logs(&filter, max_logs).await);
             }
             ColdReadRequest::StreamLogs { filter, max_logs, deadline, resp } => {
                 let _ = resp.send(self.handle_stream_logs(*filter, max_logs, deadline).await);

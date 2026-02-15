@@ -539,7 +539,7 @@ impl MdbxColdBackend {
 
     fn get_logs_inner(
         &self,
-        filter: Filter,
+        filter: &Filter,
         max_logs: usize,
     ) -> Result<Vec<signet_cold::RpcLog>, MdbxColdError> {
         let tx = self.env.tx()?;
@@ -672,7 +672,7 @@ impl ColdStorage for MdbxColdBackend {
 
     async fn get_logs(
         &self,
-        filter: Filter,
+        filter: &Filter,
         max_logs: usize,
     ) -> ColdResult<Vec<signet_cold::RpcLog>> {
         Ok(self.get_logs_inner(filter, max_logs)?)

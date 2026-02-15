@@ -199,7 +199,7 @@ pub trait ColdStorage: Send + Sync + 'static {
     /// [`ColdStorageError::TooManyLogs`]: crate::ColdStorageError::TooManyLogs
     fn get_logs(
         &self,
-        filter: Filter,
+        filter: &Filter,
         max_logs: usize,
     ) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send;
 

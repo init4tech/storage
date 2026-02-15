@@ -1319,12 +1319,12 @@ impl ColdStorage for SqlColdBackend {
         rows.iter().map(|r| zenith_header_from_row(r).map_err(ColdStorageError::from)).collect()
     }
 
-    async fn get_logs(&self, filter: Filter, max_logs: usize) -> ColdResult<Vec<RpcLog>> {
+    async fn get_logs(&self, filter: &Filter, max_logs: usize) -> ColdResult<Vec<RpcLog>> {
         let from = filter.get_from_block().unwrap_or(0);
         let to = filter.get_to_block().unwrap_or(u64::MAX);
 
         // Build WHERE clause: block range ($1, $2) + address/topic filters.
-        let (filter_clause, params) = build_log_filter_clause(&filter, 3);
+        let (filter_clause, params) = build_log_filter_clause(filter, 3);
         let where_clause = format!("l.block_number >= $1 AND l.block_number <= $2{filter_clause}");
 
         // Run a cheap COUNT(*) query first to reject queries that exceed
