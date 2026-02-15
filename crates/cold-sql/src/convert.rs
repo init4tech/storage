@@ -11,7 +11,7 @@ use alloy::{
         eip2930::{AccessList, AccessListItem},
         eip7702::{Authorization, SignedAuthorization},
     },
-    primitives::{Address, B256, Log, TxKind, U256},
+    primitives::{Address, B256, Log, U256},
 };
 use signet_storage_types::Receipt;
 
@@ -44,18 +44,6 @@ pub(crate) fn decode_u128(data: &[u8]) -> Result<u128, SqlColdError> {
         SqlColdError::Convert(format!("u128 requires 16 bytes, got {}", data.len()))
     })?;
     Ok(u128::from_be_bytes(arr))
-}
-
-// ============================================================================
-// Address / TxKind helpers
-// ============================================================================
-
-/// Encode a [`TxKind`] to an optional address blob for SQL.
-pub(crate) fn to_address(kind: &TxKind) -> Option<Vec<u8>> {
-    match kind {
-        TxKind::Call(addr) => Some(addr.as_slice().to_vec()),
-        TxKind::Create => None,
-    }
 }
 
 // ============================================================================

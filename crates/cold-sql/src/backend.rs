@@ -23,7 +23,7 @@ use crate::columns::{
 use crate::convert::{
     EVENT_ENTER, EVENT_ENTER_TOKEN, EVENT_TRANSACT, build_receipt, decode_access_list_or_empty,
     decode_authorization_list, decode_b256_vec, decode_u128_required, encode_access_list,
-    encode_authorization_list, encode_b256_vec, encode_u128, from_i64, to_address, to_i64,
+    encode_authorization_list, encode_b256_vec, encode_u128, from_i64, to_i64,
 };
 use alloy::{
     consensus::{
@@ -129,9 +129,8 @@ impl SqlColdBackend {
         match spec {
             HeaderSpecifier::Number(n) => Ok(Some(n)),
             HeaderSpecifier::Hash(hash) => {
-                let hash_bytes = hash.as_slice();
                 let row = sqlx::query("SELECT block_number FROM headers WHERE block_hash = $1")
-                    .bind(hash_bytes)
+                    .bind(hash)
                     .fetch_optional(&self.pool)
                     .await?;
                 Ok(row.map(|r| from_i64(r.get::<i64, _>(COL_BLOCK_NUMBER))))
@@ -595,27 +594,27 @@ async fn write_block_to_tx(
         )",
     )
     .bind(bn)
-    .bind(block_hash.as_slice())
-    .bind(data.header.parent_hash.as_slice())
-    .bind(data.header.ommers_hash.as_slice())
-    .bind(data.header.beneficiary.as_slice())
-    .bind(data.header.state_root.as_slice())
-    .bind(data.header.transactions_root.as_slice())
-    .bind(data.header.receipts_root.as_slice())
-    .bind(data.header.logs_bloom.as_slice())
+    .bind(block_hash)
+    .bind(data.header.parent_hash)
+    .bind(data.header.ommers_hash)
+    .bind(data.header.beneficiary)
+    .bind(data.header.state_root)
+    .bind(data.header.transactions_root)
+    .bind(data.header.receipts_root)
+    .bind(data.header.logs_bloom)
     .bind(difficulty)
     .bind(to_i64(data.header.gas_limit))
     .bind(to_i64(data.header.gas_used))
     .bind(to_i64(data.header.timestamp))
-    .bind(data.header.extra_data.as_ref())
-    .bind(data.header.mix_hash.as_slice())
-    .bind(data.header.nonce.as_slice())
+    .bind(&data.header.extra_data)
+    .bind(data.header.mix_hash)
+    .bind(data.header.nonce)
     .bind(data.header.base_fee_per_gas.map(to_i64))
-    .bind(data.header.withdrawals_root.as_ref().map(|r| r.as_slice()))
+    .bind(data.header.withdrawals_root.as_ref())
     .bind(data.header.blob_gas_used.map(to_i64))
     .bind(data.header.excess_blob_gas.map(to_i64))
-    .bind(data.header.parent_beacon_block_root.as_ref().map(|r| r.as_slice()))
-    .bind(data.header.requests_hash.as_ref().map(|r| r.as_slice()))
+    .bind(data.header.parent_beacon_block_root.as_ref())
+    .bind(data.header.requests_hash.as_ref())
     .execute(&mut **tx)
     .await?;
 
@@ -652,12 +651,12 @@ async fn write_block_to_tx(
             .bind(bn)
             .bind(tx_idx)
             .bind(to_i64(log_idx as u64))
-            .bind(log.address.as_slice())
-            .bind(topics.first().map(|t| t.as_slice()))
-            .bind(topics.get(1).map(|t| t.as_slice()))
-            .bind(topics.get(2).map(|t| t.as_slice()))
-            .bind(topics.get(3).map(|t| t.as_slice()))
-            .bind(log.data.data.as_ref())
+            .bind(log.address)
+            .bind(topics.first())
+            .bind(topics.get(1))
+            .bind(topics.get(2))
+            .bind(topics.get(3))
+            .bind(&log.data.data)
             .execute(&mut **tx)
             .await?;
         }
@@ -681,8 +680,8 @@ async fn write_block_to_tx(
         .bind(h.hostBlockNumber)
         .bind(h.rollupChainId)
         .bind(h.gasLimit)
-        .bind(h.rewardAddress.as_slice())
-        .bind(h.blockDataHash.as_slice())
+        .bind(h.rewardAddress)
+        .bind(h.blockDataHash)
         .execute(&mut **tx)
         .await?;
     }
@@ -737,11 +736,11 @@ async fn insert_transaction(
     };
 
     let (value, to_addr) = match tx {
-        EthereumTxEnvelope::Legacy(s) => (s.tx().value, to_address(&s.tx().to)),
-        EthereumTxEnvelope::Eip2930(s) => (s.tx().value, to_address(&s.tx().to)),
-        EthereumTxEnvelope::Eip1559(s) => (s.tx().value, to_address(&s.tx().to)),
-        EthereumTxEnvelope::Eip4844(s) => (s.tx().value, Some(s.tx().to.as_slice().to_vec())),
-        EthereumTxEnvelope::Eip7702(s) => (s.tx().value, Some(s.tx().to.as_slice().to_vec())),
+        EthereumTxEnvelope::Legacy(s) => (s.tx().value, s.tx().to.to()),
+        EthereumTxEnvelope::Eip2930(s) => (s.tx().value, s.tx().to.to()),
+        EthereumTxEnvelope::Eip1559(s) => (s.tx().value, s.tx().to.to()),
+        EthereumTxEnvelope::Eip4844(s) => (s.tx().value, Some(&s.tx().to)),
+        EthereumTxEnvelope::Eip7702(s) => (s.tx().value, Some(&s.tx().to)),
     };
 
     let input: &[u8] = match tx {
@@ -810,7 +809,7 @@ async fn insert_transaction(
     )
     .bind(bn)
     .bind(tx_index)
-    .bind(tx_hash.as_slice())
+    .bind(tx_hash)
     .bind(tx_type)
     .bind(sig_y)
     .bind(sig_r)
@@ -818,7 +817,7 @@ async fn insert_transaction(
     .bind(chain_id)
     .bind(nonce)
     .bind(gas_limit)
-    .bind(to_addr.as_deref())
+    .bind(to_addr)
     .bind(value)
     .bind(input)
     .bind(gas_price.as_ref().map(|v| v.as_slice()))
@@ -828,7 +827,7 @@ async fn insert_transaction(
     .bind(blob_hashes.as_deref())
     .bind(access_list.as_deref())
     .bind(auth_list.as_deref())
-    .bind(sender.as_slice())
+    .bind(sender)
     .execute(&mut *conn)
     .await?;
 
@@ -869,28 +868,28 @@ async fn insert_signet_event(
     .bind(order)
     .bind(chain_id)
     .bind(match event {
-        DbSignetEvent::Transact(_, t) => Some(t.sender.as_slice()),
+        DbSignetEvent::Transact(_, t) => Some(&t.sender),
         _ => None,
     })
     .bind(match event {
-        DbSignetEvent::Transact(_, t) => Some(t.to.as_slice()),
+        DbSignetEvent::Transact(_, t) => Some(&t.to),
         _ => None,
     })
     .bind(value)
     .bind(gas)
     .bind(max_fee)
     .bind(match event {
-        DbSignetEvent::Transact(_, t) => Some(t.data.as_ref()),
+        DbSignetEvent::Transact(_, t) => Some(&t.data),
         _ => None,
     })
     .bind(match event {
-        DbSignetEvent::Enter(_, e) => Some(e.rollupRecipient.as_slice()),
-        DbSignetEvent::EnterToken(_, e) => Some(e.rollupRecipient.as_slice()),
+        DbSignetEvent::Enter(_, e) => Some(&e.rollupRecipient),
+        DbSignetEvent::EnterToken(_, e) => Some(&e.rollupRecipient),
         _ => None,
     })
     .bind(amount)
     .bind(match event {
-        DbSignetEvent::EnterToken(_, e) => Some(e.token.as_slice()),
+        DbSignetEvent::EnterToken(_, e) => Some(&e.token),
         _ => None,
     })
     .execute(&mut *conn)
@@ -1003,7 +1002,7 @@ impl ColdStorage for SqlColdBackend {
                      JOIN headers h ON t.block_number = h.block_number
                      WHERE t.tx_hash = $1",
             )
-            .bind(hash.as_slice())
+            .bind(hash)
             .fetch_optional(&self.pool)
             .await
             .map_err(SqlColdError::from)?,
@@ -1024,7 +1023,7 @@ impl ColdStorage for SqlColdBackend {
                      JOIN headers h ON t.block_number = h.block_number
                      WHERE h.block_hash = $1 AND t.tx_index = $2",
             )
-            .bind(block_hash.as_slice())
+            .bind(block_hash)
             .bind(to_i64(index))
             .fetch_optional(&self.pool)
             .await
@@ -1073,7 +1072,7 @@ impl ColdStorage for SqlColdBackend {
                 let row = sqlx::query(
                     "SELECT block_number, tx_index FROM transactions WHERE tx_hash = $1",
                 )
-                .bind(hash.as_slice())
+                .bind(hash)
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(SqlColdError::from)?;
