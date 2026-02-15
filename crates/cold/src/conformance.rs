@@ -9,8 +9,9 @@ use crate::{
     Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog, TransactionSpecifier,
 };
 use alloy::{
-    consensus::transaction::Recovered,
-    consensus::{Header, Receipt as AlloyReceipt, Sealable, Signed, TxLegacy},
+    consensus::{
+        Header, Receipt as AlloyReceipt, Sealable, Signed, TxLegacy, transaction::Recovered,
+    },
     primitives::{
         Address, B256, BlockNumber, Bytes, Log, LogData, Signature, TxKind, U256, address,
     },
@@ -112,9 +113,8 @@ pub async fn test_append_and_read_header(handle: &ColdStorageHandle) -> ColdResu
 
     handle.append_block(block_data).await?;
 
-    let retrieved = handle.get_header(HeaderSpecifier::Number(100)).await?;
-    assert!(retrieved.is_some());
-    assert_eq!(retrieved.unwrap().hash(), expected_header.hash());
+    let retrieved = handle.get_header(HeaderSpecifier::Number(100)).await?.unwrap();
+    assert_eq!(retrieved.hash(), expected_header.hash());
 
     Ok(())
 }
@@ -126,9 +126,8 @@ pub async fn test_header_hash_lookup(handle: &ColdStorageHandle) -> ColdResult<(
 
     handle.append_block(block_data).await?;
 
-    let retrieved = handle.get_header(HeaderSpecifier::Hash(header_hash)).await?;
-    assert!(retrieved.is_some());
-    assert_eq!(retrieved.unwrap().hash(), header_hash);
+    let retrieved = handle.get_header(HeaderSpecifier::Hash(header_hash)).await?.unwrap();
+    assert_eq!(retrieved.hash(), header_hash);
 
     // Non-existent hash should return None
     let missing = handle.get_header(HeaderSpecifier::Hash(B256::ZERO)).await?;
@@ -507,8 +506,7 @@ pub async fn test_get_logs(handle: &ColdStorageHandle) -> ColdResult<()> {
 }
 
 /// Collect a [`crate::LogStream`] into a `Vec`, returning the first error if any.
-async fn collect_stream(stream: crate::LogStream) -> ColdResult<Vec<RpcLog>> {
-    let mut stream = stream;
+async fn collect_stream(mut stream: crate::LogStream) -> ColdResult<Vec<RpcLog>> {
     let mut results = Vec::new();
     while let Some(item) = stream.next().await {
         results.push(item?);

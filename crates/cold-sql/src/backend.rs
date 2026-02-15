@@ -306,12 +306,11 @@ fn header_from_row(r: &sqlx::any::AnyRow) -> Result<Header, SqlColdError> {
         mix_hash: b256_col(r, COL_MIX_HASH),
         nonce: alloy::primitives::B64::from_slice(blob(r, COL_NONCE)),
         base_fee_per_gas: r.get::<Option<i64>, _>(COL_BASE_FEE_PER_GAS).map(from_i64),
-        withdrawals_root: opt_blob(r, COL_WITHDRAWALS_ROOT).map(|b| B256::from_slice(b)),
+        withdrawals_root: opt_blob(r, COL_WITHDRAWALS_ROOT).map(B256::from_slice),
         blob_gas_used: r.get::<Option<i64>, _>(COL_BLOB_GAS_USED).map(from_i64),
         excess_blob_gas: r.get::<Option<i64>, _>(COL_EXCESS_BLOB_GAS).map(from_i64),
-        parent_beacon_block_root: opt_blob(r, COL_PARENT_BEACON_BLOCK_ROOT)
-            .map(|b| B256::from_slice(b)),
-        requests_hash: opt_blob(r, COL_REQUESTS_HASH).map(|b| B256::from_slice(b)),
+        parent_beacon_block_root: opt_blob(r, COL_PARENT_BEACON_BLOCK_ROOT).map(B256::from_slice),
+        requests_hash: opt_blob(r, COL_REQUESTS_HASH).map(B256::from_slice),
     })
 }
 
@@ -920,17 +919,6 @@ async fn insert_signet_event(
 // Log filter helpers
 // ============================================================================
 
-/// Build the WHERE clause fragment for address/topic filtering on the logs
-/// table.
-///
-/// Returns the clause fragment (including leading ` AND` for each condition)
-/// and the bind parameters as raw byte vectors. Parameter indices start at
-/// `start_idx`.
-/// Append a SQL filter clause for a set of byte-encoded values.
-///
-/// For a single value, generates ` AND {column} = ${idx}`.
-/// For multiple values, generates ` AND {column} IN (${idx}, ...)`.
-/// Returns the next available parameter index.
 /// Append a SQL filter clause for a set of byte-encoded values.
 ///
 /// For a single value, generates ` AND {column} = ${idx}`.
@@ -1411,36 +1399,16 @@ impl ColdStorage for SqlColdBackend {
         let bn = to_i64(block);
         let mut tx = self.pool.begin().await.map_err(SqlColdError::from)?;
 
-        sqlx::query("DELETE FROM logs WHERE block_number > $1")
-            .bind(bn)
-            .execute(&mut *tx)
-            .await
-            .map_err(SqlColdError::from)?;
-        sqlx::query("DELETE FROM transactions WHERE block_number > $1")
-            .bind(bn)
-            .execute(&mut *tx)
-            .await
-            .map_err(SqlColdError::from)?;
-        sqlx::query("DELETE FROM receipts WHERE block_number > $1")
-            .bind(bn)
-            .execute(&mut *tx)
-            .await
-            .map_err(SqlColdError::from)?;
-        sqlx::query("DELETE FROM signet_events WHERE block_number > $1")
-            .bind(bn)
-            .execute(&mut *tx)
-            .await
-            .map_err(SqlColdError::from)?;
-        sqlx::query("DELETE FROM zenith_headers WHERE block_number > $1")
-            .bind(bn)
-            .execute(&mut *tx)
-            .await
-            .map_err(SqlColdError::from)?;
-        sqlx::query("DELETE FROM headers WHERE block_number > $1")
-            .bind(bn)
-            .execute(&mut *tx)
-            .await
-            .map_err(SqlColdError::from)?;
+        // Delete child tables first, then headers (preserves FK ordering).
+        for table in
+            ["logs", "transactions", "receipts", "signet_events", "zenith_headers", "headers"]
+        {
+            sqlx::query(&format!("DELETE FROM {table} WHERE block_number > $1"))
+                .bind(bn)
+                .execute(&mut *tx)
+                .await
+                .map_err(SqlColdError::from)?;
+        }
 
         tx.commit().await.map_err(SqlColdError::from)?;
         Ok(())
