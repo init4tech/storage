@@ -106,20 +106,30 @@ fn produce_log_stream_blocking(
     sender: tokio::sync::mpsc::Sender<ColdResult<RpcLog>>,
     deadline: std::time::Instant,
 ) {
+    // Open a read-only transaction. MDBX's MVCC guarantees a
+    // consistent snapshot for the lifetime of this transaction,
+    // so no reorg detection is needed.
     let tx = try_stream!(sender, env.tx());
 
-    // Reuse cursors across blocks (same pattern as get_logs_inner).
+    // Reuse cursors across blocks to avoid re-opening them on
+    // every iteration (same pattern as get_logs_inner).
     let mut header_cursor = try_stream!(sender, tx.traverse::<ColdHeaders>());
     let mut receipt_cursor = try_stream!(sender, tx.traverse_dual::<ColdReceipts>());
 
     let mut total = 0usize;
 
+    // Walk through blocks one at a time, filtering and sending
+    // matching logs over the channel.
     for block_num in from..=to {
+        // Check the deadline before starting each block so we
+        // don't begin reading after the caller's timeout.
         if std::time::Instant::now() > deadline {
             let _ = sender.blocking_send(Err(ColdStorageError::StreamDeadlineExceeded));
             return;
         }
 
+        // Look up the block header for its hash and timestamp,
+        // which are attached to every emitted RpcLog.
         let sealed = match try_stream!(sender, header_cursor.exact(&block_num)) {
             Some(v) => v,
             None => continue,
@@ -127,6 +137,8 @@ fn produce_log_stream_blocking(
         let block_hash = sealed.hash();
         let block_timestamp = sealed.timestamp;
 
+        // Iterate over all receipts (and their embedded logs) for
+        // this block, applying the caller's address/topic filter.
         let iter = try_stream!(sender, receipt_cursor.iter_k2(&block_num));
 
         let remaining = max_logs.saturating_sub(total);
@@ -140,6 +152,7 @@ fn produce_log_stream_blocking(
                 if !filter.matches(&log) {
                     continue;
                 }
+                // Enforce the global log limit across all blocks.
                 block_count += 1;
                 if block_count > remaining {
                     let _ = sender
@@ -156,12 +169,16 @@ fn produce_log_stream_blocking(
                     log_index: Some(first_log_index + log_idx as u64),
                     removed: false,
                 };
+                // Send the log to the caller via blocking_send
+                // (we're on a spawn_blocking thread, not async).
                 if sender.blocking_send(Ok(rpc_log)).is_err() {
                     return; // receiver dropped
                 }
             }
         }
 
+        // Early exit if we've already hit the limit — no need to
+        // read the next block.
         total += block_count;
         if total >= max_logs {
             return;
