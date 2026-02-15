@@ -227,7 +227,7 @@ impl SqlColdBackend {
 
             let mut query = sqlx::query(&data_sql).bind(to_i64(block_num));
             for param in &filter_params {
-                query = query.bind(param.as_slice());
+                query = query.bind(*param);
             }
 
             let mut stream = query.fetch(&mut *tx);
@@ -947,7 +947,7 @@ async fn insert_signet_event(
 /// Returns the next available parameter index.
 fn append_filter_clause<'a>(
     clause: &mut String,
-    params: &mut Vec<Vec<u8>>,
+    params: &mut Vec<&'a [u8]>,
     mut idx: u32,
     column: &str,
     values: impl ExactSizeIterator<Item = &'a [u8]>,
@@ -957,7 +957,7 @@ fn append_filter_clause<'a>(
     let len = values.len();
     if len == 1 {
         write!(clause, " AND {column} = ${idx}").unwrap();
-        values.for_each(|v: &[u8]| params.push(v.to_vec()));
+        values.for_each(|v| params.push(v));
         return idx + 1;
     }
     write!(clause, " AND {column} IN (").unwrap();
@@ -966,16 +966,16 @@ fn append_filter_clause<'a>(
             clause.push_str(", ");
         }
         write!(clause, "${idx}").unwrap();
-        params.push(v.to_vec());
+        params.push(v);
         idx += 1;
     }
     clause.push(')');
     idx
 }
 
-fn build_log_filter_clause(filter: &Filter, start_idx: u32) -> (String, Vec<Vec<u8>>) {
+fn build_log_filter_clause(filter: &Filter, start_idx: u32) -> (String, Vec<&[u8]>) {
     let mut clause = String::new();
-    let mut params: Vec<Vec<u8>> = Vec::new();
+    let mut params: Vec<&[u8]> = Vec::new();
     let mut idx = start_idx;
 
     if !filter.address.is_empty() {
@@ -1341,7 +1341,7 @@ impl ColdStorage for SqlColdBackend {
         let count_sql = format!("SELECT COUNT(*) as cnt FROM logs l WHERE {where_clause}");
         let mut count_query = sqlx::query(&count_sql).bind(to_i64(from)).bind(to_i64(to));
         for param in &params {
-            count_query = count_query.bind(param.as_slice());
+            count_query = count_query.bind(*param);
         }
         let count_row = count_query.fetch_one(&self.pool).await.map_err(SqlColdError::from)?;
         let count = from_i64(count_row.get::<i64, _>(COL_CNT)) as usize;
@@ -1365,7 +1365,7 @@ impl ColdStorage for SqlColdBackend {
         );
         let mut query = sqlx::query(&data_sql).bind(to_i64(from)).bind(to_i64(to));
         for param in &params {
-            query = query.bind(param.as_slice());
+            query = query.bind(*param);
         }
 
         let rows = query.fetch_all(&self.pool).await.map_err(SqlColdError::from)?;
