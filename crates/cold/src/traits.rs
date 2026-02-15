@@ -6,8 +6,8 @@
 //! details.
 
 use crate::{
-    ColdReceipt, ColdResult, ColdStorageError, Confirmed, Filter, HeaderSpecifier,
-    ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    ColdReceipt, ColdResult, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
+    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::primitives::BlockNumber;
 use signet_storage_types::{
@@ -212,10 +212,10 @@ pub trait ColdStorage: Send + Sync + 'static {
     /// duration when possible — backends with snapshot semantics (MDBX,
     /// PostgreSQL with REPEATABLE READ) need no additional reorg detection.
     ///
-    /// The default implementation calls [`produce_log_stream_default`],
-    /// which uses per-block [`get_header`] and [`get_logs`] calls with
-    /// anchor-hash reorg detection. Backends that hold a single
-    /// transaction should override for efficiency and consistency.
+    /// Backends without snapshot semantics can delegate to
+    /// [`produce_log_stream_default`], which uses per-block
+    /// [`get_header`] / [`get_logs`] calls with anchor-hash reorg
+    /// detection.
     ///
     /// All errors are sent through `sender`. When this method returns,
     /// the sender is dropped, closing the stream.
@@ -232,9 +232,7 @@ pub trait ColdStorage: Send + Sync + 'static {
         max_logs: usize,
         sender: mpsc::Sender<ColdResult<RpcLog>>,
         deadline: tokio::time::Instant,
-    ) -> impl Future<Output = ()> + Send {
-        produce_log_stream_default(self, filter, from, to, max_logs, sender, deadline)
-    }
+    ) -> impl Future<Output = ()> + Send;
 
     // --- Write operations ---
 
@@ -248,85 +246,4 @@ pub trait ColdStorage: Send + Sync + 'static {
     ///
     /// This removes block N+1 and higher from all tables. Used for reorg handling.
     fn truncate_above(&self, block: BlockNumber) -> impl Future<Output = ColdResult<()>> + Send;
-}
-
-/// Default log-streaming implementation for backends without snapshot
-/// semantics.
-///
-/// Captures an anchor hash from the `to` block at the start and
-/// re-checks it before each block to detect reorgs. Uses
-/// [`ColdStorage::get_header`] for anchor checks and
-/// [`ColdStorage::get_logs`] with single-block filters per block.
-///
-/// Backends that hold a consistent read snapshot (MDBX, PostgreSQL
-/// with REPEATABLE READ) should override
-/// [`ColdStorage::produce_log_stream`] instead of using this function.
-#[allow(clippy::too_many_arguments)]
-pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
-    backend: &B,
-    filter: &Filter,
-    from: BlockNumber,
-    to: BlockNumber,
-    max_logs: usize,
-    sender: mpsc::Sender<ColdResult<RpcLog>>,
-    deadline: tokio::time::Instant,
-) {
-    // Capture anchor hash for reorg detection.
-    let anchor_hash = match backend.get_header(HeaderSpecifier::Number(to)).await {
-        Ok(Some(h)) => h.hash(),
-        Ok(None) => return, // block doesn't exist; empty stream
-        Err(e) => {
-            let _ = sender.send(Err(e)).await;
-            return;
-        }
-    };
-
-    let mut total = 0usize;
-
-    for block_num in from..=to {
-        if tokio::time::Instant::now() > deadline {
-            let _ = sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
-            return;
-        }
-
-        // Reorg detection: verify anchor block hash unchanged.
-        match backend.get_header(HeaderSpecifier::Number(to)).await {
-            Ok(Some(h)) if h.hash() == anchor_hash => {}
-            Ok(_) => {
-                let _ = sender.send(Err(ColdStorageError::ReorgDetected)).await;
-                return;
-            }
-            Err(e) => {
-                let _ = sender.send(Err(e)).await;
-                return;
-            }
-        }
-
-        let remaining = max_logs.saturating_sub(total);
-        let block_filter = filter.clone().from_block(block_num).to_block(block_num);
-        let block_logs = match backend.get_logs(block_filter, remaining).await {
-            Ok(logs) => logs,
-            Err(e) => {
-                let _ = sender.send(Err(e)).await;
-                return;
-            }
-        };
-
-        total += block_logs.len();
-
-        for log in block_logs {
-            match tokio::time::timeout_at(deadline, sender.send(Ok(log))).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => return, // receiver dropped
-                Err(_) => {
-                    let _ = sender.send(Err(ColdStorageError::StreamDeadlineExceeded)).await;
-                    return;
-                }
-            }
-        }
-
-        if total >= max_logs {
-            return;
-        }
-    }
 }
