@@ -71,11 +71,6 @@ pub(crate) fn to_address(kind: &TxKind) -> Option<Vec<u8>> {
     }
 }
 
-/// Decode an optional address blob back to a [`TxKind`].
-pub(crate) fn from_address(data: Option<&[u8]>) -> TxKind {
-    data.map_or(TxKind::Create, |b| TxKind::Call(Address::from_slice(b)))
-}
-
 // ============================================================================
 // Nullable field helpers
 // ============================================================================

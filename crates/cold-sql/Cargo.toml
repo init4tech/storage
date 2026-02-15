@@ -17,6 +17,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 alloy = { workspace = true, optional = true }
+alloy-primitives = { version = "1.5.6", features = ["sqlx"] }
 signet-cold.workspace = true
 signet-storage-types = { workspace = true, optional = true }
 signet-zenith = { workspace = true, optional = true }

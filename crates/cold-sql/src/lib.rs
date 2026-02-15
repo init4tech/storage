@@ -32,6 +32,8 @@
 #![deny(unused_must_use, rust_2018_idioms)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+// Trait impls for sqlx integration (Address, B256, Bytes, FixedBytes).
+use alloy_primitives as _;
 mod error;
 pub use error::SqlColdError;
 
