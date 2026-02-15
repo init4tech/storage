@@ -7,13 +7,33 @@
 
 use crate::{
     ColdReceipt, ColdResult, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
-    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    SignetEventsSpecifier, StreamParams, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::primitives::BlockNumber;
 use signet_storage_types::{
     DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, RecoveredTx, SealedHeader,
 };
 use std::future::Future;
+use tokio_stream::wrappers::ReceiverStream;
+
+/// A stream of log results backed by a bounded channel.
+///
+/// Each item is a `ColdResult<RpcLog>`. The stream produces `Ok(log)` items
+/// until complete, or yields a final `Err(e)` on failure. The stream ends
+/// (`None`) when all matching logs have been delivered or after an error.
+///
+/// # Partial Delivery
+///
+/// One or more `Ok(log)` items may be delivered before a terminal
+/// `Err(...)`. Consumers must be prepared for partial results — for
+/// example, a reorg or deadline expiry can interrupt a stream that has
+/// already yielded some logs.
+///
+/// # Resource Management
+///
+/// The stream holds a backend concurrency permit. Dropping the stream
+/// releases the permit. Drop early if results are no longer needed.
+pub type LogStream = ReceiverStream<ColdResult<RpcLog>>;
 
 /// Data for appending a complete block to cold storage.
 #[derive(Debug, Clone)]
@@ -179,9 +199,34 @@ pub trait ColdStorage: Send + Sync + 'static {
     /// [`ColdStorageError::TooManyLogs`]: crate::ColdStorageError::TooManyLogs
     fn get_logs(
         &self,
-        filter: Filter,
+        filter: &Filter,
         max_logs: usize,
     ) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send;
+
+    // --- Streaming ---
+
+    /// Produce a log stream by iterating blocks and sending matching logs.
+    ///
+    /// Implementations should hold a consistent read snapshot for the
+    /// duration when possible — backends with snapshot semantics (MDBX,
+    /// PostgreSQL with REPEATABLE READ) need no additional reorg detection.
+    ///
+    /// Backends without snapshot semantics can delegate to
+    /// [`produce_log_stream_default`], which uses per-block
+    /// [`get_header`] / [`get_logs`] calls with anchor-hash reorg
+    /// detection.
+    ///
+    /// All errors are sent through `sender`. When this method returns,
+    /// the sender is dropped, closing the stream.
+    ///
+    /// [`get_header`]: ColdStorage::get_header
+    /// [`get_logs`]: ColdStorage::get_logs
+    /// [`produce_log_stream_default`]: crate::produce_log_stream_default
+    fn produce_log_stream(
+        &self,
+        filter: &Filter,
+        params: StreamParams,
+    ) -> impl Future<Output = ()> + Send;
 
     // --- Write operations ---
 

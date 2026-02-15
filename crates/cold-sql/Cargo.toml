@@ -17,11 +17,14 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 alloy = { workspace = true, optional = true }
+alloy-primitives = { version = "1.5.6", features = ["sqlx"] }
 signet-cold.workspace = true
 signet-storage-types = { workspace = true, optional = true }
 signet-zenith = { workspace = true, optional = true }
 sqlx = { workspace = true }
 thiserror.workspace = true
+tokio = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
 
 [dev-dependencies]
 signet-cold = { workspace = true, features = ["test-utils"] }
@@ -29,6 +32,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [features]
 default = []
-postgres = ["sqlx/postgres", "sqlx/any", "sqlx/runtime-tokio-rustls", "dep:alloy", "dep:signet-storage-types", "dep:signet-zenith"]
-sqlite = ["sqlx/sqlite", "sqlx/any", "sqlx/runtime-tokio-rustls", "dep:alloy", "dep:signet-storage-types", "dep:signet-zenith"]
+postgres = ["sqlx/postgres", "sqlx/any", "sqlx/runtime-tokio-rustls", "dep:alloy", "dep:signet-storage-types", "dep:signet-zenith", "dep:tokio", "dep:tokio-stream"]
+sqlite = ["sqlx/sqlite", "sqlx/any", "sqlx/runtime-tokio-rustls", "dep:alloy", "dep:signet-storage-types", "dep:signet-zenith", "dep:tokio"]
 test-utils = ["signet-cold/test-utils", "sqlite", "postgres"]

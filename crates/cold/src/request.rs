@@ -4,11 +4,12 @@
 //! Reads and writes use separate channels with their own request types.
 
 use crate::{
-    BlockData, ColdReceipt, ColdStorageError, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier,
-    RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdReceipt, ColdStorageError, Confirmed, Filter, HeaderSpecifier, LogStream,
+    ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::primitives::BlockNumber;
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
+use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// Response sender type alias that propagates Result types.
@@ -117,6 +118,17 @@ pub enum ColdReadRequest {
         max_logs: usize,
         /// The response channel.
         resp: Responder<Vec<RpcLog>>,
+    },
+    /// Stream logs matching a filter.
+    StreamLogs {
+        /// The log filter.
+        filter: Box<Filter>,
+        /// Maximum number of logs to stream.
+        max_logs: usize,
+        /// Requested stream deadline (clamped to the task's max).
+        deadline: Duration,
+        /// Response channel returning the log stream.
+        resp: Responder<LogStream>,
     },
 
     // --- Metadata ---

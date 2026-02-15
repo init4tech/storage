@@ -11,11 +11,12 @@
 
 use crate::{
     AppendBlockRequest, BlockData, ColdReadRequest, ColdReceipt, ColdResult, ColdStorageError,
-    ColdWriteRequest, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
+    ColdWriteRequest, Confirmed, Filter, HeaderSpecifier, LogStream, ReceiptSpecifier, RpcLog,
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::primitives::{B256, BlockNumber};
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 /// Map a [`mpsc::error::TrySendError`] to the appropriate
@@ -264,6 +265,40 @@ impl ColdStorageReadHandle {
     pub async fn get_logs(&self, filter: Filter, max_logs: usize) -> ColdResult<Vec<RpcLog>> {
         let (resp, rx) = oneshot::channel();
         self.send(ColdReadRequest::GetLogs { filter: Box::new(filter), max_logs, resp }, rx).await
+    }
+
+    /// Stream logs matching a filter.
+    ///
+    /// Returns a [`LogStream`] that yields matching logs in order.
+    /// Consume with `StreamExt::next()` until `None`. If the last item
+    /// is `Err(...)`, an error occurred (deadline, too many logs, etc.).
+    ///
+    /// The `deadline` is clamped to the task's configured maximum.
+    ///
+    /// # Partial Delivery
+    ///
+    /// One or more `Ok(log)` items may be delivered before a terminal
+    /// `Err(...)`. Consumers must be prepared for partial results — for
+    /// example, a reorg or deadline expiry can interrupt a stream that
+    /// has already yielded some logs.
+    ///
+    /// # Resource Management
+    ///
+    /// The stream holds a backend concurrency permit. Dropping the
+    /// stream releases the permit. Drop early if results are no
+    /// longer needed.
+    pub async fn stream_logs(
+        &self,
+        filter: Filter,
+        max_logs: usize,
+        deadline: Duration,
+    ) -> ColdResult<LogStream> {
+        let (resp, rx) = oneshot::channel();
+        self.send(
+            ColdReadRequest::StreamLogs { filter: Box::new(filter), max_logs, deadline, resp },
+            rx,
+        )
+        .await
     }
 
     // ==========================================================================

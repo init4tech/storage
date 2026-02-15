@@ -5,32 +5,40 @@
 //! a custom backend, call the test functions with your backend instance.
 
 use crate::{
-    BlockData, ColdResult, ColdStorage, ColdStorageError, Filter, HeaderSpecifier,
-    ReceiptSpecifier, TransactionSpecifier,
+    BlockData, ColdResult, ColdStorage, ColdStorageError, ColdStorageHandle, ColdStorageTask,
+    Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog, TransactionSpecifier,
 };
 use alloy::{
-    consensus::transaction::Recovered,
-    consensus::{Header, Receipt as AlloyReceipt, Sealable, Signed, TxLegacy},
+    consensus::{
+        Header, Receipt as AlloyReceipt, Sealable, Signed, TxLegacy, transaction::Recovered,
+    },
     primitives::{
         Address, B256, BlockNumber, Bytes, Log, LogData, Signature, TxKind, U256, address,
     },
 };
 use signet_storage_types::{Receipt, RecoveredTx, TransactionSigned};
+use std::time::Duration;
+use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 /// Run all conformance tests against a backend.
 ///
 /// This is the main entry point for testing a custom backend implementation.
-pub async fn conformance<B: ColdStorage>(backend: &B) -> ColdResult<()> {
-    test_empty_storage(backend).await?;
-    test_append_and_read_header(backend).await?;
-    test_header_hash_lookup(backend).await?;
-    test_transaction_lookups(backend).await?;
-    test_receipt_lookups(backend).await?;
-    test_truncation(backend).await?;
-    test_batch_append(backend).await?;
-    test_confirmation_metadata(backend).await?;
-    test_cold_receipt_metadata(backend).await?;
-    test_get_logs(backend).await?;
+pub async fn conformance<B: ColdStorage>(backend: B) -> ColdResult<()> {
+    let cancel = CancellationToken::new();
+    let handle = ColdStorageTask::spawn(backend, cancel.clone());
+    test_empty_storage(&handle).await?;
+    test_append_and_read_header(&handle).await?;
+    test_header_hash_lookup(&handle).await?;
+    test_transaction_lookups(&handle).await?;
+    test_receipt_lookups(&handle).await?;
+    test_truncation(&handle).await?;
+    test_batch_append(&handle).await?;
+    test_confirmation_metadata(&handle).await?;
+    test_cold_receipt_metadata(&handle).await?;
+    test_get_logs(&handle).await?;
+    test_stream_logs(&handle).await?;
+    cancel.cancel();
     Ok(())
 }
 
@@ -88,86 +96,84 @@ fn make_test_block_with_txs(block_number: BlockNumber, tx_count: usize) -> Block
 }
 
 /// Test that empty storage returns None/empty for all lookups.
-pub async fn test_empty_storage<B: ColdStorage>(backend: &B) -> ColdResult<()> {
-    assert!(backend.get_header(HeaderSpecifier::Number(0)).await?.is_none());
-    assert!(backend.get_header(HeaderSpecifier::Hash(B256::ZERO)).await?.is_none());
-    assert!(backend.get_latest_block().await?.is_none());
-    assert!(backend.get_transactions_in_block(0).await?.is_empty());
-    assert!(backend.get_receipts_in_block(0).await?.is_empty());
-    assert_eq!(backend.get_transaction_count(0).await?, 0);
+pub async fn test_empty_storage(handle: &ColdStorageHandle) -> ColdResult<()> {
+    assert!(handle.get_header(HeaderSpecifier::Number(0)).await?.is_none());
+    assert!(handle.get_header(HeaderSpecifier::Hash(B256::ZERO)).await?.is_none());
+    assert!(handle.get_latest_block().await?.is_none());
+    assert!(handle.get_transactions_in_block(0).await?.is_empty());
+    assert!(handle.get_receipts_in_block(0).await?.is_empty());
+    assert_eq!(handle.get_transaction_count(0).await?, 0);
     Ok(())
 }
 
 /// Test basic append and read for headers.
-pub async fn test_append_and_read_header<B: ColdStorage>(backend: &B) -> ColdResult<()> {
+pub async fn test_append_and_read_header(handle: &ColdStorageHandle) -> ColdResult<()> {
     let block_data = make_test_block(100);
     let expected_header = block_data.header.clone();
 
-    backend.append_block(block_data).await?;
+    handle.append_block(block_data).await?;
 
-    let retrieved = backend.get_header(HeaderSpecifier::Number(100)).await?;
-    assert!(retrieved.is_some());
-    assert_eq!(retrieved.unwrap().hash(), expected_header.hash());
+    let retrieved = handle.get_header(HeaderSpecifier::Number(100)).await?.unwrap();
+    assert_eq!(retrieved.hash(), expected_header.hash());
 
     Ok(())
 }
 
 /// Test header lookup by hash.
-pub async fn test_header_hash_lookup<B: ColdStorage>(backend: &B) -> ColdResult<()> {
+pub async fn test_header_hash_lookup(handle: &ColdStorageHandle) -> ColdResult<()> {
     let block_data = make_test_block(101);
     let header_hash = block_data.header.hash();
 
-    backend.append_block(block_data).await?;
+    handle.append_block(block_data).await?;
 
-    let retrieved = backend.get_header(HeaderSpecifier::Hash(header_hash)).await?;
-    assert!(retrieved.is_some());
-    assert_eq!(retrieved.unwrap().hash(), header_hash);
+    let retrieved = handle.get_header(HeaderSpecifier::Hash(header_hash)).await?.unwrap();
+    assert_eq!(retrieved.hash(), header_hash);
 
     // Non-existent hash should return None
-    let missing = backend.get_header(HeaderSpecifier::Hash(B256::ZERO)).await?;
+    let missing = handle.get_header(HeaderSpecifier::Hash(B256::ZERO)).await?;
     assert!(missing.is_none());
 
     Ok(())
 }
 
 /// Test transaction lookups by hash and by block+index.
-pub async fn test_transaction_lookups<B: ColdStorage>(backend: &B) -> ColdResult<()> {
+pub async fn test_transaction_lookups(handle: &ColdStorageHandle) -> ColdResult<()> {
     let block_data = make_test_block(200);
 
-    backend.append_block(block_data).await?;
+    handle.append_block(block_data).await?;
 
-    let txs = backend.get_transactions_in_block(200).await?;
-    let count = backend.get_transaction_count(200).await?;
+    let txs = handle.get_transactions_in_block(200).await?;
+    let count = handle.get_transaction_count(200).await?;
     assert_eq!(txs.len() as u64, count);
 
     Ok(())
 }
 
 /// Test receipt lookups.
-pub async fn test_receipt_lookups<B: ColdStorage>(backend: &B) -> ColdResult<()> {
+pub async fn test_receipt_lookups(handle: &ColdStorageHandle) -> ColdResult<()> {
     let block_data = make_test_block(201);
 
-    backend.append_block(block_data).await?;
+    handle.append_block(block_data).await?;
 
-    let receipts = backend.get_receipts_in_block(201).await?;
+    let receipts = handle.get_receipts_in_block(201).await?;
     assert!(receipts.is_empty());
 
     Ok(())
 }
 
 /// Test that transaction and receipt lookups return correct metadata.
-pub async fn test_confirmation_metadata<B: ColdStorage>(backend: &B) -> ColdResult<()> {
+pub async fn test_confirmation_metadata(handle: &ColdStorageHandle) -> ColdResult<()> {
     let block = make_test_block_with_txs(600, 3);
     let expected_hash = block.header.hash();
     let tx_hashes: Vec<_> = block.transactions.iter().map(|tx| *tx.tx_hash()).collect();
     let expected_senders: Vec<_> = block.transactions.iter().map(|tx| *tx.signer()).collect();
 
-    backend.append_block(block).await?;
+    handle.append_block(block).await?;
 
     // Verify transaction metadata via hash lookup
     for (idx, tx_hash) in tx_hashes.iter().enumerate() {
         let confirmed =
-            backend.get_transaction(TransactionSpecifier::Hash(*tx_hash)).await?.unwrap();
+            handle.get_transaction(TransactionSpecifier::Hash(*tx_hash)).await?.unwrap();
         assert_eq!(confirmed.meta().block_number(), 600);
         assert_eq!(confirmed.meta().block_hash(), expected_hash);
         assert_eq!(confirmed.meta().transaction_index(), idx as u64);
@@ -175,7 +181,7 @@ pub async fn test_confirmation_metadata<B: ColdStorage>(backend: &B) -> ColdResu
     }
 
     // Verify transaction metadata via block+index lookup
-    let confirmed = backend
+    let confirmed = handle
         .get_transaction(TransactionSpecifier::BlockAndIndex { block: 600, index: 1 })
         .await?
         .unwrap();
@@ -185,7 +191,7 @@ pub async fn test_confirmation_metadata<B: ColdStorage>(backend: &B) -> ColdResu
     assert_eq!(*confirmed.inner().signer(), expected_senders[1]);
 
     // Verify transaction metadata via block_hash+index lookup
-    let confirmed = backend
+    let confirmed = handle
         .get_transaction(TransactionSpecifier::BlockHashAndIndex {
             block_hash: expected_hash,
             index: 2,
@@ -197,13 +203,13 @@ pub async fn test_confirmation_metadata<B: ColdStorage>(backend: &B) -> ColdResu
     assert_eq!(*confirmed.inner().signer(), expected_senders[2]);
 
     // Verify receipt metadata via tx hash lookup
-    let cold_receipt = backend.get_receipt(ReceiptSpecifier::TxHash(tx_hashes[0])).await?.unwrap();
+    let cold_receipt = handle.get_receipt(ReceiptSpecifier::TxHash(tx_hashes[0])).await?.unwrap();
     assert_eq!(cold_receipt.block_number, 600);
     assert_eq!(cold_receipt.block_hash, expected_hash);
     assert_eq!(cold_receipt.transaction_index, 0);
 
     // Verify receipt metadata via block+index lookup
-    let cold_receipt = backend
+    let cold_receipt = handle
         .get_receipt(ReceiptSpecifier::BlockAndIndex { block: 600, index: 2 })
         .await?
         .unwrap();
@@ -211,51 +217,51 @@ pub async fn test_confirmation_metadata<B: ColdStorage>(backend: &B) -> ColdResu
     assert_eq!(cold_receipt.transaction_index, 2);
 
     // Non-existent lookups return None
-    assert!(backend.get_transaction(TransactionSpecifier::Hash(B256::ZERO)).await?.is_none());
-    assert!(backend.get_receipt(ReceiptSpecifier::TxHash(B256::ZERO)).await?.is_none());
+    assert!(handle.get_transaction(TransactionSpecifier::Hash(B256::ZERO)).await?.is_none());
+    assert!(handle.get_receipt(ReceiptSpecifier::TxHash(B256::ZERO)).await?.is_none());
 
     Ok(())
 }
 
 /// Test truncation removes data correctly.
-pub async fn test_truncation<B: ColdStorage>(backend: &B) -> ColdResult<()> {
+pub async fn test_truncation(handle: &ColdStorageHandle) -> ColdResult<()> {
     // Append blocks 300, 301, 302
-    backend.append_block(make_test_block(300)).await?;
-    backend.append_block(make_test_block(301)).await?;
-    backend.append_block(make_test_block(302)).await?;
+    handle.append_block(make_test_block(300)).await?;
+    handle.append_block(make_test_block(301)).await?;
+    handle.append_block(make_test_block(302)).await?;
 
     // Truncate above 300 (removes 301, 302)
-    backend.truncate_above(300).await?;
+    handle.truncate_above(300).await?;
 
     // Block 300 should still exist
-    assert!(backend.get_header(HeaderSpecifier::Number(300)).await?.is_some());
+    assert!(handle.get_header(HeaderSpecifier::Number(300)).await?.is_some());
 
     // Blocks 301, 302 should be gone
-    assert!(backend.get_header(HeaderSpecifier::Number(301)).await?.is_none());
-    assert!(backend.get_header(HeaderSpecifier::Number(302)).await?.is_none());
+    assert!(handle.get_header(HeaderSpecifier::Number(301)).await?.is_none());
+    assert!(handle.get_header(HeaderSpecifier::Number(302)).await?.is_none());
 
     // Latest should now be 300
-    assert_eq!(backend.get_latest_block().await?, Some(300));
+    assert_eq!(handle.get_latest_block().await?, Some(300));
 
     Ok(())
 }
 
 /// Test batch append.
-pub async fn test_batch_append<B: ColdStorage>(backend: &B) -> ColdResult<()> {
+pub async fn test_batch_append(handle: &ColdStorageHandle) -> ColdResult<()> {
     let blocks = vec![make_test_block(400), make_test_block(401), make_test_block(402)];
 
-    backend.append_blocks(blocks).await?;
+    handle.append_blocks(blocks).await?;
 
-    assert!(backend.get_header(HeaderSpecifier::Number(400)).await?.is_some());
-    assert!(backend.get_header(HeaderSpecifier::Number(401)).await?.is_some());
-    assert!(backend.get_header(HeaderSpecifier::Number(402)).await?.is_some());
+    assert!(handle.get_header(HeaderSpecifier::Number(400)).await?.is_some());
+    assert!(handle.get_header(HeaderSpecifier::Number(401)).await?.is_some());
+    assert!(handle.get_header(HeaderSpecifier::Number(402)).await?.is_some());
 
     Ok(())
 }
 
 /// Test ColdReceipt metadata: gas_used, first_log_index, tx_hash,
 /// block_hash, block_number, transaction_index, from.
-pub async fn test_cold_receipt_metadata<B: ColdStorage>(backend: &B) -> ColdResult<()> {
+pub async fn test_cold_receipt_metadata(handle: &ColdStorageHandle) -> ColdResult<()> {
     // Block with 3 receipts having 2, 3, and 1 logs respectively.
     let header = Header { number: 700, ..Default::default() };
     let sealed = header.seal_slow();
@@ -270,10 +276,10 @@ pub async fn test_cold_receipt_metadata<B: ColdStorage>(backend: &B) -> ColdResu
     ];
     let block = BlockData::new(sealed, transactions, receipts, vec![], None);
 
-    backend.append_block(block).await?;
+    handle.append_block(block).await?;
 
     // First receipt: gas_used=21000, first log index=0
-    let first = backend
+    let first = handle
         .get_receipt(ReceiptSpecifier::BlockAndIndex { block: 700, index: 0 })
         .await?
         .unwrap();
@@ -287,7 +293,7 @@ pub async fn test_cold_receipt_metadata<B: ColdStorage>(backend: &B) -> ColdResu
     assert_eq!(first.receipt.logs[1].log_index, Some(1));
 
     // Second receipt: gas_used=21000, first log index=2
-    let second = backend
+    let second = handle
         .get_receipt(ReceiptSpecifier::BlockAndIndex { block: 700, index: 1 })
         .await?
         .unwrap();
@@ -297,7 +303,7 @@ pub async fn test_cold_receipt_metadata<B: ColdStorage>(backend: &B) -> ColdResu
     assert_eq!(second.receipt.logs.len(), 3);
 
     // Third receipt: gas_used=21000, first log index=5 (2+3)
-    let third = backend
+    let third = handle
         .get_receipt(ReceiptSpecifier::BlockAndIndex { block: 700, index: 2 })
         .await?
         .unwrap();
@@ -306,14 +312,14 @@ pub async fn test_cold_receipt_metadata<B: ColdStorage>(backend: &B) -> ColdResu
     assert_eq!(third.receipt.logs[0].log_index, Some(5));
 
     // Lookup by tx hash
-    let by_hash = backend.get_receipt(ReceiptSpecifier::TxHash(tx_hashes[1])).await?.unwrap();
+    let by_hash = handle.get_receipt(ReceiptSpecifier::TxHash(tx_hashes[1])).await?.unwrap();
     assert_eq!(by_hash.transaction_index, 1);
     assert_eq!(by_hash.tx_hash, tx_hashes[1]);
     assert_eq!(by_hash.from, expected_senders[1]);
     assert_eq!(by_hash.receipt.logs[0].log_index, Some(2));
 
     // Verify gas_used on all receipts via get_receipts_in_block
-    let all = backend.get_receipts_in_block(700).await?;
+    let all = handle.get_receipts_in_block(700).await?;
     assert_eq!(all.len(), 3);
     assert_eq!(all[0].gas_used, 21000);
     assert_eq!(all[1].gas_used, 21000);
@@ -321,7 +327,7 @@ pub async fn test_cold_receipt_metadata<B: ColdStorage>(backend: &B) -> ColdResu
 
     // Non-existent returns None
     assert!(
-        backend
+        handle
             .get_receipt(ReceiptSpecifier::BlockAndIndex { block: 999, index: 0 })
             .await?
             .is_none()
@@ -353,7 +359,7 @@ fn make_test_block_with_receipts(block_number: BlockNumber, receipts: Vec<Receip
 }
 
 /// Test get_logs with various filter combinations.
-pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
+pub async fn test_get_logs(handle: &ColdStorageHandle) -> ColdResult<()> {
     let addr_a = Address::with_last_byte(0xAA);
     let addr_b = Address::with_last_byte(0xBB);
     let topic0_transfer = B256::with_last_byte(0x01);
@@ -383,15 +389,15 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
         vec![make_receipt_from_logs(vec![make_test_log(addr_b, vec![topic0_transfer], vec![4])])];
     let block_801 = make_test_block_with_receipts(801, receipts_801);
 
-    backend.append_block(block_800).await?;
-    backend.append_block(block_801).await?;
+    handle.append_block(block_800).await?;
+    handle.append_block(block_801).await?;
 
     // --- Empty range returns empty ---
-    let empty = backend.get_logs(Filter::new().from_block(900).to_block(999), usize::MAX).await?;
+    let empty = handle.get_logs(Filter::new().from_block(900).to_block(999), usize::MAX).await?;
     assert!(empty.is_empty());
 
     // --- All logs in range 800..=801 (no address/topic filter) ---
-    let all = backend.get_logs(Filter::new().from_block(800).to_block(801), usize::MAX).await?;
+    let all = handle.get_logs(Filter::new().from_block(800).to_block(801), usize::MAX).await?;
     assert_eq!(all.len(), 4);
     // Verify ordering by (block_number, transaction_index)
     assert_eq!((all[0].block_number, all[0].transaction_index), (Some(800), Some(0)));
@@ -415,19 +421,18 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     assert_eq!(all[2].transaction_hash, Some(tx1_hash_800));
 
     // --- Block range filtering ---
-    let only_800 =
-        backend.get_logs(Filter::new().from_block(800).to_block(800), usize::MAX).await?;
+    let only_800 = handle.get_logs(Filter::new().from_block(800).to_block(800), usize::MAX).await?;
     assert_eq!(only_800.len(), 3);
 
     // --- Single address filter ---
-    let addr_a_logs = backend
+    let addr_a_logs = handle
         .get_logs(Filter::new().from_block(800).to_block(801).address(addr_a), usize::MAX)
         .await?;
     assert_eq!(addr_a_logs.len(), 2);
     assert!(addr_a_logs.iter().all(|l| l.inner.address == addr_a));
 
     // --- Multi-address filter ---
-    let both_addr = backend
+    let both_addr = handle
         .get_logs(
             Filter::new().from_block(800).to_block(801).address(vec![addr_a, addr_b]),
             usize::MAX,
@@ -436,7 +441,7 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     assert_eq!(both_addr.len(), 4);
 
     // --- Topic0 filter ---
-    let transfers = backend
+    let transfers = handle
         .get_logs(
             Filter::new().from_block(800).to_block(801).event_signature(topic0_transfer),
             usize::MAX,
@@ -445,7 +450,7 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     assert_eq!(transfers.len(), 3);
 
     // --- Topic0 multi-value (OR within position) ---
-    let transfer_or_approval = backend
+    let transfer_or_approval = handle
         .get_logs(
             Filter::new()
                 .from_block(800)
@@ -457,7 +462,7 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     assert_eq!(transfer_or_approval.len(), 4);
 
     // --- Multi-topic: topic0 AND topic1 ---
-    let specific = backend
+    let specific = handle
         .get_logs(
             Filter::new()
                 .from_block(800)
@@ -471,13 +476,13 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     assert_eq!(specific[0].inner.address, addr_a);
 
     // --- Topic1 filter with topic0 wildcard ---
-    let by_sender = backend
+    let by_sender = handle
         .get_logs(Filter::new().from_block(800).to_block(801).topic1(topic1_sender), usize::MAX)
         .await?;
     assert_eq!(by_sender.len(), 1);
 
     // --- Combined address + topic filter ---
-    let addr_a_transfers = backend
+    let addr_a_transfers = handle
         .get_logs(
             Filter::new()
                 .from_block(800)
@@ -490,12 +495,116 @@ pub async fn test_get_logs<B: ColdStorage>(backend: &B) -> ColdResult<()> {
     assert_eq!(addr_a_transfers.len(), 2);
 
     // --- max_logs errors when exceeded ---
-    let err = backend.get_logs(Filter::new().from_block(800).to_block(801), 2).await;
+    let err = handle.get_logs(Filter::new().from_block(800).to_block(801), 2).await;
     assert!(matches!(err, Err(ColdStorageError::TooManyLogs { limit: 2 })));
 
     // --- max_logs at exact count succeeds ---
-    let exact = backend.get_logs(Filter::new().from_block(800).to_block(801), 4).await?;
+    let exact = handle.get_logs(Filter::new().from_block(800).to_block(801), 4).await?;
     assert_eq!(exact.len(), 4);
+
+    Ok(())
+}
+
+/// Collect a [`crate::LogStream`] into a `Vec`, returning the first error if any.
+async fn collect_stream(mut stream: crate::LogStream) -> ColdResult<Vec<RpcLog>> {
+    let mut results = Vec::new();
+    while let Some(item) = stream.next().await {
+        results.push(item?);
+    }
+    Ok(results)
+}
+
+/// Test stream_logs produces identical results to get_logs for all filter
+/// combinations from the existing test_get_logs suite.
+///
+/// Uses block numbers 850-851 to avoid collisions with test_get_logs data
+/// (800-801). Streaming is tested via [`ColdStorageHandle`] since the
+/// streaming loop lives in [`ColdStorageTask`].
+pub async fn test_stream_logs(handle: &ColdStorageHandle) -> ColdResult<()> {
+    let addr_a = Address::with_last_byte(0xAA);
+    let addr_b = Address::with_last_byte(0xBB);
+    let topic0_transfer = B256::with_last_byte(0x01);
+    let topic0_approval = B256::with_last_byte(0x02);
+    let topic1_sender = B256::with_last_byte(0x10);
+
+    // Block 850: 2 txs, tx0 has 2 logs, tx1 has 1 log
+    let receipts_850 = vec![
+        make_receipt_from_logs(vec![
+            make_test_log(addr_a, vec![topic0_transfer, topic1_sender], vec![1]),
+            make_test_log(addr_b, vec![topic0_approval], vec![2]),
+        ]),
+        make_receipt_from_logs(vec![make_test_log(addr_a, vec![topic0_transfer], vec![3])]),
+    ];
+    let block_850 = make_test_block_with_receipts(850, receipts_850);
+    handle.append_block(block_850).await?;
+
+    // Block 851: 1 tx, 1 log
+    let receipts_851 =
+        vec![make_receipt_from_logs(vec![make_test_log(addr_b, vec![topic0_transfer], vec![4])])];
+    let block_851 = make_test_block_with_receipts(851, receipts_851);
+    handle.append_block(block_851).await?;
+
+    // Helper: verify stream matches get_logs for the same filter.
+    let filters = vec![
+        // All logs
+        Filter::new().from_block(850).to_block(851),
+        // Single block
+        Filter::new().from_block(850).to_block(850),
+        // Address filter
+        Filter::new().from_block(850).to_block(851).address(addr_a),
+        // Topic filter
+        Filter::new().from_block(850).to_block(851).event_signature(topic0_transfer),
+        // Combined address + topic
+        Filter::new()
+            .from_block(850)
+            .to_block(851)
+            .address(addr_a)
+            .event_signature(topic0_transfer),
+        // Empty range
+        Filter::new().from_block(900).to_block(999),
+    ];
+
+    for filter in filters {
+        let expected = handle.get_logs(filter.clone(), usize::MAX).await?;
+        let stream = handle.stream_logs(filter, usize::MAX, Duration::from_secs(60)).await?;
+        let streamed = collect_stream(stream).await?;
+        assert_eq!(expected.len(), streamed.len(), "stream length mismatch");
+        for (e, s) in expected.iter().zip(streamed.iter()) {
+            assert_eq!(e.block_number, s.block_number);
+            assert_eq!(e.transaction_index, s.transaction_index);
+            assert_eq!(e.log_index, s.log_index);
+            assert_eq!(e.block_hash, s.block_hash);
+            assert_eq!(e.transaction_hash, s.transaction_hash);
+            assert_eq!(e.inner.address, s.inner.address);
+        }
+    }
+
+    // --- max_logs: stream yields TooManyLogs error ---
+    let stream = handle
+        .stream_logs(Filter::new().from_block(850).to_block(851), 2, Duration::from_secs(60))
+        .await?;
+    let result = collect_stream(stream).await;
+    assert!(matches!(result, Err(ColdStorageError::TooManyLogs { limit: 2 })));
+
+    // --- max_logs across block boundary: limit reports the original max_logs ---
+    // Block 860 has 2 logs, block 861 has 2 logs.  With max_logs=3 the limit
+    // is exceeded during block 861 and the error must report `limit: 3`.
+    let receipts_860 = vec![make_receipt_from_logs(vec![
+        make_test_log(addr_a, vec![topic0_transfer], vec![10]),
+        make_test_log(addr_b, vec![topic0_transfer], vec![11]),
+    ])];
+    let receipts_861 = vec![make_receipt_from_logs(vec![
+        make_test_log(addr_a, vec![topic0_transfer], vec![12]),
+        make_test_log(addr_b, vec![topic0_transfer], vec![13]),
+    ])];
+    handle.append_block(make_test_block_with_receipts(860, receipts_860)).await?;
+    handle.append_block(make_test_block_with_receipts(861, receipts_861)).await?;
+
+    let stream = handle
+        .stream_logs(Filter::new().from_block(860).to_block(861), 3, Duration::from_secs(60))
+        .await?;
+    let result = collect_stream(stream).await;
+    assert!(matches!(result, Err(ColdStorageError::TooManyLogs { limit: 3 })));
 
     Ok(())
 }

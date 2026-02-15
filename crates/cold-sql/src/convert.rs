@@ -11,7 +11,7 @@ use alloy::{
         eip2930::{AccessList, AccessListItem},
         eip7702::{Authorization, SignedAuthorization},
     },
-    primitives::{Address, B256, Log, TxKind, U256},
+    primitives::{Address, B256, Log, U256},
 };
 use signet_storage_types::Receipt;
 
@@ -33,19 +33,6 @@ pub(crate) const fn from_i64(v: i64) -> u64 {
 // Fixed-size type encoding
 // ============================================================================
 
-/// Encode a U256 as 32 big-endian bytes.
-pub(crate) const fn encode_u256(v: &U256) -> [u8; 32] {
-    v.to_be_bytes::<32>()
-}
-
-/// Decode a U256 from big-endian bytes.
-pub(crate) fn decode_u256(data: &[u8]) -> Result<U256, SqlColdError> {
-    if data.len() < 32 {
-        return Err(SqlColdError::Convert(format!("U256 requires 32 bytes, got {}", data.len())));
-    }
-    Ok(U256::from_be_slice(data))
-}
-
 /// Encode a u128 as 16 big-endian bytes.
 pub(crate) const fn encode_u128(v: u128) -> [u8; 16] {
     v.to_be_bytes()
@@ -60,41 +47,17 @@ pub(crate) fn decode_u128(data: &[u8]) -> Result<u128, SqlColdError> {
 }
 
 // ============================================================================
-// Address / TxKind helpers
-// ============================================================================
-
-/// Encode a [`TxKind`] to an optional address blob for SQL.
-pub(crate) fn to_address(kind: &TxKind) -> Option<Vec<u8>> {
-    match kind {
-        TxKind::Call(addr) => Some(addr.as_slice().to_vec()),
-        TxKind::Create => None,
-    }
-}
-
-/// Decode an optional address blob back to a [`TxKind`].
-pub(crate) fn from_address(data: Option<&[u8]>) -> TxKind {
-    data.map_or(TxKind::Create, |b| TxKind::Call(Address::from_slice(b)))
-}
-
-// ============================================================================
 // Nullable field helpers
 // ============================================================================
 
 /// Decode a required u128 from a nullable blob column.
-pub(crate) fn decode_u128_required(
-    data: &Option<Vec<u8>>,
-    field: &str,
-) -> Result<u128, SqlColdError> {
-    data.as_ref()
-        .ok_or_else(|| SqlColdError::Convert(format!("{field} is required")))
-        .and_then(|b| decode_u128(b))
+pub(crate) fn decode_u128_required(data: Option<&[u8]>, field: &str) -> Result<u128, SqlColdError> {
+    data.ok_or_else(|| SqlColdError::Convert(format!("{field} is required"))).and_then(decode_u128)
 }
 
 /// Decode an access list from a nullable blob column, defaulting to empty.
-pub(crate) fn decode_access_list_or_empty(
-    data: &Option<Vec<u8>>,
-) -> Result<AccessList, SqlColdError> {
-    data.as_ref().map(|b| decode_access_list(b)).transpose().map(|opt| opt.unwrap_or_default())
+pub(crate) fn decode_access_list_or_empty(data: Option<&[u8]>) -> Result<AccessList, SqlColdError> {
+    data.map(decode_access_list).transpose().map(|opt| opt.unwrap_or_default())
 }
 
 // ============================================================================

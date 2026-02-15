@@ -8,17 +8,29 @@
 //!
 //! Transaction, receipt, and header lookups are served from an LRU cache,
 //! avoiding repeated backend reads for frequently queried items.
+//!
+//! # Log Streaming
+//!
+//! The task owns the streaming configuration (max deadline, concurrency
+//! limit) and delegates the streaming loop to the backend via
+//! [`ColdStorage::produce_log_stream`]. Callers supply a per-request
+//! deadline that is clamped to the task's configured maximum.
 
 use super::cache::ColdCache;
 use crate::{
-    ColdReadRequest, ColdReceipt, ColdResult, ColdStorage, ColdStorageHandle, ColdWriteRequest,
-    Confirmed, HeaderSpecifier, ReceiptSpecifier, TransactionSpecifier,
+    ColdReadRequest, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, ColdStorageHandle,
+    ColdWriteRequest, Confirmed, HeaderSpecifier, LogStream, ReceiptSpecifier,
+    TransactionSpecifier,
 };
 use signet_storage_types::{RecoveredTx, SealedHeader};
-use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use std::{sync::Arc, time::Duration};
+use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, instrument};
+
+/// Default maximum deadline for streaming operations.
+const DEFAULT_MAX_STREAM_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Channel size for cold storage read requests.
 const READ_CHANNEL_SIZE: usize = 256;
@@ -29,6 +41,12 @@ const WRITE_CHANNEL_SIZE: usize = 256;
 /// Maximum concurrent read request handlers.
 const MAX_CONCURRENT_READERS: usize = 64;
 
+/// Maximum concurrent streaming operations.
+const MAX_CONCURRENT_STREAMS: usize = 8;
+
+/// Channel buffer size for streaming operations.
+const STREAM_CHANNEL_BUFFER: usize = 256;
+
 /// Shared state for the cold storage task, holding the backend and cache.
 ///
 /// This is wrapped in an `Arc` so that spawned read handlers can access
@@ -36,6 +54,8 @@ const MAX_CONCURRENT_READERS: usize = 64;
 struct ColdStorageTaskInner<B> {
     backend: B,
     cache: Mutex<ColdCache>,
+    max_stream_deadline: Duration,
+    stream_semaphore: Arc<Semaphore>,
 }
 
 impl<B: ColdStorage> ColdStorageTaskInner<B> {
@@ -80,7 +100,7 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
     }
 
     /// Handle a read request, checking the cache first where applicable.
-    async fn handle_read(&self, req: ColdReadRequest) {
+    async fn handle_read(self: &Arc<Self>, req: ColdReadRequest) {
         match req {
             ColdReadRequest::GetHeader { spec, resp } => {
                 let result = if let HeaderSpecifier::Number(n) = &spec {
@@ -140,12 +160,60 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
                 let _ = resp.send(self.backend.get_zenith_headers(spec).await);
             }
             ColdReadRequest::GetLogs { filter, max_logs, resp } => {
-                let _ = resp.send(self.backend.get_logs(*filter, max_logs).await);
+                let _ = resp.send(self.backend.get_logs(&filter, max_logs).await);
+            }
+            ColdReadRequest::StreamLogs { filter, max_logs, deadline, resp } => {
+                let _ = resp.send(self.handle_stream_logs(*filter, max_logs, deadline).await);
             }
             ColdReadRequest::GetLatestBlock { resp } => {
                 let _ = resp.send(self.backend.get_latest_block().await);
             }
         }
+    }
+
+    /// Stream logs matching a filter.
+    ///
+    /// Acquires a concurrency permit, resolves the block range, then
+    /// spawns a producer task that delegates to
+    /// [`ColdStorage::produce_log_stream`].
+    async fn handle_stream_logs(
+        self: &Arc<Self>,
+        filter: crate::Filter,
+        max_logs: usize,
+        deadline: Duration,
+    ) -> ColdResult<LogStream> {
+        let permit = self
+            .stream_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ColdStorageError::Cancelled)?;
+
+        let from = filter.get_from_block().unwrap_or(0);
+        let to = match filter.get_to_block() {
+            Some(to) => to,
+            None => {
+                let Some(latest) = self.backend.get_latest_block().await? else {
+                    let (_tx, rx) = mpsc::channel(1);
+                    return Ok(ReceiverStream::new(rx));
+                };
+                latest
+            }
+        };
+
+        let effective = deadline.min(self.max_stream_deadline);
+        let deadline_instant = tokio::time::Instant::now() + effective;
+        let (sender, rx) = mpsc::channel(STREAM_CHANNEL_BUFFER);
+        let inner = Arc::clone(self);
+
+        tokio::spawn(async move {
+            let _permit = permit;
+            let params =
+                crate::StreamParams { from, to, max_logs, sender, deadline: deadline_instant };
+            inner.backend.produce_log_stream(&filter, params).await;
+        });
+
+        Ok(ReceiverStream::new(rx))
     }
 
     /// Handle a write request, invalidating the cache on truncation.
@@ -186,6 +254,13 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
 /// This design prioritizes write ordering for correctness while allowing
 /// read throughput to scale with concurrency.
 ///
+/// # Log Streaming
+///
+/// The task owns the streaming configuration (max deadline, concurrency
+/// limit) and delegates the streaming loop to the backend via
+/// [`ColdStorage::produce_log_stream`]. Callers supply a per-request
+/// deadline that is clamped to the task's configured maximum.
+///
 /// # Caching
 ///
 /// Transaction, receipt, and header lookups are served from an LRU cache
@@ -212,7 +287,12 @@ impl<B: ColdStorage> ColdStorageTask<B> {
         let (read_sender, read_receiver) = mpsc::channel(READ_CHANNEL_SIZE);
         let (write_sender, write_receiver) = mpsc::channel(WRITE_CHANNEL_SIZE);
         let task = Self {
-            inner: Arc::new(ColdStorageTaskInner { backend, cache: Mutex::new(ColdCache::new()) }),
+            inner: Arc::new(ColdStorageTaskInner {
+                backend,
+                cache: Mutex::new(ColdCache::new()),
+                max_stream_deadline: DEFAULT_MAX_STREAM_DEADLINE,
+                stream_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS)),
+            }),
             read_receiver,
             write_receiver,
             cancel_token,

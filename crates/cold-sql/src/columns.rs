@@ -53,6 +53,7 @@ pub(crate) const COL_FROM_ADDRESS: &str = "from_address";
 // ── receipt columns ─────────────────────────────────────────────────────────
 pub(crate) const COL_SUCCESS: &str = "success";
 pub(crate) const COL_CUMULATIVE_GAS_USED: &str = "cumulative_gas_used";
+pub(crate) const COL_FIRST_LOG_INDEX: &str = "first_log_index";
 
 // ── log columns ─────────────────────────────────────────────────────────────
 pub(crate) const COL_ADDRESS: &str = "address";
@@ -79,7 +80,6 @@ pub(crate) const COL_BLOCK_DATA_HASH: &str = "block_data_hash";
 
 // ── query-specific aliases ──────────────────────────────────────────────────
 pub(crate) const COL_CNT: &str = "cnt";
-pub(crate) const COL_LOG_COUNT: &str = "log_count";
 pub(crate) const COL_PRIOR_GAS: &str = "prior_gas";
 pub(crate) const COL_BLOCK_LOG_INDEX: &str = "block_log_index";
 pub(crate) const COL_BLOCK_TIMESTAMP: &str = "block_timestamp";
