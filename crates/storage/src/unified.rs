@@ -105,6 +105,11 @@ impl<H: HotKv> UnifiedStorage<H> {
         &self.hot
     }
 
+    /// Consume self and return the hot storage backend.
+    pub fn into_hot(self) -> H {
+        self.hot
+    }
+
     /// Get a reference to the cold storage handle.
     pub const fn cold(&self) -> &ColdStorageHandle {
         &self.cold

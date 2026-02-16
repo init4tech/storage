@@ -60,14 +60,23 @@
 mod error;
 pub use error::{StorageError, StorageResult};
 
+pub mod config;
+
+pub mod builder;
+
 mod unified;
 pub use unified::UnifiedStorage;
 
 // Re-export key types for convenience
 pub use signet_cold::{ColdStorage, ColdStorageError, ColdStorageHandle, ColdStorageTask};
+pub use signet_cold_mdbx::MdbxColdBackend;
 pub use signet_hot::{
     HistoryError, HistoryRead, HistoryWrite, HotKv,
     model::{HotKvRead, RevmRead, RevmWrite},
 };
+pub use signet_hot_mdbx::{DatabaseArguments, DatabaseEnv};
 pub use signet_storage_types::{ExecutedBlock, ExecutedBlockBuilder};
 pub use tokio_util::sync::CancellationToken;
+
+#[cfg(feature = "sql")]
+pub use signet_cold_sql::SqlColdBackend;
