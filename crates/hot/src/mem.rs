@@ -1057,7 +1057,9 @@ impl<'a> DualKeyTraverse<MemKvError> for MemKvCursorMut<'a> {
             return Ok(None);
         };
         let (found_k1, found_k2) = MemKv::split_dual_key(&found_key);
-        if found_k1.as_ref() != key1 {
+        // Compare only the relevant prefix of found_k1 with key1
+        // found_k1 is MAX_KEY_SIZE bytes, key1 may be shorter
+        if &found_k1.as_ref()[..key1.len()] != key1 {
             self.clear_current_key();
             return Ok(None);
         }
@@ -1265,11 +1267,10 @@ impl MemKvRoTx {
 impl HotKvRead for MemKvRwTx {
     type Error = MemKvError;
 
-    type Traverse<'a> = MemKvCursor<'a>;
+    type Traverse<'a> = MemKvCursorMut<'a>;
 
     fn raw_traverse<'a>(&'a self, table: &str) -> Result<Self::Traverse<'a>, Self::Error> {
-        let table_data = self.guard.get(table).unwrap_or(&EMPTY_TABLE);
-        Ok(MemKvCursor::new(table_data))
+        self.cursor_mut(table)
     }
 
     fn raw_get<'a>(
@@ -1318,14 +1319,10 @@ impl HotKvRead for MemKvRwTx {
 }
 
 impl MemKvRwTx {
-    /// Get a read-only cursor for the specified table
-    /// Note: This cursor will NOT see pending writes from this transaction
-    pub fn cursor<'a>(&'a self, table: &str) -> Result<MemKvCursor<'a>, MemKvError> {
-        if let Some(table_data) = self.guard.get(table) {
-            Ok(MemKvCursor::new(table_data))
-        } else {
-            Err(MemKvError::HotKv(HotKvError::Inner(format!("Table '{}' not found", table).into())))
-        }
+    /// Get a cursor for the specified table that sees both committed data
+    /// and pending writes from this transaction.
+    pub fn cursor<'a>(&'a self, table: &str) -> Result<MemKvCursorMut<'a>, MemKvError> {
+        self.cursor_mut(table)
     }
 
     /// Get a mutable cursor for the specified table
