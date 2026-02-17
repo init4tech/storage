@@ -64,9 +64,13 @@ mod tests {
     };
     use serial_test::serial;
     use signet_hot::{
+        KeySer, MAX_KEY_SIZE, ValSer,
         conformance::{conformance, test_unwind_conformance},
         db::UnsafeDbWrite,
-        model::{DualTableTraverse, HotKv, HotKvRead, HotKvWrite, TableTraverse, TableTraverseMut},
+        model::{
+            DualKeyTraverse, DualTableTraverse, HotKv, HotKvRead, HotKvWrite, TableTraverse,
+            TableTraverseMut,
+        },
         tables,
     };
     use signet_libmdbx::{Ro, Rw};
@@ -874,6 +878,59 @@ mod tests {
             assert_eq!(next_storage_key, test_storage[3].1); // First storage key for new address
             assert_eq!(next_value, test_storage[3].2);
         }
+    }
+
+    /// Tests raw `DualKeyTraverse::exact_dual` on the MDBX cursor directly,
+    /// bypassing the typed `DualTableTraverse` layer (which uses
+    /// `next_dual_above` internally and would not have caught the get_both
+    /// bug).
+    #[test]
+    fn test_raw_exact_dual() {
+        run_test(test_raw_exact_dual_inner)
+    }
+
+    fn test_raw_exact_dual_inner(db: &DatabaseEnv) {
+        let addr = Address::repeat_byte(0xAA);
+        let slot = U256::from(0x42);
+        let value = U256::from(0xDEAD);
+
+        {
+            let writer: Tx<Rw> = db.writer().unwrap();
+            writer.queue_put_dual::<tables::PlainStorageState>(&addr, &slot, &value).unwrap();
+            writer.raw_commit().unwrap();
+        }
+
+        let reader: Tx<Ro> = db.reader().unwrap();
+        let mut cursor = reader.new_cursor::<tables::PlainStorageState>().unwrap();
+
+        // Serialize keys to raw bytes, matching what the typed layer does.
+        let mut k1_buf = [0u8; MAX_KEY_SIZE];
+        let k1_bytes = addr.encode_key(&mut k1_buf);
+        let mut k2_buf = [0u8; MAX_KEY_SIZE];
+        let k2_bytes = slot.encode_key(&mut k2_buf);
+
+        // Call raw DualKeyTraverse::exact_dual — this previously used
+        // get_both (exact data match) which could only find entries with
+        // empty/zero values.
+        let raw_val =
+            DualKeyTraverse::exact_dual(&mut cursor, k1_bytes, k2_bytes).unwrap().unwrap();
+
+        let decoded = U256::decode_value(&raw_val).unwrap();
+        assert_eq!(decoded, value);
+
+        // Non-existent key2 must return None.
+        let missing_slot = U256::from(0x9999);
+        let mut missing_buf = [0u8; MAX_KEY_SIZE];
+        let missing_bytes = missing_slot.encode_key(&mut missing_buf);
+        let missing = DualKeyTraverse::exact_dual(&mut cursor, k1_bytes, missing_bytes).unwrap();
+        assert!(missing.is_none());
+
+        // Non-existent key1 must return None.
+        let missing_addr = Address::repeat_byte(0xFF);
+        let mut missing_k1_buf = [0u8; MAX_KEY_SIZE];
+        let missing_k1 = missing_addr.encode_key(&mut missing_k1_buf);
+        let missing = DualKeyTraverse::exact_dual(&mut cursor, missing_k1, k2_bytes).unwrap();
+        assert!(missing.is_none());
     }
 
     #[test]

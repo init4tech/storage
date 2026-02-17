@@ -286,18 +286,34 @@ where
             return Err(MdbxError::NotDupSort);
         }
 
-        // For DUPSORT tables, we use get_both which finds exact (key1, key2) match.
-        // The "value" in MDBX DUPSORT is key2 || actual_value, so we return that.
-        // Prepare key2 (may need padding for DUP_FIXED)
+        // For DUPSORT tables, the stored data is key2 || actual_value.
+        // We use get_both_range (first value >= search) rather than get_both
+        // (exact match), because the search value is just key2 (zero-padded
+        // for DUP_FIXED) and an exact match would only succeed when
+        // actual_value is empty/zero.
         let key2_prepared = if let Some(total_size) = self.fsi.total_size() {
-            // Copy key2 to scratch buffer and zero-pad to total fixed size
             self.buf[..key2.len()].copy_from_slice(key2);
             self.buf[key2.len()..total_size].fill(0);
             &self.buf[..total_size]
         } else {
             key2
         };
-        self.inner.get_both(key1, key2_prepared).map_err(MdbxError::from)
+
+        let found = self
+            .inner
+            .get_both_range::<RawValue<'_>>(key1, key2_prepared)
+            .map_err(MdbxError::from)?;
+
+        // get_both_range returns the first dup value >= search. The dup
+        // value is key2 || actual_value, so verify the key2 prefix matches
+        // and strip it before returning.
+        match found {
+            Some(v) if v.starts_with(key2) => {
+                let (_, val) = split_cow_at(v, key2.len());
+                Ok(Some(val))
+            }
+            _ => Ok(None),
+        }
     }
 
     fn next_dual_above<'a>(
