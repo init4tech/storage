@@ -933,6 +933,54 @@ mod tests {
         assert!(missing.is_none());
     }
 
+    /// `queue_raw_put_dual` must reject non-DUPSORT tables rather than
+    /// silently storing key2||value as the value.
+    #[test]
+    fn test_raw_put_dual_rejects_non_dupsort() {
+        run_test(test_raw_put_dual_rejects_non_dupsort_inner)
+    }
+
+    fn test_raw_put_dual_rejects_non_dupsort_inner(db: &DatabaseEnv) {
+        let writer: Tx<Rw> = db.writer().unwrap();
+
+        // TestTable is a SingleKey (non-DUPSORT) table. Calling
+        // queue_raw_put_dual on it should return an error.
+        let result = writer.queue_raw_put_dual(TestTable::NAME, &[0x01; 8], &[0x02; 8], &[0x03; 8]);
+
+        assert!(result.is_err(), "queue_raw_put_dual on non-DUPSORT table should error");
+        assert!(
+            matches!(result, Err(MdbxError::NotDupSort)),
+            "expected NotDupSort, got: {result:?}"
+        );
+    }
+
+    /// `queue_raw_delete_dual` must reject non-DUPSORT tables rather than
+    /// using key2 as a meaningless value filter.
+    #[test]
+    fn test_raw_delete_dual_rejects_non_dupsort() {
+        run_test(test_raw_delete_dual_rejects_non_dupsort_inner)
+    }
+
+    fn test_raw_delete_dual_rejects_non_dupsort_inner(db: &DatabaseEnv) {
+        // First, write a value to the non-DUPSORT table so that a
+        // deletion attempt has something to operate on.
+        {
+            let writer: Tx<Rw> = db.writer().unwrap();
+            writer.queue_raw_put(TestTable::NAME, &[0x01; 8], &[0xFF; 8]).unwrap();
+            writer.raw_commit().unwrap();
+        }
+
+        let writer: Tx<Rw> = db.writer().unwrap();
+
+        let result = writer.queue_raw_delete_dual(TestTable::NAME, &[0x01; 8], &[0x02; 8]);
+
+        assert!(result.is_err(), "queue_raw_delete_dual on non-DUPSORT table should error");
+        assert!(
+            matches!(result, Err(MdbxError::NotDupSort)),
+            "expected NotDupSort, got: {result:?}"
+        );
+    }
+
     #[test]
     fn test_dual_table_traverse_empty_results() {
         run_test(test_dual_table_traverse_empty_results_inner)
