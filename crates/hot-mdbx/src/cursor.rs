@@ -352,23 +352,17 @@ where
     }
 
     fn next_k1<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, MdbxError> {
-        if self.fsi.is_dupsort() {
-            split_dup_kv(self.fsi, self.inner.next_nodup()?)
-        } else {
-            // Not a DUPSORT table — just get next entry.
-            match self.inner.next()? {
-                Some((k, v)) => Ok(Some((k, Cow::Borrowed(&[] as &[u8]), v))),
-                None => Ok(None),
-            }
+        if !self.fsi.is_dupsort() {
+            return Err(MdbxError::NotDupSort);
         }
+        split_dup_kv(self.fsi, self.inner.next_nodup()?)
     }
 
     fn next_k2<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, MdbxError> {
-        if self.fsi.is_dupsort() {
-            split_dup_kv(self.fsi, self.inner.next_dup()?)
-        } else {
-            Ok(None)
+        if !self.fsi.is_dupsort() {
+            return Err(MdbxError::NotDupSort);
         }
+        split_dup_kv(self.fsi, self.inner.next_dup()?)
     }
 
     fn last_of_k1<'a>(&'a mut self, key1: &[u8]) -> Result<Option<RawDualKeyValue<'a>>, MdbxError> {
