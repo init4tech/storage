@@ -106,9 +106,11 @@ impl ColdConnect for MdbxConnector {
     type Cold = MdbxColdBackend;
     type Error = MdbxColdError;
 
-    async fn connect(&self) -> Result<Self::Cold, Self::Error> {
+    #[allow(clippy::manual_async_fn)]
+    fn connect(&self) -> impl std::future::Future<Output = Result<Self::Cold, Self::Error>> + Send {
         // MDBX open is sync, but wrapped in async for trait consistency
         // Opens read-write and creates tables
-        MdbxColdBackend::open_rw(&self.path)
+        let path = self.path.clone();
+        async move { MdbxColdBackend::open_rw(&path) }
     }
 }

@@ -71,6 +71,7 @@ macro_rules! dispatch_async {
 }
 
 // Implement ColdStorage for EitherCold by dispatching to inner type
+#[allow(clippy::manual_async_fn)]
 impl ColdStorage for EitherCold {
     fn get_header(
         &self,
@@ -181,15 +182,18 @@ impl ColdConnect for Either<MdbxConnector, SqlConnector> {
     type Cold = EitherCold;
     type Error = crate::StorageError;
 
-    async fn connect(&self) -> Result<Self::Cold, Self::Error> {
-        match self {
-            Either::Left(mdbx) => {
-                let backend = mdbx.connect().await.map_err(|e| crate::StorageError::MdbxCold(e))?;
-                Ok(EitherCold::Mdbx(backend))
-            }
-            Either::Right(sql) => {
-                let backend = sql.connect().await.map_err(|e| crate::StorageError::SqlCold(e))?;
-                Ok(EitherCold::Sql(backend))
+    fn connect(&self) -> impl std::future::Future<Output = Result<Self::Cold, Self::Error>> + Send {
+        let self_clone = self.clone();
+        async move {
+            match self_clone {
+                Either::Left(mdbx) => {
+                    let backend = mdbx.connect().await.map_err(crate::StorageError::MdbxCold)?;
+                    Ok(EitherCold::Mdbx(backend))
+                }
+                Either::Right(sql) => {
+                    let backend = sql.connect().await.map_err(crate::StorageError::SqlCold)?;
+                    Ok(EitherCold::Sql(backend))
+                }
             }
         }
     }
@@ -201,12 +205,13 @@ impl ColdConnect for Either<MdbxConnector, ()> {
     type Cold = MdbxColdBackend;
     type Error = crate::StorageError;
 
-    async fn connect(&self) -> Result<Self::Cold, Self::Error> {
-        match self {
-            Either::Left(mdbx) => {
-                mdbx.connect().await.map_err(|e| crate::StorageError::MdbxCold(e))
+    fn connect(&self) -> impl std::future::Future<Output = Result<Self::Cold, Self::Error>> + Send {
+        let self_clone = self.clone();
+        async move {
+            match self_clone {
+                Either::Left(mdbx) => mdbx.connect().await.map_err(crate::StorageError::MdbxCold),
+                Either::Right(()) => unreachable!("SQL not enabled"),
             }
-            Either::Right(()) => unreachable!("SQL not enabled"),
         }
     }
 }

@@ -17,5 +17,5 @@ pub trait ColdConnect {
     ///
     /// Async to support backends that require async initialization
     /// (like SQL connection pools).
-    async fn connect(&self) -> Result<Self::Cold, Self::Error>;
+    fn connect(&self) -> impl std::future::Future<Output = Result<Self::Cold, Self::Error>> + Send;
 }

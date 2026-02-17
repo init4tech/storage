@@ -39,7 +39,7 @@ type EnvColdConnector = Either<MdbxConnector, ()>;
 ///     .build()
 ///     .await?;
 /// ```
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct StorageBuilder<H = (), C = ()> {
     hot_connector: H,
     cold_connector: C,
@@ -163,8 +163,10 @@ impl StorageBuilder<MdbxConnector, EnvColdConnector> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn from_env_missing_hot_path() {
         // SAFETY: Test environment
         unsafe {
@@ -174,6 +176,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn from_env_missing_cold_backend() {
         // SAFETY: Test environment
         unsafe {
@@ -186,6 +189,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn from_env_ambiguous_cold_backend() {
         // SAFETY: Test environment
         unsafe {
@@ -198,6 +202,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn from_env_mdbx_cold() {
         // SAFETY: Test environment
         unsafe {

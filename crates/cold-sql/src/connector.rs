@@ -76,7 +76,8 @@ impl ColdConnect for SqlConnector {
     type Cold = SqlColdBackend;
     type Error = SqlColdError;
 
-    async fn connect(&self) -> Result<Self::Cold, Self::Error> {
-        SqlColdBackend::connect(&self.url).await
+    fn connect(&self) -> impl std::future::Future<Output = Result<Self::Cold, Self::Error>> + Send {
+        let url = self.url.clone();
+        async move { SqlColdBackend::connect(&url).await }
     }
 }
