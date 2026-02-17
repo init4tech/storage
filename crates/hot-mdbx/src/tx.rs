@@ -142,9 +142,12 @@ impl<K: TransactionKind + WriteMarker> Tx<K> {
 }
 
 fn fsi_name_to_key(name: &'static str) -> B256 {
+    assert!(
+        name.len() <= 32,
+        "table name exceeds 32 bytes and would be truncated in the FSI metadata key: {name}"
+    );
     let mut key = B256::ZERO;
-    let to_copy = core::cmp::min(32, name.len());
-    key[..to_copy].copy_from_slice(&name.as_bytes()[..to_copy]);
+    key[..name.len()].copy_from_slice(name.as_bytes());
     key
 }
 
