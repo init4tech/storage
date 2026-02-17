@@ -185,20 +185,48 @@ impl<K: TransactionKind + WriteMarker> Cursor<'_, K> {
     }
 }
 
+/// A key-value pair of borrowed byte slices from the cursor.
+type RawCowKv<'a> = (Cow<'a, [u8]>, Cow<'a, [u8]>);
+
+/// Result of splitting a [`Cow`] byte slice into two halves.
+type CowSplit<'a> = Result<(Cow<'a, [u8]>, Cow<'a, [u8]>), MdbxError>;
+
+/// Splits a DUPSORT `(key1, dup_value)` pair into `(key1, key2, value)`.
+///
+/// In DUPSORT tables MDBX stores `key2 || actual_value` as the dup value.
+/// This helper extracts `key2_size` from the [`FixedSizeInfo`], splits the
+/// value, and reassembles the triple.
+fn split_dup_kv(
+    fsi: FixedSizeInfo,
+    kv: Option<RawCowKv<'_>>,
+) -> Result<Option<RawDualKeyValue<'_>>, MdbxError> {
+    let Some((k1, v)) = kv else { return Ok(None) };
+    let key2_size = fsi.key2_size().ok_or(MdbxError::UnknownFixedSize)?;
+    let (k2, val) = split_cow_at(v, key2_size)?;
+    Ok(Some((k1, k2, val)))
+}
+
 /// Splits a [`Cow`] slice at the given index, preserving borrowed status.
 ///
 /// When the input is `Cow::Borrowed`, both outputs will be `Cow::Borrowed`
 /// referencing subslices of the original data. When the input is `Cow::Owned`,
 /// both outputs will be `Cow::Owned` with newly allocated vectors.
+///
+/// Returns [`MdbxError::DupFixedErr`] if `at` exceeds the slice length.
 #[inline]
-fn split_cow_at(cow: Cow<'_, [u8]>, at: usize) -> (Cow<'_, [u8]>, Cow<'_, [u8]>) {
-    match cow {
+fn split_cow_at(cow: Cow<'_, [u8]>, at: usize) -> CowSplit<'_> {
+    debug_assert!(
+        at <= cow.len(),
+        "'at' ({at}) must not be greater than slice length ({})",
+        cow.len()
+    );
+    Ok(match cow {
         Cow::Borrowed(slice) => (Cow::Borrowed(&slice[..at]), Cow::Borrowed(&slice[at..])),
         Cow::Owned(mut vec) => {
             let right = vec.split_off(at);
             (Cow::Owned(vec), Cow::Owned(right))
         }
-    }
+    })
 }
 
 impl<K> DualKeyTraverse<MdbxError> for Cursor<'_, K>
@@ -209,72 +237,28 @@ where
         if !self.fsi.is_dupsort() {
             return Err(MdbxError::NotDupSort);
         }
-
-        match self.inner.first::<Cow<'_, [u8]>, Cow<'_, [u8]>>()? {
-            Some((k1, v)) => {
-                // For DUPSORT, the value contains key2 || actual_value.
-                let Some(key2_size) = self.fsi.key2_size() else {
-                    return Err(MdbxError::UnknownFixedSize);
-                };
-                let (k2, val) = split_cow_at(v, key2_size);
-                Ok(Some((k1, k2, val)))
-            }
-            None => Ok(None),
-        }
+        split_dup_kv(self.fsi, self.inner.first()?)
     }
 
     fn last<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, MdbxError> {
         if !self.fsi.is_dupsort() {
             return Err(MdbxError::NotDupSort);
         }
-
-        match self.inner.last::<Cow<'_, [u8]>, Cow<'_, [u8]>>()? {
-            Some((k1, v)) => {
-                // For DUPSORT, the value contains key2 || actual_value.
-                let Some(key2_size) = self.fsi.key2_size() else {
-                    return Err(MdbxError::UnknownFixedSize);
-                };
-                let (k2, val) = split_cow_at(v, key2_size);
-                Ok(Some((k1, k2, val)))
-            }
-            None => Ok(None),
-        }
+        split_dup_kv(self.fsi, self.inner.last()?)
     }
 
     fn read_next<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, MdbxError> {
         if !self.fsi.is_dupsort() {
             return Err(MdbxError::NotDupSort);
         }
-
-        match self.inner.next::<Cow<'_, [u8]>, Cow<'_, [u8]>>()? {
-            Some((k1, v)) => {
-                // For DUPSORT, the value contains key2 || actual_value.
-                let Some(key2_size) = self.fsi.key2_size() else {
-                    return Err(MdbxError::UnknownFixedSize);
-                };
-                let (k2, val) = split_cow_at(v, key2_size);
-                Ok(Some((k1, k2, val)))
-            }
-            None => Ok(None),
-        }
+        split_dup_kv(self.fsi, self.inner.next()?)
     }
 
     fn read_prev<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, MdbxError> {
         if !self.fsi.is_dupsort() {
             return Err(MdbxError::NotDupSort);
         }
-
-        match self.inner.prev::<Cow<'_, [u8]>, Cow<'_, [u8]>>()? {
-            Some((k1, v)) => {
-                // For DUPSORT, the value contains key2 || actual_value.
-                let Some(key2_size) = self.fsi.key2_size() else {
-                    return Err(MdbxError::UnknownFixedSize);
-                };
-                let (k2, val) = split_cow_at(v, key2_size);
-                Ok(Some((k1, k2, val)))
-            }
-            None => Ok(None),
-        }
+        split_dup_kv(self.fsi, self.inner.prev()?)
     }
 
     fn exact_dual<'a>(
@@ -286,18 +270,34 @@ where
             return Err(MdbxError::NotDupSort);
         }
 
-        // For DUPSORT tables, we use get_both which finds exact (key1, key2) match.
-        // The "value" in MDBX DUPSORT is key2 || actual_value, so we return that.
-        // Prepare key2 (may need padding for DUP_FIXED)
+        // For DUPSORT tables, the stored data is key2 || actual_value.
+        // We use get_both_range (first value >= search) rather than get_both
+        // (exact match), because the search value is just key2 (zero-padded
+        // for DUP_FIXED) and an exact match would only succeed when
+        // actual_value is empty/zero.
         let key2_prepared = if let Some(total_size) = self.fsi.total_size() {
-            // Copy key2 to scratch buffer and zero-pad to total fixed size
             self.buf[..key2.len()].copy_from_slice(key2);
             self.buf[key2.len()..total_size].fill(0);
             &self.buf[..total_size]
         } else {
             key2
         };
-        self.inner.get_both(key1, key2_prepared).map_err(MdbxError::from)
+
+        let found = self
+            .inner
+            .get_both_range::<RawValue<'_>>(key1, key2_prepared)
+            .map_err(MdbxError::from)?;
+
+        // get_both_range returns the first dup value >= search. The dup
+        // value is key2 || actual_value, so verify the key2 prefix matches
+        // and strip it before returning.
+        match found {
+            Some(v) if v.starts_with(key2) => {
+                let (_, val) = split_cow_at(v, key2.len())?;
+                Ok(Some(val))
+            }
+            _ => Ok(None),
+        }
     }
 
     fn next_dual_above<'a>(
@@ -319,7 +319,7 @@ where
 
         // If found_k1 > search_key1, we have our answer (first entry in next key1)
         if found_k1.as_ref() > key1 {
-            let (k2, val) = split_cow_at(v, key2_size);
+            let (k2, val) = split_cow_at(v, key2_size)?;
             return Ok(Some((found_k1, k2, val)));
         }
 
@@ -336,7 +336,7 @@ where
 
         match self.inner.get_both_range::<RawValue<'_>>(key1, key2_prepared)? {
             Some(v) => {
-                let (k2, val) = split_cow_at(v, key2_size);
+                let (k2, val) = split_cow_at(v, key2_size)?;
                 // key1 must be owned here since we're returning a reference to the input
                 Ok(Some((Cow::Owned(key1.to_vec()), k2, val)))
             }
@@ -344,7 +344,7 @@ where
                 // No entry with key2 >= search_key2 in this key1, try next key1
                 match self.inner.next_nodup::<Cow<'_, [u8]>, Cow<'_, [u8]>>()? {
                     Some((k1, v)) => {
-                        let (k2, val) = split_cow_at(v, key2_size);
+                        let (k2, val) = split_cow_at(v, key2_size)?;
                         Ok(Some((k1, k2, val)))
                     }
                     None => Ok(None),
@@ -354,48 +354,17 @@ where
     }
 
     fn next_k1<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, MdbxError> {
-        // Move to the next distinct key1 (skip remaining duplicates for current key1)
-        if self.fsi.is_dupsort() {
-            match self.inner.next_nodup::<Cow<'_, [u8]>, Cow<'_, [u8]>>()? {
-                Some((k1, v)) => {
-                    // For DUPSORT, the value contains key2 || actual_value.
-                    // Split using the known key2 size.
-                    let Some(key2_size) = self.fsi.key2_size() else {
-                        return Err(MdbxError::UnknownFixedSize);
-                    };
-                    let (k2, val) = split_cow_at(v, key2_size);
-                    Ok(Some((k1, k2, val)))
-                }
-                None => Ok(None),
-            }
-        } else {
-            // Not a DUPSORT table - just get next entry
-            match self.inner.next()? {
-                Some((k, v)) => Ok(Some((k, Cow::Borrowed(&[] as &[u8]), v))),
-                None => Ok(None),
-            }
+        if !self.fsi.is_dupsort() {
+            return Err(MdbxError::NotDupSort);
         }
+        split_dup_kv(self.fsi, self.inner.next_nodup()?)
     }
 
     fn next_k2<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, MdbxError> {
-        // Move to the next duplicate (same key1, next key2)
-        if self.fsi.is_dupsort() {
-            match self.inner.next_dup::<Cow<'_, [u8]>, Cow<'_, [u8]>>()? {
-                Some((k1, v)) => {
-                    // For DUPSORT, the value contains key2 || actual_value.
-                    // Split using the known key2 size.
-                    let Some(key2_size) = self.fsi.key2_size() else {
-                        return Err(MdbxError::UnknownFixedSize);
-                    };
-                    let (k2, val) = split_cow_at(v, key2_size);
-                    Ok(Some((k1, k2, val)))
-                }
-                None => Ok(None),
-            }
-        } else {
-            // Not a DUPSORT table - no concept of "next duplicate"
-            Ok(None)
+        if !self.fsi.is_dupsort() {
+            return Err(MdbxError::NotDupSort);
         }
+        split_dup_kv(self.fsi, self.inner.next_dup()?)
     }
 
     fn last_of_k1<'a>(&'a mut self, key1: &[u8]) -> Result<Option<RawDualKeyValue<'a>>, MdbxError> {
@@ -417,7 +386,7 @@ where
         let Some(key2_size) = self.fsi.key2_size() else {
             return Err(MdbxError::UnknownFixedSize);
         };
-        let (k2, val) = split_cow_at(v, key2_size);
+        let (k2, val) = split_cow_at(v, key2_size)?;
 
         // key1 must be owned here since we're returning a reference to the input
         Ok(Some((Cow::Owned(key1.to_vec()), k2, val)))
@@ -427,38 +396,14 @@ where
         if !self.fsi.is_dupsort() {
             return Err(MdbxError::NotDupSort);
         }
-
-        // prev_nodup positions at the last data item of the previous key
-        match self.inner.prev_nodup::<Cow<'_, [u8]>, Cow<'_, [u8]>>()? {
-            Some((k1, v)) => {
-                // For DUPSORT, prev_nodup already positions at the last duplicate
-                // of the previous key. Split the value.
-                let Some(key2_size) = self.fsi.key2_size() else {
-                    return Err(MdbxError::UnknownFixedSize);
-                };
-                let (k2, val) = split_cow_at(v, key2_size);
-                Ok(Some((k1, k2, val)))
-            }
-            None => Ok(None),
-        }
+        split_dup_kv(self.fsi, self.inner.prev_nodup()?)
     }
 
     fn previous_k2<'a>(&'a mut self) -> Result<Option<RawDualKeyValue<'a>>, MdbxError> {
         if !self.fsi.is_dupsort() {
             return Err(MdbxError::NotDupSort);
         }
-
-        // prev_dup positions at the previous duplicate of the current key
-        match self.inner.prev_dup::<Cow<'_, [u8]>, Cow<'_, [u8]>>()? {
-            Some((k1, v)) => {
-                let Some(key2_size) = self.fsi.key2_size() else {
-                    return Err(MdbxError::UnknownFixedSize);
-                };
-                let (k2, val) = split_cow_at(v, key2_size);
-                Ok(Some((k1, k2, val)))
-            }
-            None => Ok(None),
-        }
+        split_dup_kv(self.fsi, self.inner.prev_dup()?)
     }
 
     fn iter_items(
@@ -513,16 +458,12 @@ impl<'a, K: TransactionKind> Iterator for MdbxDualKeyItemIter<'_, 'a, K> {
         match self.iter_dup.borrow_next() {
             Ok(Some(item)) => {
                 let result = match item {
-                    DupItem::NewKey(k1, v) => {
-                        let (k2, val) = split_cow_at_owned(v, self.key2_size);
-                        DualKeyItem::NewK1(Cow::Owned(k1.into_owned()), k2, val)
-                    }
-                    DupItem::SameKey(v) => {
-                        let (k2, val) = split_cow_at_owned(v, self.key2_size);
-                        DualKeyItem::SameK1(k2, val)
-                    }
+                    DupItem::NewKey(k1, v) => split_cow_at_owned(v, self.key2_size)
+                        .map(|(k2, val)| DualKeyItem::NewK1(Cow::Owned(k1.into_owned()), k2, val)),
+                    DupItem::SameKey(v) => split_cow_at_owned(v, self.key2_size)
+                        .map(|(k2, val)| DualKeyItem::SameK1(k2, val)),
                 };
-                Some(Ok(result))
+                Some(result)
             }
             Ok(None) => None,
             Err(e) => Some(Err(MdbxError::from(e))),
@@ -531,11 +472,16 @@ impl<'a, K: TransactionKind> Iterator for MdbxDualKeyItemIter<'_, 'a, K> {
 }
 
 /// Splits a [`Cow`] at the given index and returns owned [`Cow`]s.
+///
+/// Returns [`MdbxError::DupFixedErr`] if `at` exceeds the slice length.
 #[inline]
-fn split_cow_at_owned(cow: Cow<'_, [u8]>, at: usize) -> (Cow<'static, [u8]>, Cow<'static, [u8]>) {
+fn split_cow_at_owned(cow: Cow<'_, [u8]>, at: usize) -> CowSplit<'static> {
+    if at > cow.len() {
+        return Err(MdbxError::DupFixedErr { expected: at, found: cow.len() });
+    }
     let mut vec = cow.into_owned();
     let right = vec.split_off(at);
-    (Cow::Owned(vec), Cow::Owned(right))
+    Ok((Cow::Owned(vec), Cow::Owned(right)))
 }
 
 impl<K: TransactionKind + WriteMarker> DualKeyTraverseMut<MdbxError> for Cursor<'_, K> {

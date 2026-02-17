@@ -6,7 +6,7 @@ use signet_hot::{
     model::{DualTableTraverse, HotKvRead, HotKvWrite},
     tables::{DualKey, SingleKey, Table},
 };
-use signet_libmdbx::{Rw, RwSync, TransactionKind, WriteFlags, tx::WriteMarker};
+use signet_libmdbx::{Database, Rw, RwSync, TransactionKind, WriteFlags, tx::WriteMarker};
 use std::borrow::Cow;
 
 const TX_BUFFER_SIZE: usize = MAX_KEY_SIZE + MAX_FIXED_VAL_SIZE;
@@ -96,6 +96,37 @@ impl<K: TransactionKind> Tx<K> {
 }
 
 impl<K: TransactionKind + WriteMarker> Tx<K> {
+    /// Deletes an existing DUPSORT entry matching `(key1, key2)` if one
+    /// exists. Uses `get_both_range` to find the first dup value whose key2
+    /// prefix matches, then deletes it.
+    fn delete_dup_entry(
+        &self,
+        db: Database,
+        fsi: FixedSizeInfo,
+        key1: &[u8],
+        key2: &[u8],
+    ) -> Result<(), MdbxError> {
+        let mut search_buf = [0u8; TX_BUFFER_SIZE];
+        let search_val = if let Some(total_size) = fsi.total_size() {
+            search_buf[..key2.len()].copy_from_slice(key2);
+            search_buf[key2.len()..total_size].fill(0);
+            &search_buf[..total_size]
+        } else {
+            key2
+        };
+
+        let mut cursor = self.inner.cursor(db).map_err(MdbxError::Mdbx)?;
+
+        if let Some(found_val) =
+            cursor.get_both_range::<Cow<'_, [u8]>>(key1, search_val).map_err(MdbxError::from)?
+            && found_val.starts_with(key2)
+        {
+            cursor.del().map_err(MdbxError::Mdbx)?;
+        }
+
+        Ok(())
+    }
+
     /// Stores FixedSizeInfo in the metadata table.
     fn store_fsi(&self, table: &'static str, fsi: FixedSizeInfo) -> Result<(), MdbxError> {
         let db = self.inner.open_db(None)?;
@@ -111,9 +142,12 @@ impl<K: TransactionKind + WriteMarker> Tx<K> {
 }
 
 fn fsi_name_to_key(name: &'static str) -> B256 {
+    assert!(
+        name.len() <= 32,
+        "table name exceeds 32 bytes and would be truncated in the FSI metadata key: {name}"
+    );
     let mut key = B256::ZERO;
-    let to_copy = core::cmp::min(32, name.len());
-    key[..to_copy].copy_from_slice(&name.as_bytes()[..to_copy]);
+    key[..name.len()].copy_from_slice(name.as_bytes());
     key
 }
 
@@ -190,43 +224,18 @@ macro_rules! impl_hot_kv_write {
                 let db = self.inner.open_db(Some(table))?;
                 let fsi = self.get_fsi(table)?;
 
-                // For DUPSORT tables, we must delete any existing entry with the same
-                // (key1, key2) before inserting, because MDBX stores key2 as part of
-                // the value (key2||actual_value). Without deletion, putting a new value
-                // for the same key2 creates a duplicate entry instead of replacing.
-                if fsi.is_dupsort() {
-                    // Prepare search value (key2, optionally padded for DUP_FIXED)
-                    let mut search_buf = [0u8; TX_BUFFER_SIZE];
-                    let search_val = if let Some(ts) = fsi.total_size() {
-                        search_buf[..key2.len()].copy_from_slice(key2);
-                        search_buf[key2.len()..ts].fill(0);
-                        &search_buf[..ts]
-                    } else {
-                        key2
-                    };
-
-                    // get_both_range finds entry where key=key1 and value >= search_val
-                    // If found and the key2 portion matches, delete it
-                    let mut cursor = self.inner.cursor(db).map_err(MdbxError::Mdbx)?;
-
-                    if let Some(found_val) = cursor
-                        .get_both_range::<Cow<'_, [u8]>>(key1, search_val)
-                        .map_err(MdbxError::from)?
-                        && found_val.starts_with(key2)
-                    // Check if found value starts with our key2
-                    {
-                        cursor.del().map_err(MdbxError::Mdbx)?;
-                    }
+                if !fsi.is_dupsort() {
+                    return Err(MdbxError::NotDupSort);
                 }
 
-                // For DUPSORT tables, the "value" is key2 concatenated with the actual
-                // value.
-                // If the value is fixed size, we can write directly into our scratch
-                // buffer. Otherwise, we need to allocate
-                //
-                // NB: DUPSORT and RESERVE are incompatible :(
+                // Delete any existing entry with the same (key1, key2)
+                // before inserting, because MDBX stores key2 as part of
+                // the value (key2||actual_value). Without deletion, putting
+                // a new value for the same key2 creates a duplicate entry
+                // instead of replacing.
+                self.delete_dup_entry(db, fsi, key1, key2)?;
+
                 if key2.len() + value.len() > TX_BUFFER_SIZE {
-                    // Allocate a buffer for the combined value
                     let mut combined = Vec::with_capacity(key2.len() + value.len());
                     combined.extend_from_slice(key2);
                     combined.extend_from_slice(value);
@@ -236,7 +245,6 @@ macro_rules! impl_hot_kv_write {
                         .map_err(MdbxError::Mdbx);
                 }
 
-                // Use the scratch buffer
                 let mut buffer = [0u8; TX_BUFFER_SIZE];
                 let buf = &mut buffer[..key2.len() + value.len()];
                 buf[..key2.len()].copy_from_slice(key2);
@@ -259,39 +267,11 @@ macro_rules! impl_hot_kv_write {
                 let db = self.inner.open_db(Some(table))?;
                 let fsi = self.get_fsi(table)?;
 
-                // For DUPSORT tables, the "value" is key2 || actual_value.
-                // For DUP_FIXED tables, we cannot use del() with a partial value
-                // because MDBX requires an exact match. We must use a cursor to
-                // find and delete the entry.
-                if fsi.is_dupsort() {
-                    // Prepare search value (key2, optionally padded for DUP_FIXED)
-                    let mut search_buf = [0u8; TX_BUFFER_SIZE];
-                    let search_val = if let Some(ts) = fsi.total_size() {
-                        search_buf[..key2.len()].copy_from_slice(key2);
-                        search_buf[key2.len()..ts].fill(0);
-                        &search_buf[..ts]
-                    } else {
-                        key2
-                    };
-
-                    // Use cursor to find and delete the entry
-                    let mut cursor = self.inner.cursor(db).map_err(MdbxError::Mdbx)?;
-
-                    // get_both_range finds entry where key=key1 and value >= search_val
-                    // If found and the key2 portion matches, delete it
-                    if let Some(found_val) = cursor
-                        .get_both_range::<Cow<'_, [u8]>>(key1, search_val)
-                        .map_err(MdbxError::from)?
-                        && found_val.starts_with(key2)
-                    {
-                        cursor.del().map_err(MdbxError::Mdbx)?;
-                    }
-
-                    Ok(())
-                } else {
-                    // Non-DUPSORT table - just delete by key1
-                    self.inner.del(db, key1, Some(key2)).map(drop).map_err(MdbxError::Mdbx)
+                if !fsi.is_dupsort() {
+                    return Err(MdbxError::NotDupSort);
                 }
+
+                self.delete_dup_entry(db, fsi, key1, key2)
             }
 
             fn queue_raw_clear(&self, table: &'static str) -> Result<(), Self::Error> {
