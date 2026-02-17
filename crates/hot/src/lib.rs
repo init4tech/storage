@@ -105,6 +105,9 @@
 #[cfg(any(test, feature = "test-utils"))]
 pub mod conformance;
 
+pub mod connect;
+pub use connect::HotConnect;
+
 pub mod db;
 pub use db::{HistoryError, HistoryRead, HistoryWrite};
 

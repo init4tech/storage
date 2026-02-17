@@ -17,7 +17,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 signet-cold.workspace = true
+signet-cold-mdbx.workspace = true
+signet-cold-sql = { workspace = true, optional = true }
 signet-hot.workspace = true
+signet-hot-mdbx.workspace = true
 signet-storage-types.workspace = true
 
 alloy.workspace = true
@@ -25,6 +28,7 @@ thiserror.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
+serial_test.workspace = true
 signet-storage = { path = ".", features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-util.workspace = true
@@ -33,3 +37,5 @@ trevm.workspace = true
 [features]
 default = []
 test-utils = ["signet-hot/test-utils", "signet-cold/test-utils"]
+postgres = ["signet-cold-sql/postgres"]
+sqlite = ["signet-cold-sql/sqlite"]
