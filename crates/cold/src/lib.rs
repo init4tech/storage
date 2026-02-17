@@ -161,6 +161,9 @@ pub use stream::{StreamParams, produce_log_stream_default};
 mod traits;
 pub use traits::{BlockData, ColdStorage, LogStream};
 
+pub mod connect;
+pub use connect::ColdConnect;
+
 /// Task module containing the storage task runner and handles.
 pub mod task;
 pub use task::{ColdStorageHandle, ColdStorageReadHandle, ColdStorageTask};

@@ -64,8 +64,21 @@ pub mod config;
 
 pub mod builder;
 
+pub mod either;
+pub use either::Either;
+
 mod unified;
 pub use unified::UnifiedStorage;
+
+// Re-export connector traits
+pub use signet_cold::ColdConnect;
+pub use signet_hot::HotConnect;
+
+// Re-export unified connectors
+pub use signet_cold_mdbx::MdbxConnector;
+
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+pub use signet_cold_sql::SqlConnector;
 
 // Re-export key types for convenience
 pub use signet_cold::{ColdStorage, ColdStorageError, ColdStorageHandle, ColdStorageTask};
@@ -78,5 +91,5 @@ pub use signet_hot_mdbx::{DatabaseArguments, DatabaseEnv};
 pub use signet_storage_types::{ExecutedBlock, ExecutedBlockBuilder};
 pub use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "sql")]
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
 pub use signet_cold_sql::SqlColdBackend;

@@ -10,6 +10,10 @@ pub enum SqlColdError {
     /// A data conversion error occurred.
     #[error("conversion error: {0}")]
     Convert(String),
+
+    /// Configuration error.
+    #[error("configuration error: {0}")]
+    Config(String),
 }
 
 impl From<SqlColdError> for signet_cold::ColdStorageError {

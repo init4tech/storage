@@ -36,5 +36,5 @@ trevm.workspace = true
 [features]
 default = []
 test-utils = ["signet-hot/test-utils", "signet-cold/test-utils"]
-sql = ["signet-cold-sql/postgres"]
+postgres = ["signet-cold-sql/postgres"]
 sqlite = ["signet-cold-sql/sqlite"]

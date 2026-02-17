@@ -25,7 +25,7 @@ pub enum StorageError {
     #[error("MDBX cold storage error: {0}")]
     MdbxCold(#[from] MdbxColdError),
     /// SQL cold storage error.
-    #[cfg(feature = "sql")]
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
     #[error("SQL cold storage error: {0}")]
     SqlCold(#[from] signet_cold_sql::SqlColdError),
 }
