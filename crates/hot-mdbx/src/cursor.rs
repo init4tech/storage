@@ -196,10 +196,10 @@ type CowSplit<'a> = Result<(Cow<'a, [u8]>, Cow<'a, [u8]>), MdbxError>;
 /// In DUPSORT tables MDBX stores `key2 || actual_value` as the dup value.
 /// This helper extracts `key2_size` from the [`FixedSizeInfo`], splits the
 /// value, and reassembles the triple.
-fn split_dup_kv<'a>(
+fn split_dup_kv(
     fsi: FixedSizeInfo,
-    kv: Option<RawCowKv<'a>>,
-) -> Result<Option<RawDualKeyValue<'a>>, MdbxError> {
+    kv: Option<RawCowKv<'_>>,
+) -> Result<Option<RawDualKeyValue<'_>>, MdbxError> {
     let Some((k1, v)) = kv else { return Ok(None) };
     let key2_size = fsi.key2_size().ok_or(MdbxError::UnknownFixedSize)?;
     let (k2, val) = split_cow_at(v, key2_size)?;
@@ -215,9 +215,11 @@ fn split_dup_kv<'a>(
 /// Returns [`MdbxError::DupFixedErr`] if `at` exceeds the slice length.
 #[inline]
 fn split_cow_at(cow: Cow<'_, [u8]>, at: usize) -> CowSplit<'_> {
-    if at > cow.len() {
-        return Err(MdbxError::DupFixedErr { expected: at, found: cow.len() });
-    }
+    debug_assert!(
+        at <= cow.len(),
+        "'at' ({at}) must not be greater than slice length ({})",
+        cow.len()
+    );
     Ok(match cow {
         Cow::Borrowed(slice) => (Cow::Borrowed(&slice[..at]), Cow::Borrowed(&slice[at..])),
         Cow::Owned(mut vec) => {
