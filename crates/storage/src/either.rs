@@ -1,4 +1,9 @@
 //! Either type for holding one of two connector types.
+//!
+//! The `Either` type enables runtime backend selection while maintaining compile-time
+//! type safety and zero-cost abstraction. The `dispatch_async!` macro reduces
+//! boilerplate for the `EitherCold` implementation by generating the repetitive
+//! match-and-forward pattern for all ColdStorage trait methods.
 
 use alloy::primitives::BlockNumber;
 use signet_cold::{
@@ -48,146 +53,97 @@ pub enum EitherCold {
     Sql(SqlColdBackend),
 }
 
+/// Dispatches an async method call to the inner cold storage backend.
+///
+/// This macro reduces boilerplate for EitherCold by generating the match-and-forward
+/// pattern. It preserves the method signatures for clarity while eliminating the
+/// repetitive async match blocks.
+macro_rules! dispatch_async {
+    ($self:expr, $method:ident($($param:expr),*)) => {
+        async move {
+            match $self {
+                Self::Mdbx(backend) => backend.$method($($param),*).await,
+                #[cfg(any(feature = "postgres", feature = "sqlite"))]
+                Self::Sql(backend) => backend.$method($($param),*).await,
+            }
+        }
+    };
+}
+
 // Implement ColdStorage for EitherCold by dispatching to inner type
 impl ColdStorage for EitherCold {
     fn get_header(
         &self,
         spec: HeaderSpecifier,
     ) -> impl Future<Output = ColdResult<Option<SealedHeader>>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.get_header(spec).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.get_header(spec).await,
-            }
-        }
+        dispatch_async!(self, get_header(spec))
     }
 
     fn get_headers(
         &self,
         specs: Vec<HeaderSpecifier>,
     ) -> impl Future<Output = ColdResult<Vec<Option<SealedHeader>>>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.get_headers(specs).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.get_headers(specs).await,
-            }
-        }
+        dispatch_async!(self, get_headers(specs))
     }
 
     fn get_transaction(
         &self,
         spec: TransactionSpecifier,
     ) -> impl Future<Output = ColdResult<Option<Confirmed<RecoveredTx>>>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.get_transaction(spec).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.get_transaction(spec).await,
-            }
-        }
+        dispatch_async!(self, get_transaction(spec))
     }
 
     fn get_transactions_in_block(
         &self,
         block: BlockNumber,
     ) -> impl Future<Output = ColdResult<Vec<RecoveredTx>>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.get_transactions_in_block(block).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.get_transactions_in_block(block).await,
-            }
-        }
+        dispatch_async!(self, get_transactions_in_block(block))
     }
 
     fn get_transaction_count(
         &self,
         block: BlockNumber,
     ) -> impl Future<Output = ColdResult<u64>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.get_transaction_count(block).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.get_transaction_count(block).await,
-            }
-        }
+        dispatch_async!(self, get_transaction_count(block))
     }
 
     fn get_receipt(
         &self,
         spec: ReceiptSpecifier,
     ) -> impl Future<Output = ColdResult<Option<ColdReceipt>>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.get_receipt(spec).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.get_receipt(spec).await,
-            }
-        }
+        dispatch_async!(self, get_receipt(spec))
     }
 
     fn get_receipts_in_block(
         &self,
         block: BlockNumber,
     ) -> impl Future<Output = ColdResult<Vec<ColdReceipt>>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.get_receipts_in_block(block).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.get_receipts_in_block(block).await,
-            }
-        }
+        dispatch_async!(self, get_receipts_in_block(block))
     }
 
     fn get_signet_events(
         &self,
         spec: SignetEventsSpecifier,
     ) -> impl Future<Output = ColdResult<Vec<DbSignetEvent>>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.get_signet_events(spec).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.get_signet_events(spec).await,
-            }
-        }
+        dispatch_async!(self, get_signet_events(spec))
     }
 
     fn get_zenith_header(
         &self,
         spec: ZenithHeaderSpecifier,
     ) -> impl Future<Output = ColdResult<Option<DbZenithHeader>>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.get_zenith_header(spec).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.get_zenith_header(spec).await,
-            }
-        }
+        dispatch_async!(self, get_zenith_header(spec))
     }
 
     fn get_zenith_headers(
         &self,
         spec: ZenithHeaderSpecifier,
     ) -> impl Future<Output = ColdResult<Vec<DbZenithHeader>>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.get_zenith_headers(spec).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.get_zenith_headers(spec).await,
-            }
-        }
+        dispatch_async!(self, get_zenith_headers(spec))
     }
 
     fn get_latest_block(&self) -> impl Future<Output = ColdResult<Option<BlockNumber>>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.get_latest_block().await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.get_latest_block().await,
-            }
-        }
+        dispatch_async!(self, get_latest_block())
     }
 
     fn get_logs(
@@ -195,13 +151,7 @@ impl ColdStorage for EitherCold {
         filter: &Filter,
         max_logs: usize,
     ) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.get_logs(filter, max_logs).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.get_logs(filter, max_logs).await,
-            }
-        }
+        dispatch_async!(self, get_logs(filter, max_logs))
     }
 
     fn produce_log_stream(
@@ -209,43 +159,19 @@ impl ColdStorage for EitherCold {
         filter: &Filter,
         params: StreamParams,
     ) -> impl Future<Output = ()> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.produce_log_stream(filter, params).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.produce_log_stream(filter, params).await,
-            }
-        }
+        dispatch_async!(self, produce_log_stream(filter, params))
     }
 
     fn append_block(&self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.append_block(data).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.append_block(data).await,
-            }
-        }
+        dispatch_async!(self, append_block(data))
     }
 
     fn append_blocks(&self, data: Vec<BlockData>) -> impl Future<Output = ColdResult<()>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.append_blocks(data).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.append_blocks(data).await,
-            }
-        }
+        dispatch_async!(self, append_blocks(data))
     }
 
     fn truncate_above(&self, block: BlockNumber) -> impl Future<Output = ColdResult<()>> + Send {
-        async move {
-            match self {
-                Self::Mdbx(backend) => backend.truncate_above(block).await,
-                #[cfg(any(feature = "postgres", feature = "sqlite"))]
-                Self::Sql(backend) => backend.truncate_above(block).await,
-            }
-        }
+        dispatch_async!(self, truncate_above(block))
     }
 }
 
