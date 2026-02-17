@@ -3,6 +3,18 @@
 use crate::{SqlColdBackend, SqlColdError};
 use signet_cold::ColdConnect;
 
+/// Errors that can occur when initializing SQL connectors.
+#[derive(Debug, thiserror::Error)]
+pub enum SqlConnectorError {
+    /// Missing environment variable.
+    #[error("missing environment variable: {0}")]
+    MissingEnvVar(&'static str),
+
+    /// Cold storage initialization failed.
+    #[error("cold storage initialization failed: {0}")]
+    ColdInit(#[from] SqlColdError),
+}
+
 /// Connector for SQL cold storage (PostgreSQL or SQLite).
 ///
 /// Automatically detects the database type from the URL:
@@ -53,10 +65,8 @@ impl SqlConnector {
     ///
     /// let cold = SqlConnector::from_env("SIGNET_COLD_SQL_URL")?;
     /// ```
-    pub fn from_env(env_var: &str) -> Result<Self, SqlColdError> {
-        let url = std::env::var(env_var).map_err(|_| {
-            SqlColdError::Config(format!("missing environment variable: {env_var}"))
-        })?;
+    pub fn from_env(env_var: &'static str) -> Result<Self, SqlConnectorError> {
+        let url = std::env::var(env_var).map_err(|_| SqlConnectorError::MissingEnvVar(env_var))?;
         Ok(Self::new(url))
     }
 }

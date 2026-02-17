@@ -123,8 +123,7 @@ impl StorageBuilder<MdbxConnector, EnvColdConnector> {
     /// Exactly one cold backend must be specified.
     pub fn from_env() -> Result<Self, ConfigError> {
         // Hot connector from environment (always MDBX)
-        let hot_connector = MdbxConnector::from_env(ENV_HOT_PATH)
-            .map_err(|e| ConfigError::ConnectorError { connector: "hot", error: e.to_string() })?;
+        let hot_connector = MdbxConnector::from_env(ENV_HOT_PATH)?;
 
         // Determine cold backend from environment
         let has_mdbx = env::var(ENV_COLD_PATH).is_ok();
@@ -132,17 +131,13 @@ impl StorageBuilder<MdbxConnector, EnvColdConnector> {
 
         let cold_connector = match (has_mdbx, has_sql) {
             (true, false) => {
-                let mdbx = MdbxConnector::from_env(ENV_COLD_PATH).map_err(|e| {
-                    ConfigError::ConnectorError { connector: "cold MDBX", error: e.to_string() }
-                })?;
+                let mdbx = MdbxConnector::from_env(ENV_COLD_PATH)?;
                 Either::left(mdbx)
             }
             (false, true) => {
                 #[cfg(any(feature = "postgres", feature = "sqlite"))]
                 {
-                    let sql = SqlConnector::from_env(ENV_COLD_SQL_URL).map_err(|e| {
-                        ConfigError::ConnectorError { connector: "cold SQL", error: e.to_string() }
-                    })?;
+                    let sql = SqlConnector::from_env(ENV_COLD_SQL_URL)?;
                     Either::right(sql)
                 }
                 #[cfg(not(any(feature = "postgres", feature = "sqlite")))]

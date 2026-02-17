@@ -55,10 +55,6 @@ pub enum MdbxError {
     /// Deser.
     #[error(transparent)]
     Deser(#[from] DeserError),
-
-    /// Configuration error.
-    #[error("configuration error: {0}")]
-    Config(String),
 }
 
 impl trevm::revm::database::DBErrorMarker for MdbxError {}

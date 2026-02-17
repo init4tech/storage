@@ -50,7 +50,7 @@ pub use backend::SqlColdBackend;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod connector;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-pub use connector::SqlConnector;
+pub use connector::{SqlConnector, SqlConnectorError};
 
 /// Backward-compatible alias for [`SqlColdBackend`] when using SQLite.
 #[cfg(feature = "sqlite")]

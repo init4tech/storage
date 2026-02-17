@@ -13,7 +13,11 @@
 //!
 //! Exactly one of `SIGNET_COLD_PATH` or `SIGNET_COLD_SQL_URL` must be set.
 
+use signet_cold_mdbx::MdbxConnectorError;
 use thiserror::Error;
+
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+use signet_cold_sql::SqlConnectorError;
 
 /// Environment variable name for hot storage path.
 pub const ENV_HOT_PATH: &str = "SIGNET_HOT_PATH";
@@ -48,12 +52,12 @@ pub enum ConfigError {
         env_var: &'static str,
     },
 
-    /// Connector initialization error.
-    #[error("{connector} connector error: {error}")]
-    ConnectorError {
-        /// The connector type (e.g., "hot", "cold MDBX", "cold SQL").
-        connector: &'static str,
-        /// The underlying error message.
-        error: String,
-    },
+    /// MDBX connector error.
+    #[error("MDBX connector error: {0}")]
+    MdbxConnector(#[from] MdbxConnectorError),
+
+    /// SQL connector error.
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    #[error("SQL connector error: {0}")]
+    SqlConnector(#[from] SqlConnectorError),
 }

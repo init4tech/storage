@@ -8,6 +8,22 @@ use signet_hot::HotConnect;
 use signet_hot_mdbx::{DatabaseArguments, DatabaseEnv, MdbxError};
 use std::path::PathBuf;
 
+/// Errors that can occur when initializing MDBX connectors.
+#[derive(Debug, thiserror::Error)]
+pub enum MdbxConnectorError {
+    /// Missing environment variable.
+    #[error("missing environment variable: {0}")]
+    MissingEnvVar(&'static str),
+
+    /// Hot storage initialization failed.
+    #[error("hot storage initialization failed: {0}")]
+    HotInit(#[from] MdbxError),
+
+    /// Cold storage initialization failed.
+    #[error("cold storage initialization failed: {0}")]
+    ColdInit(#[from] MdbxColdError),
+}
+
 /// Connector for MDBX storage (both hot and cold).
 ///
 /// This unified connector can open MDBX databases for both hot and cold storage.
@@ -65,15 +81,14 @@ impl MdbxConnector {
     /// # Example
     ///
     /// ```ignore
-    /// use signet_hot_mdbx::MdbxConnector;
+    /// use signet_cold_mdbx::MdbxConnector;
     ///
     /// let hot = MdbxConnector::from_env("SIGNET_HOT_PATH")?;
     /// let cold = MdbxConnector::from_env("SIGNET_COLD_PATH")?;
     /// ```
-    pub fn from_env(env_var: &str) -> Result<Self, MdbxError> {
-        let path: PathBuf = std::env::var(env_var)
-            .map_err(|_| MdbxError::Config(format!("missing environment variable: {env_var}")))?
-            .into();
+    pub fn from_env(env_var: &'static str) -> Result<Self, MdbxConnectorError> {
+        let path: PathBuf =
+            std::env::var(env_var).map_err(|_| MdbxConnectorError::MissingEnvVar(env_var))?.into();
         Ok(Self::new(path))
     }
 }

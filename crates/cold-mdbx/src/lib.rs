@@ -47,6 +47,6 @@ mod backend;
 pub use backend::MdbxColdBackend;
 
 mod connector;
-pub use connector::MdbxConnector;
+pub use connector::{MdbxConnector, MdbxConnectorError};
 
 pub use signet_hot_mdbx::{DatabaseArguments, DatabaseEnvKind};
