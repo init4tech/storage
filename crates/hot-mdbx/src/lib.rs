@@ -56,12 +56,7 @@ use signet_libmdbx::{
     Environment, EnvironmentFlags, Geometry, Mode, Ro, RoSync, Rw, RwSync, SyncMode, ffi,
     sys::{HandleSlowReadersReturnCode, PageSize},
 };
-use std::{
-    collections::HashMap,
-    ops::{Deref, Range},
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::HashMap, ops::Range, path::Path, sync::Arc};
 
 mod cursor;
 pub use cursor::{Cursor, CursorRo, CursorRoSync, CursorRw, CursorRwSync};
@@ -407,14 +402,6 @@ impl DatabaseEnv {
             .begin_rw_sync()
             .map(|tx| Tx::new(tx, self.fsi_cache.clone()))
             .map_err(MdbxError::Mdbx)
-    }
-}
-
-impl Deref for DatabaseEnv {
-    type Target = Environment;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
     }
 }
 

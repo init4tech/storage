@@ -331,8 +331,8 @@ impl ColdStorageReadHandle {
 ///
 /// # Read Access
 ///
-/// All read methods from [`ColdStorageReadHandle`] are available on this
-/// handle via [`Deref`](std::ops::Deref).
+/// All read methods from [`ColdStorageReadHandle`] are also available
+/// directly on this handle.
 ///
 /// # Usage
 ///
@@ -354,14 +354,6 @@ impl ColdStorageReadHandle {
 pub struct ColdStorageHandle {
     reader: ColdStorageReadHandle,
     write_sender: mpsc::Sender<ColdWriteRequest>,
-}
-
-impl std::ops::Deref for ColdStorageHandle {
-    type Target = ColdStorageReadHandle;
-
-    fn deref(&self) -> &Self::Target {
-        &self.reader
-    }
 }
 
 impl ColdStorageHandle {
@@ -462,5 +454,183 @@ impl ColdStorageHandle {
         self.write_sender
             .try_send(ColdWriteRequest::TruncateAbove { block, resp })
             .map_err(map_dispatch_error)
+    }
+
+    // ==========================================================================
+    // Read Operations (delegated to ColdStorageReadHandle)
+    // ==========================================================================
+
+    /// Get a header by specifier.
+    pub async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<SealedHeader>> {
+        self.reader.get_header(spec).await
+    }
+
+    /// Get a header by block number.
+    pub async fn get_header_by_number(
+        &self,
+        block: BlockNumber,
+    ) -> ColdResult<Option<SealedHeader>> {
+        self.reader.get_header_by_number(block).await
+    }
+
+    /// Get a header by block hash.
+    pub async fn get_header_by_hash(&self, hash: B256) -> ColdResult<Option<SealedHeader>> {
+        self.reader.get_header_by_hash(hash).await
+    }
+
+    /// Get multiple headers by specifiers.
+    pub async fn get_headers(
+        &self,
+        specs: Vec<HeaderSpecifier>,
+    ) -> ColdResult<Vec<Option<SealedHeader>>> {
+        self.reader.get_headers(specs).await
+    }
+
+    /// Get a transaction by specifier, with block confirmation metadata.
+    pub async fn get_transaction(
+        &self,
+        spec: TransactionSpecifier,
+    ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
+        self.reader.get_transaction(spec).await
+    }
+
+    /// Get a transaction by hash.
+    pub async fn get_tx_by_hash(&self, hash: B256) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
+        self.reader.get_tx_by_hash(hash).await
+    }
+
+    /// Get a transaction by block number and index.
+    pub async fn get_tx_by_block_and_index(
+        &self,
+        block: BlockNumber,
+        index: u64,
+    ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
+        self.reader.get_tx_by_block_and_index(block, index).await
+    }
+
+    /// Get a transaction by block hash and index.
+    pub async fn get_tx_by_block_hash_and_index(
+        &self,
+        block_hash: B256,
+        index: u64,
+    ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
+        self.reader.get_tx_by_block_hash_and_index(block_hash, index).await
+    }
+
+    /// Get all transactions in a block.
+    pub async fn get_transactions_in_block(
+        &self,
+        block: BlockNumber,
+    ) -> ColdResult<Vec<RecoveredTx>> {
+        self.reader.get_transactions_in_block(block).await
+    }
+
+    /// Get the transaction count for a block.
+    pub async fn get_transaction_count(&self, block: BlockNumber) -> ColdResult<u64> {
+        self.reader.get_transaction_count(block).await
+    }
+
+    /// Get a receipt by specifier.
+    pub async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<ColdReceipt>> {
+        self.reader.get_receipt(spec).await
+    }
+
+    /// Get a receipt by transaction hash.
+    pub async fn get_receipt_by_tx_hash(&self, hash: B256) -> ColdResult<Option<ColdReceipt>> {
+        self.reader.get_receipt_by_tx_hash(hash).await
+    }
+
+    /// Get a receipt by block number and index.
+    pub async fn get_receipt_by_block_and_index(
+        &self,
+        block: BlockNumber,
+        index: u64,
+    ) -> ColdResult<Option<ColdReceipt>> {
+        self.reader.get_receipt_by_block_and_index(block, index).await
+    }
+
+    /// Get all receipts in a block.
+    pub async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<ColdReceipt>> {
+        self.reader.get_receipts_in_block(block).await
+    }
+
+    /// Get signet events by specifier.
+    pub async fn get_signet_events(
+        &self,
+        spec: SignetEventsSpecifier,
+    ) -> ColdResult<Vec<DbSignetEvent>> {
+        self.reader.get_signet_events(spec).await
+    }
+
+    /// Get signet events in a block.
+    pub async fn get_signet_events_in_block(
+        &self,
+        block: BlockNumber,
+    ) -> ColdResult<Vec<DbSignetEvent>> {
+        self.reader.get_signet_events_in_block(block).await
+    }
+
+    /// Get signet events in a range of blocks.
+    pub async fn get_signet_events_in_range(
+        &self,
+        start: BlockNumber,
+        end: BlockNumber,
+    ) -> ColdResult<Vec<DbSignetEvent>> {
+        self.reader.get_signet_events_in_range(start, end).await
+    }
+
+    /// Get a zenith header by block number.
+    pub async fn get_zenith_header(
+        &self,
+        block: BlockNumber,
+    ) -> ColdResult<Option<DbZenithHeader>> {
+        self.reader.get_zenith_header(block).await
+    }
+
+    /// Get zenith headers by specifier.
+    pub async fn get_zenith_headers(
+        &self,
+        spec: ZenithHeaderSpecifier,
+    ) -> ColdResult<Vec<DbZenithHeader>> {
+        self.reader.get_zenith_headers(spec).await
+    }
+
+    /// Get zenith headers in a range of blocks.
+    pub async fn get_zenith_headers_in_range(
+        &self,
+        start: BlockNumber,
+        end: BlockNumber,
+    ) -> ColdResult<Vec<DbZenithHeader>> {
+        self.reader.get_zenith_headers_in_range(start, end).await
+    }
+
+    /// Filter logs by block range, address, and topics.
+    ///
+    /// Follows `eth_getLogs` semantics. Returns matching logs ordered by
+    /// `(block_number, tx_index, log_index)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ColdStorageError::TooManyLogs`] if the query would produce
+    /// more than `max_logs` results.
+    pub async fn get_logs(&self, filter: Filter, max_logs: usize) -> ColdResult<Vec<RpcLog>> {
+        self.reader.get_logs(filter, max_logs).await
+    }
+
+    /// Stream logs matching a filter.
+    ///
+    /// See [`ColdStorageReadHandle::stream_logs`] for full documentation.
+    pub async fn stream_logs(
+        &self,
+        filter: Filter,
+        max_logs: usize,
+        deadline: Duration,
+    ) -> ColdResult<LogStream> {
+        self.reader.stream_logs(filter, max_logs, deadline).await
+    }
+
+    /// Get the latest block number in storage.
+    pub async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
+        self.reader.get_latest_block().await
     }
 }

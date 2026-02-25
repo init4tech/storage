@@ -35,14 +35,6 @@ pub enum IntegerListError {
 #[derive(Clone, PartialEq, Default)]
 pub struct IntegerList(RoaringTreemap);
 
-impl core::ops::Deref for IntegerList {
-    type Target = RoaringTreemap;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
 impl fmt::Debug for IntegerList {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("IntegerList")?;
@@ -122,5 +114,55 @@ impl IntegerList {
         RoaringTreemap::deserialize_from(data)
             .map(Self)
             .map_err(|_| IntegerListError::FailedToDeserialize)
+    }
+
+    /// Returns an iterator over the integers in the list.
+    pub fn iter(&self) -> roaring::treemap::Iter<'_> {
+        self.0.iter()
+    }
+
+    /// Returns the number of integers in the list.
+    pub fn len(&self) -> u64 {
+        self.0.len()
+    }
+
+    /// Returns `true` if the list contains no integers.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Returns `true` if the list contains the given value.
+    pub fn contains(&self, value: u64) -> bool {
+        self.0.contains(value)
+    }
+
+    /// Returns the smallest value in the list, or `None` if empty.
+    pub fn min(&self) -> Option<u64> {
+        self.0.min()
+    }
+
+    /// Returns the largest value in the list, or `None` if empty.
+    pub fn max(&self) -> Option<u64> {
+        self.0.max()
+    }
+
+    /// Returns the number of integers that are `<= value`.
+    pub fn rank(&self, value: u64) -> u64 {
+        self.0.rank(value)
+    }
+
+    /// Returns the `n`th integer in the list (0-indexed).
+    pub fn select(&self, n: u64) -> Option<u64> {
+        self.0.select(n)
+    }
+
+    /// Returns the serialized size of the list in bytes.
+    pub fn serialized_size(&self) -> usize {
+        self.0.serialized_size()
+    }
+
+    /// Serializes the list into the given writer.
+    pub fn serialize_into<W: std::io::Write>(&self, writer: W) -> std::io::Result<()> {
+        self.0.serialize_into(writer)
     }
 }
