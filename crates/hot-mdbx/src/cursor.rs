@@ -9,10 +9,7 @@ use signet_hot::{
     },
 };
 use signet_libmdbx::{DupItem, Ro, Rw, RwSync, TransactionKind, tx::WriteMarker, tx::iter};
-use std::{
-    borrow::Cow,
-    ops::{Deref, DerefMut},
-};
+use std::borrow::Cow;
 
 /// Read only Cursor.
 pub type CursorRo<'a> = Cursor<'a, Ro>;
@@ -47,20 +44,6 @@ pub struct Cursor<'a, K: TransactionKind> {
 impl<K: TransactionKind> std::fmt::Debug for Cursor<'_, K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Cursor").field("fsi", &self.fsi).finish_non_exhaustive()
-    }
-}
-
-impl<'a, K: TransactionKind> Deref for Cursor<'a, K> {
-    type Target = signet_libmdbx::Cursor<'a, K>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<'a, K: TransactionKind> DerefMut for Cursor<'a, K> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
     }
 }
 
