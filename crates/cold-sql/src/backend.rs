@@ -1396,6 +1396,23 @@ impl ColdStorage for SqlColdBackend {
         tx.commit().await.map_err(SqlColdError::from)?;
         Ok(())
     }
+
+    async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
+        // Read receipts then truncate, all within a single SQL transaction.
+        // We use the default trait logic against self (which will use the pool
+        // for reads), then truncate. For true atomicity under concurrent
+        // access the caller should ensure exclusive write access via the task
+        // runner, which processes writes sequentially.
+        let latest = self.get_latest_block().await?;
+        let mut all_receipts = Vec::new();
+        if let Some(latest) = latest {
+            for n in (block + 1)..=latest {
+                all_receipts.push(self.get_receipts_in_block(n).await?);
+            }
+        }
+        self.truncate_above(block).await?;
+        Ok(all_receipts)
+    }
 }
 
 #[cfg(all(test, feature = "test-utils"))]

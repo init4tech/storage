@@ -160,4 +160,11 @@ pub enum ColdWriteRequest {
         /// The response channel.
         resp: Responder<()>,
     },
+    /// Read receipts and truncate all data above the given block.
+    DrainAbove {
+        /// The block number to drain above.
+        block: BlockNumber,
+        /// The response channel.
+        resp: Responder<Vec<Vec<ColdReceipt>>>,
+    },
 }

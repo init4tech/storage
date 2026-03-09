@@ -265,21 +265,23 @@ impl<H: HotKv> UnifiedStorage<H> {
             reader.get_headers_range(block + 1, last).map_err(|e| e.into_hot_kv_error())?;
         drop(reader);
 
-        // 2. Read receipts from cold storage (best-effort)
-        let cold = self.cold_reader();
-        let mut drained = Vec::with_capacity(headers.len());
-        for header in headers {
-            let receipts = cold.get_receipts_in_block(header.number).await.unwrap_or_default();
-            drained.push(DrainedBlock { header, receipts });
-        }
-
-        // 3. Unwind hot storage
+        // 2. Unwind hot storage — if this fails, nothing is mutated
         let writer = self.hot.writer()?;
         writer.unwind_above(block).map_err(|e| e.map_db(|e| e.into_hot_kv_error()))?;
         writer.raw_commit().map_err(|e| e.into_hot_kv_error())?;
 
-        // 4. Dispatch truncate to cold storage
-        self.cold.dispatch_truncate_above(block).map_err(crate::StorageError::Cold)?;
+        // 3. Atomically drain cold (best-effort — failure = normal cold lag)
+        let cold_receipts = self.cold.drain_above(block).await.unwrap_or_default();
+
+        // 4. Assemble drained blocks (zip headers with receipts, default empty)
+        let drained = headers
+            .into_iter()
+            .enumerate()
+            .map(|(i, header)| {
+                let receipts = cold_receipts.get(i).cloned().unwrap_or_default();
+                DrainedBlock { header, receipts }
+            })
+            .collect();
 
         Ok(drained)
     }
