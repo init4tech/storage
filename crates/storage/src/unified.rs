@@ -7,15 +7,27 @@
 use crate::StorageResult;
 use alloy::primitives::BlockNumber;
 use signet_cold::{
-    BlockData, ColdStorage, ColdStorageError, ColdStorageHandle, ColdStorageReadHandle,
-    ColdStorageTask,
+    BlockData, ColdReceipt, ColdStorage, ColdStorageError, ColdStorageHandle,
+    ColdStorageReadHandle, ColdStorageTask,
 };
 use signet_hot::{
     HistoryRead, HistoryWrite, HotKv,
     model::{HotKvReadError, HotKvWrite, RevmRead},
 };
-use signet_storage_types::ExecutedBlock;
+use signet_storage_types::{ExecutedBlock, SealedHeader};
 use tokio_util::sync::CancellationToken;
+
+/// Block data drained during a reorg unwind.
+///
+/// Contains the header (always available from hot storage) and receipts
+/// (best-effort from cold storage — empty if cold storage lags behind hot).
+#[derive(Debug, Clone)]
+pub struct DrainedBlock {
+    /// The sealed header of the removed block.
+    pub header: SealedHeader,
+    /// Receipts from cold storage. Empty if cold hasn't indexed this block yet.
+    pub receipts: Vec<ColdReceipt>,
+}
 
 /// Unified storage combining hot and cold backends.
 ///
@@ -215,6 +227,61 @@ impl<H: HotKv> UnifiedStorage<H> {
     fn dispatch_cold(&self, blocks: Vec<ExecutedBlock>) -> StorageResult<()> {
         let cold_data: Vec<_> = blocks.into_iter().map(BlockData::from).collect();
         self.cold.dispatch_append_blocks(cold_data).map_err(Into::into)
+    }
+
+    /// Read and remove all blocks above the given block number.
+    ///
+    /// This combines reading the about-to-be-removed data with unwinding,
+    /// returning the drained blocks so callers can emit reorg notifications.
+    ///
+    /// # Implementation
+    ///
+    /// 1. Reads headers from hot storage (sync)
+    /// 2. Reads receipts from cold storage (async, best-effort)
+    /// 3. Unwinds hot storage (sync)
+    /// 4. Dispatches truncate to cold storage (non-blocking)
+    ///
+    /// # Cold Lag
+    ///
+    /// If cold storage hasn't processed a block yet, its receipts will be
+    /// empty. This is correct: no subscriber has seen those logs, so there
+    /// is nothing to "remove" from their perspective.
+    ///
+    /// # Errors
+    ///
+    /// - [`Hot`]: Hot storage read or unwind failed.
+    /// - [`Cold`]: Hot storage unwound but cold truncate dispatch failed.
+    ///
+    /// [`Hot`]: crate::StorageError::Hot
+    /// [`Cold`]: crate::StorageError::Cold
+    pub async fn drain_above(&self, block: BlockNumber) -> StorageResult<Vec<DrainedBlock>> {
+        // 1. Read headers above `block` from hot storage
+        let reader = self.reader()?;
+        let last = match reader.get_execution_range().map_err(|e| e.into_hot_kv_error())? {
+            Some((_, last)) if last > block => last,
+            _ => return Ok(Vec::new()),
+        };
+        let headers =
+            reader.get_headers_range(block + 1, last).map_err(|e| e.into_hot_kv_error())?;
+        drop(reader);
+
+        // 2. Read receipts from cold storage (best-effort)
+        let cold = self.cold_reader();
+        let mut drained = Vec::with_capacity(headers.len());
+        for header in headers {
+            let receipts = cold.get_receipts_in_block(header.number).await.unwrap_or_default();
+            drained.push(DrainedBlock { header, receipts });
+        }
+
+        // 3. Unwind hot storage
+        let writer = self.hot.writer()?;
+        writer.unwind_above(block).map_err(|e| e.map_db(|e| e.into_hot_kv_error()))?;
+        writer.raw_commit().map_err(|e| e.into_hot_kv_error())?;
+
+        // 4. Dispatch truncate to cold storage
+        self.cold.dispatch_truncate_above(block).map_err(crate::StorageError::Cold)?;
+
+        Ok(drained)
     }
 
     /// Unwind storage above the given block number (reorg handling).
