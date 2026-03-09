@@ -331,6 +331,12 @@ impl<B: ColdStorage> ColdStorageTask<B> {
                         debug!("Cold storage write channel closed");
                         break;
                     };
+                    // Drain in-flight reads before executing the write to
+                    // ensure exclusive access to the backend.
+                    self.task_tracker.close();
+                    self.task_tracker.wait().await;
+                    self.task_tracker.reopen();
+
                     self.inner.handle_write(req).await;
                 }
 
