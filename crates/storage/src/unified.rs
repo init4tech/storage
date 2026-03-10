@@ -239,7 +239,7 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// 1. Reads headers from hot storage (sync)
     /// 2. Reads receipts from cold storage (async, best-effort)
     /// 3. Unwinds hot storage (sync)
-    /// 4. Dispatches truncate to cold storage (non-blocking)
+    /// 4. Drains cold storage (async, best-effort)
     ///
     /// # Cold Lag
     ///
@@ -255,18 +255,15 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// [`Hot`]: crate::StorageError::Hot
     /// [`Cold`]: crate::StorageError::Cold
     pub async fn drain_above(&self, block: BlockNumber) -> StorageResult<Vec<DrainedBlock>> {
-        // 1. Read headers above `block` from hot storage
-        let reader = self.reader()?;
-        let last = match reader.get_execution_range().map_err(|e| e.into_hot_kv_error())? {
+        // 1–2. Read headers then unwind hot storage in a single write tx
+        //       to avoid TOCTOU races between reading and unwinding.
+        let writer = self.hot.writer()?;
+        let last = match writer.get_execution_range().map_err(|e| e.into_hot_kv_error())? {
             Some((_, last)) if last > block => last,
             _ => return Ok(Vec::new()),
         };
         let headers =
-            reader.get_headers_range(block + 1, last).map_err(|e| e.into_hot_kv_error())?;
-        drop(reader);
-
-        // 2. Unwind hot storage — if this fails, nothing is mutated
-        let writer = self.hot.writer()?;
+            writer.get_headers_range(block + 1, last).map_err(|e| e.into_hot_kv_error())?;
         writer.unwind_above(block).map_err(|e| e.map_db(|e| e.into_hot_kv_error()))?;
         writer.raw_commit().map_err(|e| e.into_hot_kv_error())?;
 

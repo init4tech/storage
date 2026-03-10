@@ -144,6 +144,7 @@ async fn drain_above_returns_headers_and_receipts() {
 
     // Verify hot tip is now block 0
     assert_eq!(hot.reader().unwrap().get_chain_tip().unwrap().unwrap().0, 0);
+    assert_eq!(storage.cold().get_latest_block().await.unwrap().unwrap(), 0);
 
     cancel.cancel();
 }
@@ -164,6 +165,7 @@ async fn drain_above_empty_when_at_tip() {
 
     // Verify hot tip still 1
     assert_eq!(hot.reader().unwrap().get_chain_tip().unwrap().unwrap().0, 1);
+    assert_eq!(storage.cold().get_latest_block().await.unwrap().unwrap(), 1);
 
     cancel.cancel();
 }
