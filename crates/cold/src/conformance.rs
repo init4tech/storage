@@ -38,6 +38,7 @@ pub async fn conformance<B: ColdStorage>(backend: B) -> ColdResult<()> {
     test_cold_receipt_metadata(&handle).await?;
     test_get_logs(&handle).await?;
     test_stream_logs(&handle).await?;
+    test_drain_above(&handle).await?;
     cancel.cancel();
     Ok(())
 }
@@ -605,6 +606,34 @@ pub async fn test_stream_logs(handle: &ColdStorageHandle) -> ColdResult<()> {
         .await?;
     let result = collect_stream(stream).await;
     assert!(matches!(result, Err(ColdStorageError::TooManyLogs { limit: 3 })));
+
+    Ok(())
+}
+
+/// Test drain_above: reads receipts and truncates atomically.
+pub async fn test_drain_above(handle: &ColdStorageHandle) -> ColdResult<()> {
+    // Append 3 blocks with txs (use block numbers that don't collide)
+    handle.append_block(make_test_block_with_txs(900, 2)).await?;
+    handle.append_block(make_test_block_with_txs(901, 3)).await?;
+    handle.append_block(make_test_block_with_txs(902, 1)).await?;
+
+    // Drain above block 900 — should return receipts for 901 and 902
+    let drained = handle.drain_above(900).await?;
+    assert_eq!(drained.len(), 2);
+    assert_eq!(drained[0].len(), 3); // block 901 had 3 txs
+    assert_eq!(drained[1].len(), 1); // block 902 had 1 tx
+
+    // Blocks 901 and 902 should be gone
+    assert!(handle.get_header(HeaderSpecifier::Number(901)).await?.is_none());
+    assert!(handle.get_header(HeaderSpecifier::Number(902)).await?.is_none());
+
+    // Block 900 should still exist
+    assert!(handle.get_header(HeaderSpecifier::Number(900)).await?.is_some());
+    assert_eq!(handle.get_latest_block().await?, Some(900));
+
+    // Drain with nothing above — should return empty
+    let empty = handle.drain_above(900).await?;
+    assert!(empty.is_empty());
 
     Ok(())
 }

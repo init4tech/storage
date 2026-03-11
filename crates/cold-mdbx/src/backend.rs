@@ -501,57 +501,90 @@ impl MdbxColdBackend {
         Ok(())
     }
 
+    /// Collect all sealed headers above `block` from the given transaction.
+    fn collect_headers_above(
+        tx: &signet_hot_mdbx::Tx<signet_libmdbx::Rw>,
+        block: BlockNumber,
+    ) -> Result<Vec<(BlockNumber, SealedHeader)>, MdbxColdError> {
+        let mut cursor = tx.new_cursor::<ColdHeaders>()?;
+        let mut headers: Vec<(BlockNumber, SealedHeader)> = Vec::new();
+
+        let start_block = block + 1;
+        let mut key_buf = [0u8; MAX_KEY_SIZE];
+        let key_bytes = start_block.encode_key(&mut key_buf);
+
+        if let Some((key, value)) = cursor.lower_bound(key_bytes)? {
+            headers.push((BlockNumber::decode_key(&key)?, SealedHeader::decode_value(&value)?));
+
+            while let Some((key, value)) = cursor.read_next()? {
+                headers.push((BlockNumber::decode_key(&key)?, SealedHeader::decode_value(&value)?));
+            }
+        }
+        Ok(headers)
+    }
+
+    /// Delete all data for the given blocks from the transaction.
+    fn delete_blocks(
+        tx: &signet_hot_mdbx::Tx<signet_libmdbx::Rw>,
+        headers: &[(BlockNumber, SealedHeader)],
+    ) -> Result<(), MdbxColdError> {
+        let mut tx_cursor = tx.traverse_dual::<ColdTransactions>()?;
+        for (block_num, sealed) in headers {
+            for item in tx_cursor.iter_k2(block_num)? {
+                let (_, tx_signed) = item?;
+                tx.queue_delete::<ColdTxHashIndex>(tx_signed.hash())?;
+            }
+
+            tx.queue_delete::<ColdHeaders>(block_num)?;
+            tx.queue_delete::<ColdBlockHashIndex>(&sealed.hash())?;
+            tx.clear_k1_for::<ColdTransactions>(block_num)?;
+            tx.clear_k1_for::<ColdTxSenders>(block_num)?;
+            tx.clear_k1_for::<ColdReceipts>(block_num)?;
+            tx.clear_k1_for::<ColdSignetEvents>(block_num)?;
+            tx.queue_delete::<ColdZenithHeaders>(block_num)?;
+        }
+        Ok(())
+    }
+
     fn truncate_above_inner(&self, block: BlockNumber) -> Result<(), MdbxColdError> {
         let tx = self.env.tx_rw()?;
-
-        // Collect sealed headers above the cutoff
-        let headers_to_remove = {
-            let mut cursor = tx.new_cursor::<ColdHeaders>()?;
-            let mut headers: Vec<(BlockNumber, SealedHeader)> = Vec::new();
-
-            let start_block = block + 1;
-            let mut key_buf = [0u8; MAX_KEY_SIZE];
-            let key_bytes = start_block.encode_key(&mut key_buf);
-
-            if let Some((key, value)) = cursor.lower_bound(key_bytes)? {
-                headers.push((BlockNumber::decode_key(&key)?, SealedHeader::decode_value(&value)?));
-
-                while let Some((key, value)) = cursor.read_next()? {
-                    headers.push((
-                        BlockNumber::decode_key(&key)?,
-                        SealedHeader::decode_value(&value)?,
-                    ));
-                }
-            }
-            headers
-        };
-
-        if headers_to_remove.is_empty() {
+        let headers = Self::collect_headers_above(&tx, block)?;
+        if headers.is_empty() {
             return Ok(());
         }
-
-        // Delete each block's data
-        {
-            let mut tx_cursor = tx.traverse_dual::<ColdTransactions>()?;
-            for (block_num, sealed) in &headers_to_remove {
-                // Delete transaction hash indices
-                for item in tx_cursor.iter_k2(block_num)? {
-                    let (_, tx_signed) = item?;
-                    tx.queue_delete::<ColdTxHashIndex>(tx_signed.hash())?;
-                }
-
-                tx.queue_delete::<ColdHeaders>(block_num)?;
-                tx.queue_delete::<ColdBlockHashIndex>(&sealed.hash())?;
-                tx.clear_k1_for::<ColdTransactions>(block_num)?;
-                tx.clear_k1_for::<ColdTxSenders>(block_num)?;
-                tx.clear_k1_for::<ColdReceipts>(block_num)?;
-                tx.clear_k1_for::<ColdSignetEvents>(block_num)?;
-                tx.queue_delete::<ColdZenithHeaders>(block_num)?;
-            }
-        }
-
+        Self::delete_blocks(&tx, &headers)?;
         tx.raw_commit()?;
         Ok(())
+    }
+
+    fn drain_above_inner(
+        &self,
+        block: BlockNumber,
+    ) -> Result<Vec<Vec<ColdReceipt>>, MdbxColdError> {
+        let tx = self.env.tx_rw()?;
+        let headers = Self::collect_headers_above(&tx, block)?;
+        if headers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Read receipts before deleting
+        let mut all_receipts = Vec::with_capacity(headers.len());
+        let mut receipt_cursor = tx.traverse_dual::<ColdReceipts>()?;
+        for (block_num, sealed) in &headers {
+            let block_receipts: Vec<ColdReceipt> = receipt_cursor
+                .iter_k2(block_num)?
+                .map(|item| {
+                    let (idx, ir) = item?;
+                    Ok::<_, MdbxColdError>(ColdReceipt::new(ir, sealed, idx))
+                })
+                .collect::<Result<_, _>>()?;
+            all_receipts.push(block_receipts);
+        }
+        drop(receipt_cursor);
+
+        Self::delete_blocks(&tx, &headers)?;
+        tx.raw_commit()?;
+        Ok(all_receipts)
     }
 
     fn get_logs_inner(
@@ -735,6 +768,10 @@ impl ColdStorage for MdbxColdBackend {
 
     async fn truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
         Ok(self.truncate_above_inner(block)?)
+    }
+
+    async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
+        Ok(self.drain_above_inner(block)?)
     }
 }
 

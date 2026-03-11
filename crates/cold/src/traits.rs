@@ -240,4 +240,30 @@ pub trait ColdStorage: Send + Sync + 'static {
     ///
     /// This removes block N+1 and higher from all tables. Used for reorg handling.
     fn truncate_above(&self, block: BlockNumber) -> impl Future<Output = ColdResult<()>> + Send;
+
+    /// Read and remove all blocks above the given block number.
+    ///
+    /// Returns receipts for each block above `block` in ascending order,
+    /// then truncates. Index 0 = block+1, index 1 = block+2, etc.
+    /// Blocks with no receipts have empty vecs.
+    ///
+    /// The default implementation composes `get_latest_block` +
+    /// `get_receipts_in_block` + `truncate_above`. It is correct but
+    /// not atomic. Backends should override with an atomic version
+    /// when possible.
+    fn drain_above(
+        &self,
+        block: BlockNumber,
+    ) -> impl Future<Output = ColdResult<Vec<Vec<ColdReceipt>>>> + Send {
+        async move {
+            let mut all_receipts = Vec::new();
+            if let Some(latest) = self.get_latest_block().await? {
+                for n in (block + 1)..=latest {
+                    all_receipts.push(self.get_receipts_in_block(n).await?);
+                }
+            }
+            self.truncate_above(block).await?;
+            Ok(all_receipts)
+        }
+    }
 }

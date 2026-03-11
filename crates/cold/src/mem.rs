@@ -78,6 +78,26 @@ impl MemColdBackendInner {
     fn confirmation_meta(&self, block: BlockNumber, index: u64) -> Option<ConfirmationMeta> {
         self.headers.get(&block).map(|h| ConfirmationMeta::new(block, h.hash(), index))
     }
+
+    /// Remove all data for blocks above `block`.
+    fn truncate_above(&mut self, block: BlockNumber) {
+        let to_remove: Vec<_> = self.headers.range((block + 1)..).map(|(k, _)| *k).collect();
+        for k in &to_remove {
+            if let Some(sealed) = self.headers.remove(k) {
+                self.header_hashes.remove(&sealed.hash());
+            }
+            if let Some(txs) = self.transactions.remove(k) {
+                for tx in txs {
+                    self.tx_hashes.remove(tx.hash());
+                }
+            }
+            if self.receipts.remove(k).is_some() {
+                self.receipt_tx_hashes.retain(|_, (b, _)| *b <= block);
+            }
+            self.signet_events.remove(k);
+            self.zenith_headers.remove(k);
+        }
+    }
 }
 
 impl ColdStorage for MemColdBackend {
@@ -312,27 +332,37 @@ impl ColdStorage for MemColdBackend {
 
     async fn truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
         let mut inner = self.inner.write().await;
-
-        // Collect keys to remove
-        let to_remove: Vec<_> = inner.headers.range((block + 1)..).map(|(k, _)| *k).collect();
-
-        for k in &to_remove {
-            if let Some(sealed) = inner.headers.remove(k) {
-                inner.header_hashes.remove(&sealed.hash());
-            }
-            if let Some(txs) = inner.transactions.remove(k) {
-                for tx in txs {
-                    inner.tx_hashes.remove(tx.hash());
-                }
-            }
-            if inner.receipts.remove(k).is_some() {
-                inner.receipt_tx_hashes.retain(|_, (b, _)| *b <= block);
-            }
-            inner.signet_events.remove(k);
-            inner.zenith_headers.remove(k);
-        }
-
+        inner.truncate_above(block);
         Ok(())
+    }
+
+    async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
+        let mut inner = self.inner.write().await;
+
+        // Collect receipts for blocks above `block` in ascending order
+        let blocks_above: Vec<_> = inner.headers.range((block + 1)..).map(|(k, _)| *k).collect();
+        let all_receipts = blocks_above
+            .iter()
+            .map(|&block_num| {
+                let Some(header) = inner.headers.get(&block_num) else {
+                    return Vec::new();
+                };
+                inner
+                    .receipts
+                    .get(&block_num)
+                    .map(|receipts| {
+                        receipts
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, ir)| ColdReceipt::new(ir.clone(), header, idx as u64))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        inner.truncate_above(block);
+        Ok(all_receipts)
     }
 }
 

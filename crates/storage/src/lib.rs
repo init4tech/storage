@@ -68,7 +68,7 @@ pub mod either;
 pub use either::Either;
 
 mod unified;
-pub use unified::UnifiedStorage;
+pub use unified::{DrainedBlock, UnifiedStorage};
 
 // Re-export connector traits
 pub use signet_cold::ColdConnect;

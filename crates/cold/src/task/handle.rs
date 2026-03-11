@@ -438,6 +438,15 @@ impl ColdStorageHandle {
             .map_err(map_dispatch_error)
     }
 
+    /// Read and remove all blocks above the given block number.
+    ///
+    /// Returns receipts for each block above `block` in ascending order,
+    /// then truncates. Index 0 = block+1, index 1 = block+2, etc.
+    pub async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
+        let (resp, rx) = oneshot::channel();
+        self.send_write(ColdWriteRequest::DrainAbove { block, resp }, rx).await
+    }
+
     /// Dispatch truncate without waiting for response (non-blocking).
     ///
     /// Unlike [`truncate_above`](Self::truncate_above), this method returns

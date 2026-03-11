@@ -234,6 +234,13 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
                 }
                 let _ = resp.send(result);
             }
+            ColdWriteRequest::DrainAbove { block, resp } => {
+                let result = self.backend.drain_above(block).await;
+                if result.is_ok() {
+                    self.cache.lock().await.invalidate_above(block);
+                }
+                let _ = resp.send(result);
+            }
         }
     }
 }
