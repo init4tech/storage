@@ -255,17 +255,13 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// [`Hot`]: crate::StorageError::Hot
     /// [`Cold`]: crate::StorageError::Cold
     pub async fn drain_above(&self, block: BlockNumber) -> StorageResult<Vec<DrainedBlock>> {
-        // 1–2. Read headers then unwind hot storage in a single write tx
-        //       to avoid TOCTOU races between reading and unwinding.
-        let writer = self.hot.writer()?;
-        let last = match writer.get_execution_range().map_err(|e| e.into_hot_kv_error())? {
-            Some((_, last)) if last > block => last,
-            _ => return Ok(Vec::new()),
-        };
-        let headers =
-            writer.get_headers_range(block + 1, last).map_err(|e| e.into_hot_kv_error())?;
-        writer.unwind_above(block).map_err(|e| e.map_db(|e| e.into_hot_kv_error()))?;
-        writer.raw_commit().map_err(|e| e.into_hot_kv_error())?;
+        // 1–2. Read headers and unwind hot storage synchronously.
+        //      Extracted to a sync helper so the `!Send` write transaction
+        //      does not appear in the async state machine.
+        let headers = self.unwind_hot_above(block)?;
+        if headers.is_empty() {
+            return Ok(Vec::new());
+        }
 
         // 3. Atomically drain cold (best-effort — failure = normal cold lag)
         let cold_receipts = self.cold.drain_above(block).await.unwrap_or_default();
@@ -281,6 +277,22 @@ impl<H: HotKv> UnifiedStorage<H> {
             .collect();
 
         Ok(drained)
+    }
+
+    /// Read headers above `block` and unwind hot storage in a single write
+    /// transaction to avoid TOCTOU races. Returns an empty vec if there is
+    /// nothing to unwind.
+    fn unwind_hot_above(&self, block: BlockNumber) -> StorageResult<Vec<SealedHeader>> {
+        let writer = self.hot.writer()?;
+        let last = match writer.get_execution_range().map_err(|e| e.into_hot_kv_error())? {
+            Some((_, last)) if last > block => last,
+            _ => return Ok(Vec::new()),
+        };
+        let headers =
+            writer.get_headers_range(block + 1, last).map_err(|e| e.into_hot_kv_error())?;
+        writer.unwind_above(block).map_err(|e| e.map_db(|e| e.into_hot_kv_error()))?;
+        writer.raw_commit().map_err(|e| e.into_hot_kv_error())?;
+        Ok(headers)
     }
 
     /// Unwind storage above the given block number (reorg handling).
@@ -348,5 +360,22 @@ impl<H: HotKv> UnifiedStorage<H> {
     pub async fn replay_to_cold(&self, blocks: Vec<ExecutedBlock>) -> Result<(), ColdStorageError> {
         let cold_data: Vec<_> = blocks.into_iter().map(BlockData::from).collect();
         self.cold.append_blocks(cold_data).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use signet_hot_mdbx::DatabaseEnv;
+
+    /// Compile-time canary: `drain_above` and `cold_lag` must return `Send`
+    /// futures even with the MDBX backend whose write transactions are
+    /// `!Send`.
+    fn _assert_send<T: Send>(_: T) {}
+    fn _drain_above_is_send(s: &UnifiedStorage<DatabaseEnv>) {
+        _assert_send(s.drain_above(0));
+    }
+    fn _cold_lag_is_send(s: &UnifiedStorage<DatabaseEnv>) {
+        _assert_send(s.cold_lag());
     }
 }
