@@ -165,6 +165,13 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    /// Compile-time canary: `StorageBuilder::build` must return a `Send`
+    /// future so it can be used from `Send`-bounded executors.
+    fn _assert_send<T: Send>(_: T) {}
+    fn _build_is_send(b: StorageBuilder<MdbxConnector, MdbxConnector>) {
+        _assert_send(b.build());
+    }
+
     #[test]
     #[serial]
     fn from_env_missing_hot_path() {

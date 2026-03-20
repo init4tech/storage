@@ -368,14 +368,18 @@ mod tests {
     use super::*;
     use signet_hot_mdbx::DatabaseEnv;
 
-    /// Compile-time canary: `drain_above` and `cold_lag` must return `Send`
-    /// futures even with the MDBX backend whose write transactions are
-    /// `!Send`.
+    /// Compile-time canaries: all async methods on `UnifiedStorage<DatabaseEnv>`
+    /// must return `Send` futures, even though MDBX write transactions are
+    /// `!Send`. If a `!Send` type leaks into the async state machine, these
+    /// will fail to compile.
     fn _assert_send<T: Send>(_: T) {}
     fn _drain_above_is_send(s: &UnifiedStorage<DatabaseEnv>) {
         _assert_send(s.drain_above(0));
     }
     fn _cold_lag_is_send(s: &UnifiedStorage<DatabaseEnv>) {
         _assert_send(s.cold_lag());
+    }
+    fn _replay_to_cold_is_send(s: &UnifiedStorage<DatabaseEnv>) {
+        _assert_send(s.replay_to_cold(Vec::new()));
     }
 }
