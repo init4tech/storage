@@ -207,14 +207,21 @@ pub trait ColdStorage: Send + Sync + 'static {
 
     /// Produce a log stream by iterating blocks and sending matching logs.
     ///
-    /// Implementations should hold a consistent read snapshot for the
-    /// duration when possible — backends with snapshot semantics (MDBX,
-    /// PostgreSQL with REPEATABLE READ) need no additional reorg detection.
+    /// # Concurrency
+    ///
+    /// Stream producers run concurrently with writes (`append_block`,
+    /// `truncate_above`, `drain_above`). They are NOT serialized by the
+    /// task runner's read/write barrier. Implementations MUST hold a
+    /// consistent read snapshot for the duration of the stream.
+    ///
+    /// Backends with snapshot semantics (MDBX read transactions,
+    /// PostgreSQL `REPEATABLE READ`) naturally satisfy this requirement.
     ///
     /// Backends without snapshot semantics can delegate to
     /// [`produce_log_stream_default`], which uses per-block
     /// [`get_header`] / [`get_logs`] calls with anchor-hash reorg
-    /// detection.
+    /// detection. This provides best-effort consistency but is not
+    /// immune to partial reads during concurrent writes.
     ///
     /// All errors are sent through `sender`. When this method returns,
     /// the sender is dropped, closing the stream.
