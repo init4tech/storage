@@ -7,9 +7,9 @@
 
 use alloy::primitives::BlockNumber;
 use signet_cold::{
-    BlockData, ColdConnect, ColdReceipt, ColdResult, ColdStorage, Confirmed, Filter,
-    HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, StreamParams, TransactionSpecifier,
-    ZenithHeaderSpecifier,
+    BlockData, ColdConnect, ColdReceipt, ColdResult, ColdStorage, ColdStorageRead,
+    ColdStorageWrite, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier,
+    StreamParams, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use signet_cold_mdbx::{MdbxColdBackend, MdbxConnector};
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
@@ -44,7 +44,7 @@ impl<L, R> Either<L, R> {
 }
 
 /// Enum to hold either cold backend type.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum EitherCold {
     /// MDBX cold backend.
     Mdbx(MdbxColdBackend),
@@ -70,9 +70,9 @@ macro_rules! dispatch_async {
     };
 }
 
-// Implement ColdStorage for EitherCold by dispatching to inner type
+// Implement ColdStorageRead for EitherCold by dispatching to inner type
 #[allow(clippy::manual_async_fn)]
-impl ColdStorage for EitherCold {
+impl ColdStorageRead for EitherCold {
     fn get_header(
         &self,
         spec: HeaderSpecifier,
@@ -162,17 +162,36 @@ impl ColdStorage for EitherCold {
     ) -> impl Future<Output = ()> + Send {
         dispatch_async!(self, produce_log_stream(filter, params))
     }
+}
 
-    fn append_block(&self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send {
+#[allow(clippy::manual_async_fn)]
+impl ColdStorageWrite for EitherCold {
+    fn append_block(&mut self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send {
         dispatch_async!(self, append_block(data))
     }
 
-    fn append_blocks(&self, data: Vec<BlockData>) -> impl Future<Output = ColdResult<()>> + Send {
+    fn append_blocks(
+        &mut self,
+        data: Vec<BlockData>,
+    ) -> impl Future<Output = ColdResult<()>> + Send {
         dispatch_async!(self, append_blocks(data))
     }
 
-    fn truncate_above(&self, block: BlockNumber) -> impl Future<Output = ColdResult<()>> + Send {
+    fn truncate_above(
+        &mut self,
+        block: BlockNumber,
+    ) -> impl Future<Output = ColdResult<()>> + Send {
         dispatch_async!(self, truncate_above(block))
+    }
+}
+
+#[allow(clippy::manual_async_fn)]
+impl ColdStorage for EitherCold {
+    fn drain_above(
+        &mut self,
+        block: BlockNumber,
+    ) -> impl Future<Output = ColdResult<Vec<Vec<ColdReceipt>>>> + Send {
+        dispatch_async!(self, drain_above(block))
     }
 }
 

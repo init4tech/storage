@@ -35,9 +35,9 @@ use alloy::{
     },
 };
 use signet_cold::{
-    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter,
-    HeaderSpecifier, ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier,
-    ZenithHeaderSpecifier,
+    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, ColdStorageRead,
+    ColdStorageWrite, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
+    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use signet_storage_types::{
     ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, RecoveredTx, SealedHeader,
@@ -971,7 +971,7 @@ fn build_log_filter_clause(filter: &Filter, start_idx: u32) -> (String, Vec<&[u8
 // ColdStorage implementation
 // ============================================================================
 
-impl ColdStorage for SqlColdBackend {
+impl ColdStorageRead for SqlColdBackend {
     async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<SealedHeader>> {
         let Some(block_num) = self.resolve_header_spec(spec).await? else {
             return Ok(None);
@@ -1364,12 +1364,14 @@ impl ColdStorage for SqlColdBackend {
             .map_err(SqlColdError::from)?;
         Ok(row.get::<Option<i64>, _>(COL_MAX_BN).map(from_i64))
     }
+}
 
-    async fn append_block(&self, data: BlockData) -> ColdResult<()> {
+impl ColdStorageWrite for SqlColdBackend {
+    async fn append_block(&mut self, data: BlockData) -> ColdResult<()> {
         self.insert_block(data).await.map_err(ColdStorageError::from)
     }
 
-    async fn append_blocks(&self, data: Vec<BlockData>) -> ColdResult<()> {
+    async fn append_blocks(&mut self, data: Vec<BlockData>) -> ColdResult<()> {
         let mut tx = self.pool.begin().await.map_err(SqlColdError::from)?;
         for block_data in data {
             write_block_to_tx(&mut tx, block_data).await.map_err(ColdStorageError::from)?;
@@ -1378,7 +1380,7 @@ impl ColdStorage for SqlColdBackend {
         Ok(())
     }
 
-    async fn truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
+    async fn truncate_above(&mut self, block: BlockNumber) -> ColdResult<()> {
         let bn = to_i64(block);
         let mut tx = self.pool.begin().await.map_err(SqlColdError::from)?;
 
@@ -1397,6 +1399,8 @@ impl ColdStorage for SqlColdBackend {
         Ok(())
     }
 }
+
+impl ColdStorage for SqlColdBackend {}
 
 #[cfg(all(test, feature = "test-utils"))]
 mod tests {

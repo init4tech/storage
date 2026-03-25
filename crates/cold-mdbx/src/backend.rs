@@ -10,9 +10,9 @@ use crate::{
 };
 use alloy::{consensus::transaction::Recovered, primitives::BlockNumber};
 use signet_cold::{
-    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter,
-    HeaderSpecifier, ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier,
-    ZenithHeaderSpecifier,
+    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, ColdStorageRead,
+    ColdStorageWrite, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
+    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use signet_hot::{
     KeySer, MAX_KEY_SIZE, ValSer,
@@ -191,6 +191,7 @@ fn produce_log_stream_blocking(
 /// This backend stores historical blockchain data in an MDBX database.
 /// It implements the [`ColdStorage`] trait for use with the cold storage
 /// task runner.
+#[derive(Clone)]
 pub struct MdbxColdBackend {
     /// The MDBX environment.
     env: DatabaseEnv,
@@ -646,7 +647,7 @@ impl MdbxColdBackend {
     }
 }
 
-impl ColdStorage for MdbxColdBackend {
+impl ColdStorageRead for MdbxColdBackend {
     async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<SealedHeader>> {
         Ok(self.get_header_inner(spec)?)
     }
@@ -757,20 +758,24 @@ impl ColdStorage for MdbxColdBackend {
             .map_err(MdbxColdError::from)?;
         Ok(latest)
     }
+}
 
-    async fn append_block(&self, data: BlockData) -> ColdResult<()> {
+impl ColdStorageWrite for MdbxColdBackend {
+    async fn append_block(&mut self, data: BlockData) -> ColdResult<()> {
         Ok(self.append_block_inner(data)?)
     }
 
-    async fn append_blocks(&self, data: Vec<BlockData>) -> ColdResult<()> {
+    async fn append_blocks(&mut self, data: Vec<BlockData>) -> ColdResult<()> {
         Ok(self.append_blocks_inner(data)?)
     }
 
-    async fn truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
+    async fn truncate_above(&mut self, block: BlockNumber) -> ColdResult<()> {
         Ok(self.truncate_above_inner(block)?)
     }
+}
 
-    async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
+impl ColdStorage for MdbxColdBackend {
+    async fn drain_above(&mut self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
         Ok(self.drain_above_inner(block)?)
     }
 }

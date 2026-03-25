@@ -159,7 +159,7 @@ pub use cold_receipt::ColdReceipt;
 mod stream;
 pub use stream::{StreamParams, produce_log_stream_default};
 mod traits;
-pub use traits::{BlockData, ColdStorage, LogStream};
+pub use traits::{BlockData, ColdStorage, ColdStorageRead, ColdStorageWrite, LogStream};
 
 pub mod connect;
 pub use connect::ColdConnect;

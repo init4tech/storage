@@ -4,9 +4,9 @@
 //! It is primarily intended for testing and development.
 
 use crate::{
-    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, Confirmed, Filter,
-    HeaderSpecifier, ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier,
-    ZenithHeaderSpecifier,
+    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, ColdStorageRead,
+    ColdStorageWrite, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
+    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::primitives::{B256, BlockNumber};
 use signet_storage_types::{
@@ -47,6 +47,7 @@ struct MemColdBackendInner {
 ///
 /// This backend is thread-safe and suitable for concurrent access.
 /// All operations are protected by an async read-write lock.
+#[derive(Clone)]
 pub struct MemColdBackend {
     inner: Arc<RwLock<MemColdBackendInner>>,
 }
@@ -100,7 +101,7 @@ impl MemColdBackendInner {
     }
 }
 
-impl ColdStorage for MemColdBackend {
+impl ColdStorageRead for MemColdBackend {
     async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<SealedHeader>> {
         let inner = self.inner.read().await;
         match spec {
@@ -274,8 +275,10 @@ impl ColdStorage for MemColdBackend {
         let inner = self.inner.read().await;
         Ok(inner.headers.last_key_value().map(|(k, _)| *k))
     }
+}
 
-    async fn append_block(&self, data: BlockData) -> ColdResult<()> {
+impl ColdStorageWrite for MemColdBackend {
+    async fn append_block(&mut self, data: BlockData) -> ColdResult<()> {
         let mut inner = self.inner.write().await;
 
         let block = data.block_number();
@@ -323,20 +326,22 @@ impl ColdStorage for MemColdBackend {
         Ok(())
     }
 
-    async fn append_blocks(&self, data: Vec<BlockData>) -> ColdResult<()> {
+    async fn append_blocks(&mut self, data: Vec<BlockData>) -> ColdResult<()> {
         for block_data in data {
             self.append_block(block_data).await?;
         }
         Ok(())
     }
 
-    async fn truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
+    async fn truncate_above(&mut self, block: BlockNumber) -> ColdResult<()> {
         let mut inner = self.inner.write().await;
         inner.truncate_above(block);
         Ok(())
     }
+}
 
-    async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
+impl ColdStorage for MemColdBackend {
+    async fn drain_above(&mut self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
         let mut inner = self.inner.write().await;
 
         // Collect receipts for blocks above `block` in ascending order

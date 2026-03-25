@@ -17,13 +17,13 @@
 //!
 //! The task owns the streaming configuration (max deadline, concurrency
 //! limit) and delegates the streaming loop to the backend via
-//! [`ColdStorage::produce_log_stream`]. Callers supply a per-request
+//! [`ColdStorageRead::produce_log_stream`]. Callers supply a per-request
 //! deadline that is clamped to the task's configured maximum.
 
 use super::cache::ColdCache;
 use crate::{
     ColdReadRequest, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, ColdStorageHandle,
-    ColdWriteRequest, Confirmed, HeaderSpecifier, LogStream, ReceiptSpecifier,
+    ColdStorageRead, ColdWriteRequest, Confirmed, HeaderSpecifier, LogStream, ReceiptSpecifier,
     TransactionSpecifier,
 };
 use signet_storage_types::{RecoveredTx, SealedHeader};
@@ -51,12 +51,12 @@ const MAX_CONCURRENT_STREAMS: usize = 8;
 /// Channel buffer size for streaming operations.
 const STREAM_CHANNEL_BUFFER: usize = 256;
 
-/// Shared state for the cold storage task, holding the backend and cache.
+/// Shared state for the cold storage task, holding the read backend and cache.
 ///
 /// This is wrapped in an `Arc` so that spawned read handlers can access
 /// the backend and cache without moving ownership.
 struct ColdStorageTaskInner<B> {
-    backend: B,
+    read_backend: B,
     cache: Mutex<ColdCache>,
     max_stream_deadline: Duration,
     stream_semaphore: Arc<Semaphore>,
@@ -66,13 +66,13 @@ struct ColdStorageTaskInner<B> {
     stream_tracker: TaskTracker,
 }
 
-impl<B: ColdStorage> ColdStorageTaskInner<B> {
+impl<B: ColdStorageRead> ColdStorageTaskInner<B> {
     /// Fetch a header from the backend and cache the result.
     async fn fetch_and_cache_header(
         &self,
         spec: HeaderSpecifier,
     ) -> ColdResult<Option<SealedHeader>> {
-        let r = self.backend.get_header(spec).await;
+        let r = self.read_backend.get_header(spec).await;
         if let Ok(Some(ref h)) = r {
             self.cache.lock().await.put_header(h.number, h.clone());
         }
@@ -84,7 +84,7 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
         &self,
         spec: TransactionSpecifier,
     ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
-        let r = self.backend.get_transaction(spec).await;
+        let r = self.read_backend.get_transaction(spec).await;
         if let Ok(Some(ref c)) = r {
             let meta = c.meta();
             self.cache
@@ -100,7 +100,7 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
         &self,
         spec: ReceiptSpecifier,
     ) -> ColdResult<Option<ColdReceipt>> {
-        let r = self.backend.get_receipt(spec).await;
+        let r = self.read_backend.get_receipt(spec).await;
         if let Ok(Some(ref c)) = r {
             self.cache.lock().await.put_receipt((c.block_number, c.transaction_index), c.clone());
         }
@@ -123,7 +123,7 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
                 let _ = resp.send(result);
             }
             ColdReadRequest::GetHeaders { specs, resp } => {
-                let _ = resp.send(self.backend.get_headers(specs).await);
+                let _ = resp.send(self.read_backend.get_headers(specs).await);
             }
             ColdReadRequest::GetTransaction { spec, resp } => {
                 let result = if let TransactionSpecifier::BlockAndIndex { block, index } = &spec {
@@ -138,10 +138,10 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
                 let _ = resp.send(result);
             }
             ColdReadRequest::GetTransactionsInBlock { block, resp } => {
-                let _ = resp.send(self.backend.get_transactions_in_block(block).await);
+                let _ = resp.send(self.read_backend.get_transactions_in_block(block).await);
             }
             ColdReadRequest::GetTransactionCount { block, resp } => {
-                let _ = resp.send(self.backend.get_transaction_count(block).await);
+                let _ = resp.send(self.read_backend.get_transaction_count(block).await);
             }
             ColdReadRequest::GetReceipt { spec, resp } => {
                 let result = if let ReceiptSpecifier::BlockAndIndex { block, index } = &spec {
@@ -156,25 +156,25 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
                 let _ = resp.send(result);
             }
             ColdReadRequest::GetReceiptsInBlock { block, resp } => {
-                let _ = resp.send(self.backend.get_receipts_in_block(block).await);
+                let _ = resp.send(self.read_backend.get_receipts_in_block(block).await);
             }
             ColdReadRequest::GetSignetEvents { spec, resp } => {
-                let _ = resp.send(self.backend.get_signet_events(spec).await);
+                let _ = resp.send(self.read_backend.get_signet_events(spec).await);
             }
             ColdReadRequest::GetZenithHeader { spec, resp } => {
-                let _ = resp.send(self.backend.get_zenith_header(spec).await);
+                let _ = resp.send(self.read_backend.get_zenith_header(spec).await);
             }
             ColdReadRequest::GetZenithHeaders { spec, resp } => {
-                let _ = resp.send(self.backend.get_zenith_headers(spec).await);
+                let _ = resp.send(self.read_backend.get_zenith_headers(spec).await);
             }
             ColdReadRequest::GetLogs { filter, max_logs, resp } => {
-                let _ = resp.send(self.backend.get_logs(&filter, max_logs).await);
+                let _ = resp.send(self.read_backend.get_logs(&filter, max_logs).await);
             }
             ColdReadRequest::StreamLogs { filter, max_logs, deadline, resp } => {
                 let _ = resp.send(self.handle_stream_logs(*filter, max_logs, deadline).await);
             }
             ColdReadRequest::GetLatestBlock { resp } => {
-                let _ = resp.send(self.backend.get_latest_block().await);
+                let _ = resp.send(self.read_backend.get_latest_block().await);
             }
         }
     }
@@ -183,7 +183,7 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
     ///
     /// Acquires a concurrency permit, resolves the block range, then
     /// spawns a producer task that delegates to
-    /// [`ColdStorage::produce_log_stream`].
+    /// [`ColdStorageRead::produce_log_stream`].
     async fn handle_stream_logs(
         self: &Arc<Self>,
         filter: crate::Filter,
@@ -201,7 +201,7 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
         let to = match filter.get_to_block() {
             Some(to) => to,
             None => {
-                let Some(latest) = self.backend.get_latest_block().await? else {
+                let Some(latest) = self.read_backend.get_latest_block().await? else {
                     let (_tx, rx) = mpsc::channel(1);
                     return Ok(ReceiverStream::new(rx));
                 };
@@ -212,44 +212,16 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
         let effective = deadline.min(self.max_stream_deadline);
         let deadline_instant = tokio::time::Instant::now() + effective;
         let (sender, rx) = mpsc::channel(STREAM_CHANNEL_BUFFER);
-        let inner = Arc::clone(self);
+        let stream_backend = self.read_backend.clone();
 
         self.stream_tracker.spawn(async move {
             let _permit = permit;
             let params =
                 crate::StreamParams { from, to, max_logs, sender, deadline: deadline_instant };
-            inner.backend.produce_log_stream(&filter, params).await;
+            stream_backend.produce_log_stream(&filter, params).await;
         });
 
         Ok(ReceiverStream::new(rx))
-    }
-
-    /// Handle a write request, invalidating the cache on truncation.
-    async fn handle_write(&self, req: ColdWriteRequest) {
-        match req {
-            ColdWriteRequest::AppendBlock(boxed) => {
-                let result = self.backend.append_block(boxed.data).await;
-                let _ = boxed.resp.send(result);
-            }
-            ColdWriteRequest::AppendBlocks { data, resp } => {
-                let result = self.backend.append_blocks(data).await;
-                let _ = resp.send(result);
-            }
-            ColdWriteRequest::TruncateAbove { block, resp } => {
-                let result = self.backend.truncate_above(block).await;
-                if result.is_ok() {
-                    self.cache.lock().await.invalidate_above(block);
-                }
-                let _ = resp.send(result);
-            }
-            ColdWriteRequest::DrainAbove { block, resp } => {
-                let result = self.backend.drain_above(block).await;
-                if result.is_ok() {
-                    self.cache.lock().await.invalidate_above(block);
-                }
-                let _ = resp.send(result);
-            }
-        }
     }
 }
 
@@ -278,16 +250,17 @@ impl<B: ColdStorage> ColdStorageTaskInner<B> {
 ///
 /// The task owns the streaming configuration (max deadline, concurrency
 /// limit) and delegates the streaming loop to the backend via
-/// [`ColdStorage::produce_log_stream`]. Callers supply a per-request
+/// [`ColdStorageRead::produce_log_stream`]. Callers supply a per-request
 /// deadline that is clamped to the task's configured maximum.
 ///
 /// # Caching
 ///
 /// Transaction, receipt, and header lookups are served from an LRU cache
 /// when possible. Cache entries are invalidated on
-/// [`truncate_above`](crate::ColdStorage::truncate_above) to handle reorgs.
+/// [`truncate_above`](crate::ColdStorageWrite::truncate_above) to handle reorgs.
 pub struct ColdStorageTask<B: ColdStorage> {
     inner: Arc<ColdStorageTaskInner<B>>,
+    write_backend: B,
     read_receiver: mpsc::Receiver<ColdReadRequest>,
     write_receiver: mpsc::Receiver<ColdWriteRequest>,
     cancel_token: CancellationToken,
@@ -306,14 +279,16 @@ impl<B: ColdStorage> ColdStorageTask<B> {
     pub fn new(backend: B, cancel_token: CancellationToken) -> (Self, ColdStorageHandle) {
         let (read_sender, read_receiver) = mpsc::channel(READ_CHANNEL_SIZE);
         let (write_sender, write_receiver) = mpsc::channel(WRITE_CHANNEL_SIZE);
+        let read_backend = backend.clone();
         let task = Self {
             inner: Arc::new(ColdStorageTaskInner {
-                backend,
+                read_backend,
                 cache: Mutex::new(ColdCache::new()),
                 max_stream_deadline: DEFAULT_MAX_STREAM_DEADLINE,
                 stream_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS)),
                 stream_tracker: TaskTracker::new(),
             }),
+            write_backend: backend,
             read_receiver,
             write_receiver,
             cancel_token,
@@ -331,6 +306,39 @@ impl<B: ColdStorage> ColdStorageTask<B> {
         let (task, handle) = Self::new(backend, cancel_token);
         tokio::spawn(task.run());
         handle
+    }
+
+    /// Handle a write request using the exclusively owned write backend.
+    ///
+    /// Called inline in the run loop (never spawned). The write backend
+    /// is not shared — no lock acquisition needed. The drain-before-write
+    /// step in `run()` ensures no read tasks are populating the cache
+    /// concurrently, preventing stale cache entries after truncation.
+    async fn handle_write(&mut self, req: ColdWriteRequest) {
+        match req {
+            ColdWriteRequest::AppendBlock(boxed) => {
+                let result = self.write_backend.append_block(boxed.data).await;
+                let _ = boxed.resp.send(result);
+            }
+            ColdWriteRequest::AppendBlocks { data, resp } => {
+                let result = self.write_backend.append_blocks(data).await;
+                let _ = resp.send(result);
+            }
+            ColdWriteRequest::TruncateAbove { block, resp } => {
+                let result = self.write_backend.truncate_above(block).await;
+                if result.is_ok() {
+                    self.inner.cache.lock().await.invalidate_above(block);
+                }
+                let _ = resp.send(result);
+            }
+            ColdWriteRequest::DrainAbove { block, resp } => {
+                let result = self.write_backend.drain_above(block).await;
+                if result.is_ok() {
+                    self.inner.cache.lock().await.invalidate_above(block);
+                }
+                let _ = resp.send(result);
+            }
+        }
     }
 
     /// Run the task, processing requests until shutdown.
@@ -359,7 +367,7 @@ impl<B: ColdStorage> ColdStorageTask<B> {
                     self.task_tracker.wait().await;
                     self.task_tracker.reopen();
 
-                    self.inner.handle_write(req).await;
+                    self.handle_write(req).await;
                 }
 
                 maybe_read = self.read_receiver.recv() => {
