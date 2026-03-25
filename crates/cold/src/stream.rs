@@ -1,13 +1,13 @@
 //! Log-streaming helper for backends without snapshot semantics.
 
-use crate::{ColdResult, ColdStorage, ColdStorageError, Filter, HeaderSpecifier, RpcLog};
+use crate::{ColdResult, ColdStorageError, ColdStorageRead, Filter, HeaderSpecifier, RpcLog};
 use alloy::{primitives::BlockNumber, rpc::types::FilterBlockOption};
 use tokio::sync::mpsc;
 
 /// Parameters for a log-streaming request.
 ///
 /// Bundles the block range, limits, channel, and deadline that every
-/// [`ColdStorage::produce_log_stream`] implementation needs.
+/// [`ColdStorageRead::produce_log_stream`] implementation needs.
 #[derive(Debug)]
 pub struct StreamParams {
     /// First block in range (inclusive).
@@ -28,13 +28,13 @@ pub struct StreamParams {
 ///
 /// Captures an anchor hash from the `to` block at the start and
 /// re-checks it before each block to detect reorgs. Uses
-/// [`ColdStorage::get_header`] for anchor checks and
-/// [`ColdStorage::get_logs`] with single-block filters per block.
+/// [`ColdStorageRead::get_header`] for anchor checks and
+/// [`ColdStorageRead::get_logs`] with single-block filters per block.
 ///
 /// Backends that hold a consistent read snapshot (MDBX, PostgreSQL
 /// with REPEATABLE READ) should provide their own
-/// [`ColdStorage::produce_log_stream`] implementation instead.
-pub async fn produce_log_stream_default<B: ColdStorage + ?Sized>(
+/// [`ColdStorageRead::produce_log_stream`] implementation instead.
+pub async fn produce_log_stream_default<B: ColdStorageRead>(
     backend: &B,
     filter: &Filter,
     params: StreamParams,

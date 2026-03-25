@@ -1,9 +1,10 @@
-//! Core trait definition for cold storage backends.
+//! Core trait definitions for cold storage backends.
 //!
-//! The [`ColdStorage`] trait defines the interface that all cold storage
-//! backends must implement. Backends are responsible for data organization,
-//! indexing, and keying - the trait is agnostic to these implementation
-//! details.
+//! The cold storage interface is split into three traits:
+//!
+//! - [`ColdStorageRead`] — read-only access (`&self`, `Clone`)
+//! - [`ColdStorageWrite`] — write access (`&mut self`)
+//! - [`ColdStorage`] — supertrait combining both, with `drain_above`
 
 use crate::{
     ColdReceipt, ColdResult, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
@@ -80,34 +81,20 @@ impl From<ExecutedBlock> for BlockData {
     }
 }
 
-/// Unified cold storage backend trait.
+/// Read-only cold storage backend trait.
 ///
-/// Backend is responsible for all data organization, indexing, and keying.
-/// The trait is agnostic to how the backend stores or indexes data.
-///
-/// All methods are async and return futures that are `Send`.
+/// All methods take `&self` and return `Send` futures. Implementations
+/// must be `Clone + Send + Sync + 'static` so that read backends can be
+/// shared across tasks (e.g. via `Arc` or cheap cloning).
 ///
 /// # Implementation Guide
 ///
 /// Implementers must ensure:
 ///
-/// - **Append-only ordering**: `append_block` must enforce monotonically
-///   increasing block numbers. Attempting to append a block with a number <=
-///   the current latest should return an error.
-///
-/// - **Atomic truncation**: `truncate_above` must remove all data for blocks
-///   N+1 and higher atomically. Partial truncation is not acceptable.
-///
-/// - **Index maintenance**: Hash-based lookups (e.g., header by hash,
-///   transaction by hash) require the implementation to maintain appropriate
-///   indexes. These indexes must be updated during `append_block` and cleaned
-///   during `truncate_above`.
-///
-/// - **Consistent reads**: Read operations should return consistent snapshots.
-///   A read started before a write completes should not see partial data from
-///   that write.
-///
-pub trait ColdStorage: Send + Sync + 'static {
+/// - **Consistent reads**: Read operations should return consistent
+///   snapshots. A read started before a write completes should not see
+///   partial data from that write.
+pub trait ColdStorageRead: Clone + Send + Sync + 'static {
     // --- Headers ---
 
     /// Get a header by specifier.
@@ -226,28 +213,61 @@ pub trait ColdStorage: Send + Sync + 'static {
     /// All errors are sent through `sender`. When this method returns,
     /// the sender is dropped, closing the stream.
     ///
-    /// [`get_header`]: ColdStorage::get_header
-    /// [`get_logs`]: ColdStorage::get_logs
+    /// [`get_header`]: ColdStorageRead::get_header
+    /// [`get_logs`]: ColdStorageRead::get_logs
     /// [`produce_log_stream_default`]: crate::produce_log_stream_default
     fn produce_log_stream(
         &self,
         filter: &Filter,
         params: StreamParams,
     ) -> impl Future<Output = ()> + Send;
+}
 
-    // --- Write operations ---
-
+/// Write-only cold storage backend trait.
+///
+/// All methods take `&mut self` and return `Send` futures. The write
+/// backend is exclusively owned by the task runner — no synchronization
+/// is needed.
+///
+/// # Implementation Guide
+///
+/// Implementers must ensure:
+///
+/// - **Append-only ordering**: `append_block` must enforce monotonically
+///   increasing block numbers. Attempting to append a block with a number <=
+///   the current latest should return an error.
+///
+/// - **Atomic truncation**: `truncate_above` must remove all data for blocks
+///   N+1 and higher atomically. Partial truncation is not acceptable.
+///
+/// - **Index maintenance**: Hash-based lookups (e.g., header by hash,
+///   transaction by hash) require the implementation to maintain appropriate
+///   indexes. These indexes must be updated during `append_block` and cleaned
+///   during `truncate_above`.
+pub trait ColdStorageWrite: Send + 'static {
     /// Append a single block to cold storage.
-    fn append_block(&self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send;
+    fn append_block(&mut self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send;
 
     /// Append multiple blocks to cold storage.
-    fn append_blocks(&self, data: Vec<BlockData>) -> impl Future<Output = ColdResult<()>> + Send;
+    fn append_blocks(
+        &mut self,
+        data: Vec<BlockData>,
+    ) -> impl Future<Output = ColdResult<()>> + Send;
 
     /// Truncate all data above the given block number (exclusive).
     ///
     /// This removes block N+1 and higher from all tables. Used for reorg handling.
-    fn truncate_above(&self, block: BlockNumber) -> impl Future<Output = ColdResult<()>> + Send;
+    fn truncate_above(&mut self, block: BlockNumber)
+    -> impl Future<Output = ColdResult<()>> + Send;
+}
 
+/// Combined read and write cold storage backend trait.
+///
+/// Combines [`ColdStorageRead`] and [`ColdStorageWrite`] and provides
+/// [`drain_above`](ColdStorage::drain_above), which reads receipts then
+/// truncates. The default implementation is correct but not atomic;
+/// backends should override with an atomic version when possible.
+pub trait ColdStorage: ColdStorageRead + ColdStorageWrite {
     /// Read and remove all blocks above the given block number.
     ///
     /// Returns receipts for each block above `block` in ascending order,
@@ -259,7 +279,7 @@ pub trait ColdStorage: Send + Sync + 'static {
     /// not atomic. Backends should override with an atomic version
     /// when possible.
     fn drain_above(
-        &self,
+        &mut self,
         block: BlockNumber,
     ) -> impl Future<Output = ColdResult<Vec<Vec<ColdReceipt>>>> + Send {
         async move {
