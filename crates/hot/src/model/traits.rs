@@ -266,6 +266,9 @@ pub trait HotKvWrite: HotKvRead {
 
     /// Queue a raw create operation for a specific table.
     ///
+    /// Implementations MUST be idempotent: if the table already exists,
+    /// this should be a no-op.
+    ///
     /// This abstraction supports table specializations:
     /// 1. `dual_key_size` - whether the table is dual-keyed (i.e.,
     ///    `DUPSORT` in LMDB/MDBX). If so, the argument MUST be the
@@ -397,8 +400,13 @@ pub trait HotKvWrite: HotKvRead {
     /// [`AccountChangeSets`], [`StorageHistory`], and
     /// [`StorageChangeSets`].
     ///
+    /// This is expected to be a no-op if the tables already exist, as
+    /// [`queue_raw_create`] is required to be idempotent.
+    ///
     /// This does not commit the transaction. The caller must call
     /// [`raw_commit`] after this method to persist the tables.
+    ///
+    /// [`queue_raw_create`]: Self::queue_raw_create
     ///
     /// [`raw_commit`]: Self::raw_commit
     /// [`Headers`]: crate::tables::Headers
