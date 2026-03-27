@@ -78,7 +78,7 @@ pub use tx::Tx;
 
 mod utils;
 
-use signet_hot::model::{HotKv, HotKvError};
+use signet_hot::model::{HotKv, HotKvError, HotKvWrite};
 
 /// 1 KB in bytes
 pub const KILOBYTE: usize = 1024;
@@ -369,7 +369,21 @@ impl DatabaseEnv {
         let fsi_cache = Arc::new(RwLock::new(HashMap::new()));
         let env = Self { inner: inner_env.open(path)?, fsi_cache, _lock_file };
 
+        if kind.is_rw() {
+            env.create_tables()?;
+        }
+
         Ok(env)
+    }
+
+    /// Create all standard hot storage tables.
+    ///
+    /// Called automatically when opening in read-write mode.
+    fn create_tables(&self) -> Result<(), MdbxError> {
+        let tx = self.tx_rw()?;
+        tx.queue_db_init()?;
+        tx.raw_commit()?;
+        Ok(())
     }
 
     /// Start a new read-only transaction.

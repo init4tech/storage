@@ -266,6 +266,9 @@ pub trait HotKvWrite: HotKvRead {
 
     /// Queue a raw create operation for a specific table.
     ///
+    /// Implementations MUST be idempotent: if the table already exists,
+    /// this should be a no-op.
+    ///
     /// This abstraction supports table specializations:
     /// 1. `dual_key_size` - whether the table is dual-keyed (i.e.,
     ///    `DUPSORT` in LMDB/MDBX). If so, the argument MUST be the
@@ -387,6 +390,46 @@ pub trait HotKvWrite: HotKvRead {
         T: Table,
     {
         self.queue_raw_clear(T::NAME)
+    }
+
+    /// Queue creation of all standard hot storage tables.
+    ///
+    /// This creates the 9 predefined tables used by the history and state
+    /// subsystems: [`Headers`], [`HeaderNumbers`], [`Bytecodes`],
+    /// [`PlainAccountState`], [`PlainStorageState`], [`AccountsHistory`],
+    /// [`AccountChangeSets`], [`StorageHistory`], and
+    /// [`StorageChangeSets`].
+    ///
+    /// This is expected to be a no-op if the tables already exist, as
+    /// [`queue_raw_create`] is required to be idempotent.
+    ///
+    /// This does not commit the transaction. The caller must call
+    /// [`raw_commit`] after this method to persist the tables.
+    ///
+    /// [`queue_raw_create`]: Self::queue_raw_create
+    ///
+    /// [`raw_commit`]: Self::raw_commit
+    /// [`Headers`]: crate::tables::Headers
+    /// [`HeaderNumbers`]: crate::tables::HeaderNumbers
+    /// [`Bytecodes`]: crate::tables::Bytecodes
+    /// [`PlainAccountState`]: crate::tables::PlainAccountState
+    /// [`PlainStorageState`]: crate::tables::PlainStorageState
+    /// [`AccountsHistory`]: crate::tables::AccountsHistory
+    /// [`AccountChangeSets`]: crate::tables::AccountChangeSets
+    /// [`StorageHistory`]: crate::tables::StorageHistory
+    /// [`StorageChangeSets`]: crate::tables::StorageChangeSets
+    fn queue_db_init(&self) -> Result<(), Self::Error> {
+        use crate::tables;
+        self.queue_create::<tables::Headers>()?;
+        self.queue_create::<tables::HeaderNumbers>()?;
+        self.queue_create::<tables::Bytecodes>()?;
+        self.queue_create::<tables::PlainAccountState>()?;
+        self.queue_create::<tables::PlainStorageState>()?;
+        self.queue_create::<tables::AccountsHistory>()?;
+        self.queue_create::<tables::AccountChangeSets>()?;
+        self.queue_create::<tables::StorageHistory>()?;
+        self.queue_create::<tables::StorageChangeSets>()?;
+        Ok(())
     }
 
     /// Clear all K2 entries for a specific K1 in a dual-keyed table.
