@@ -5,7 +5,7 @@ use alloy::primitives::Bytes;
 use signet_hot::{
     db::UnsafeDbWrite,
     model::{HotKv, HotKvWrite},
-    tables::{self, SingleKey, Table},
+    tables::{SingleKey, Table},
 };
 use tempfile::{TempDir, tempdir};
 
@@ -29,25 +29,13 @@ pub fn create_test_rw_db() -> (TempDir, DatabaseEnv) {
     let args = DatabaseArguments::new();
     let db = DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, args).unwrap();
 
-    // Create tables from the `crate::tables::hot` module
+    // Standard tables are created automatically by open() in RW mode.
+    // Create test-specific tables.
     let writer = db.writer().unwrap();
-
-    writer.queue_create::<tables::Headers>().unwrap();
-    writer.queue_create::<tables::HeaderNumbers>().unwrap();
-    writer.queue_create::<tables::Bytecodes>().unwrap();
-    writer.queue_create::<tables::PlainAccountState>().unwrap();
-    writer.queue_create::<tables::AccountsHistory>().unwrap();
-    writer.queue_create::<tables::StorageHistory>().unwrap();
-    writer.queue_create::<tables::PlainStorageState>().unwrap();
-    writer.queue_create::<tables::StorageChangeSets>().unwrap();
-    writer.queue_create::<tables::AccountChangeSets>().unwrap();
-
     writer.queue_create::<TestTable>().unwrap();
-
-    // Create DUP_FIXED table for put_multiple tests
+    // DUP_FIXED table for put_multiple tests
     // key2_size=8, value_size=8 means total fixed value size is 16 bytes
     writer.queue_raw_create("put_multiple_test", Some(8), Some(8)).unwrap();
-
     writer.commit().expect("Failed to commit table creation");
 
     (dir, db)
@@ -66,7 +54,6 @@ mod tests {
     use signet_hot::{
         KeySer, MAX_KEY_SIZE, ValSer,
         conformance::{conformance, test_unwind_conformance},
-        db::UnsafeDbWrite,
         model::{
             DualKeyTraverse, DualTableTraverse, HotKv, HotKvRead, HotKvWrite, TableTraverse,
             TableTraverseMut,
@@ -132,9 +119,6 @@ mod tests {
         // Test HotKv::writer() and basic write operations
         {
             let writer: Tx<Rw> = db.writer().unwrap();
-
-            // Create tables first
-            writer.queue_create::<tables::Bytecodes>().unwrap();
 
             // Write account data
             writer.queue_put::<tables::PlainAccountState>(&address, &account).unwrap();
@@ -494,7 +478,6 @@ mod tests {
 
         {
             let writer: Tx<Rw> = db.writer().unwrap();
-            writer.queue_create::<tables::Bytecodes>().unwrap();
             writer.queue_put::<tables::Bytecodes>(&hash, &large_bytecode).unwrap();
             writer.raw_commit().unwrap();
         }
@@ -1995,15 +1978,10 @@ mod tests {
 
         let dir = tempdir().unwrap();
 
-        // Phase 1: create tables and write data, then drop the DatabaseEnv.
+        // Phase 1: open RW (auto-creates tables), then drop the DatabaseEnv.
         {
             let args = DatabaseArguments::new();
-            let db = DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, args).unwrap();
-
-            let writer = db.writer().unwrap();
-            writer.queue_create::<tables::PlainStorageState>().unwrap();
-            writer.queue_create::<tables::Headers>().unwrap();
-            writer.raw_commit().unwrap();
+            DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, args).unwrap();
         }
         // DatabaseEnv (and its in-memory FsiCache) is now dropped.
 
