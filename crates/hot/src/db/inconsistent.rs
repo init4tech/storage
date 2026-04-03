@@ -239,8 +239,11 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
         for (address, info) in accounts {
             let account = info.as_ref().map(Account::from).unwrap_or_default();
 
-            if let Some(bytecode) = info.as_ref().and_then(|info| info.code.clone()) {
-                let code_hash = account.bytecode_hash.expect("info has bytecode; hash must exist");
+            // bytecode_hash is None when code_hash == KECCAK256_EMPTY,
+            // which doesn't need to be stored.
+            if let Some((bytecode, code_hash)) =
+                info.as_ref().and_then(|info| info.code.clone()).zip(account.bytecode_hash)
+            {
                 self.put_bytecode(&code_hash, &bytecode)?;
             }
 
@@ -322,8 +325,9 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
         };
 
         let account = Account::from(info.clone());
-        if let Some(bytecode) = info.code.clone() {
-            let code_hash = account.bytecode_hash.expect("info has bytecode; hash must exist");
+        // bytecode_hash is None when code_hash == KECCAK256_EMPTY,
+        // which doesn't need to be stored.
+        if let Some((bytecode, code_hash)) = info.code.clone().zip(account.bytecode_hash) {
             self.put_bytecode(&code_hash, &bytecode)?;
         }
         self.put_account(address, &account)
