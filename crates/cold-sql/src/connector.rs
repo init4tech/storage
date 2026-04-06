@@ -1,8 +1,8 @@
 //! SQL cold storage connector.
 
-use crate::{PoolOverrides, SqlColdBackend, SqlColdError};
+use crate::{SqlColdBackend, SqlColdError};
 use signet_cold::ColdConnect;
-use std::time::Duration;
+use sqlx::pool::PoolOptions;
 
 /// Errors that can occur when initializing SQL connectors.
 #[derive(Debug, thiserror::Error)]
@@ -22,20 +22,20 @@ pub enum SqlConnectorError {
 /// - URLs starting with `postgres://` or `postgresql://` use PostgreSQL
 /// - URLs starting with `sqlite:` use SQLite
 ///
-/// Pool settings use backend-specific defaults. Use
-/// [`with_max_connections`] and [`with_acquire_timeout`] to override.
-///
-/// [`with_max_connections`]: Self::with_max_connections
-/// [`with_acquire_timeout`]: Self::with_acquire_timeout
+/// Pool behaviour is configured via [`sqlx::pool::PoolOptions`] passed
+/// to [`with_pool_options`](Self::with_pool_options). For in-memory
+/// SQLite URLs, `max_connections` is forced to 1 regardless of the
+/// provided options.
 ///
 /// # Example
 ///
 /// ```ignore
 /// use signet_cold_sql::SqlConnector;
+/// use sqlx::pool::PoolOptions;
 ///
 /// // PostgreSQL with custom pool size
 /// let pg = SqlConnector::new("postgres://localhost/signet")
-///     .with_max_connections(20);
+///     .with_pool_options(PoolOptions::new().max_connections(20));
 /// let backend = pg.connect().await?;
 ///
 /// // SQLite (defaults)
@@ -46,21 +46,16 @@ pub enum SqlConnectorError {
 #[derive(Debug, Clone)]
 pub struct SqlConnector {
     url: String,
-    overrides: PoolOverrides,
+    pool_opts: PoolOptions<sqlx::Any>,
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 impl SqlConnector {
-    /// Create a new SQL connector.
+    /// Create a new SQL connector with default pool options.
     ///
-    /// The database type is detected from the URL prefix. Pool settings
-    /// use backend-specific defaults. Use [`with_max_connections`] and
-    /// [`with_acquire_timeout`] to override.
-    ///
-    /// [`with_max_connections`]: Self::with_max_connections
-    /// [`with_acquire_timeout`]: Self::with_acquire_timeout
+    /// The database type is detected from the URL prefix.
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into(), overrides: PoolOverrides::default() }
+        Self { url: url.into(), pool_opts: PoolOptions::new() }
     }
 
     /// Get a reference to the connection URL.
@@ -68,19 +63,12 @@ impl SqlConnector {
         &self.url
     }
 
-    /// Override the maximum number of pool connections.
+    /// Set the pool options for this connector.
     ///
-    /// Default: 1 for SQLite, 10 for PostgreSQL.
-    pub const fn with_max_connections(mut self, n: u32) -> Self {
-        self.overrides.max_connections = Some(n);
-        self
-    }
-
-    /// Override the connection acquire timeout.
-    ///
-    /// Default: 5 seconds for all backends.
-    pub const fn with_acquire_timeout(mut self, timeout: Duration) -> Self {
-        self.overrides.acquire_timeout = Some(timeout);
+    /// For in-memory SQLite URLs, `max_connections` is forced to 1
+    /// regardless of the value set here.
+    pub fn with_pool_options(mut self, pool_opts: PoolOptions<sqlx::Any>) -> Self {
+        self.pool_opts = pool_opts;
         self
     }
 
@@ -109,7 +97,7 @@ impl ColdConnect for SqlConnector {
 
     fn connect(&self) -> impl std::future::Future<Output = Result<Self::Cold, Self::Error>> + Send {
         let url = self.url.clone();
-        let overrides = self.overrides;
-        async move { SqlColdBackend::connect_with(&url, overrides).await }
+        let pool_opts = self.pool_opts.clone();
+        async move { SqlColdBackend::connect_with(&url, pool_opts).await }
     }
 }

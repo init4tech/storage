@@ -50,7 +50,6 @@ use signet_zenith::{
     Zenith,
 };
 use sqlx::{AnyPool, Row};
-use std::time::Duration;
 
 /// SQL-based cold storage backend.
 ///
@@ -77,17 +76,13 @@ pub struct SqlColdBackend {
     is_postgres: bool,
 }
 
-/// Pool configuration overrides for [`SqlColdBackend::connect_with`].
+/// Returns `true` if the URL refers to an in-memory SQLite database.
 ///
-/// `None` values use backend-specific defaults:
-/// - SQLite: `max_connections = 1`, `acquire_timeout = 5s`
-/// - PostgreSQL: `max_connections = 10`, `acquire_timeout = 5s`
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PoolOverrides {
-    /// Override the maximum number of connections in the pool.
-    pub max_connections: Option<u32>,
-    /// Override the connection acquire timeout.
-    pub acquire_timeout: Option<Duration>,
+/// In-memory SQLite databases are per-connection, so the pool must be
+/// limited to a single connection to ensure all queries see the same
+/// state.
+fn is_in_memory_sqlite(url: &str) -> bool {
+    url == "sqlite::memory:" || url.contains("mode=memory")
 }
 
 impl SqlColdBackend {
@@ -119,38 +114,30 @@ impl SqlColdBackend {
         Ok(Self { pool, is_postgres })
     }
 
-    /// Connect to a database URL with explicit pool overrides.
+    /// Connect to a database URL with explicit pool options.
     ///
     /// Installs the default sqlx drivers on the first call. The database
     /// type is inferred from the URL scheme (`sqlite:` or `postgres:`).
     ///
-    /// # Pool Defaults
-    ///
-    /// - **SQLite**: `max_connections = 1` (required for in-memory databases
-    ///   to share state), `acquire_timeout = 5s`.
-    /// - **PostgreSQL**: `max_connections = 10`, `acquire_timeout = 5s`.
-    ///
-    /// Override any default by setting the corresponding field in
-    /// `overrides`.
-    pub async fn connect_with(url: &str, overrides: PoolOverrides) -> Result<Self, SqlColdError> {
+    /// For in-memory SQLite URLs (`sqlite::memory:` or `mode=memory`),
+    /// `max_connections` is forced to 1 regardless of the provided
+    /// options, because in-memory databases are per-connection.
+    pub async fn connect_with(
+        url: &str,
+        pool_opts: sqlx::pool::PoolOptions<sqlx::Any>,
+    ) -> Result<Self, SqlColdError> {
         sqlx::any::install_default_drivers();
-        let is_sqlite = url.starts_with("sqlite:");
-        let default_max = if is_sqlite { 1 } else { 10 };
-        let default_timeout = Duration::from_secs(5);
-        let pool: AnyPool = sqlx::pool::PoolOptions::new()
-            .max_connections(overrides.max_connections.unwrap_or(default_max))
-            .acquire_timeout(overrides.acquire_timeout.unwrap_or(default_timeout))
-            .connect(url)
-            .await?;
+        let pool_opts =
+            if is_in_memory_sqlite(url) { pool_opts.max_connections(1) } else { pool_opts };
+        let pool: AnyPool = pool_opts.connect(url).await?;
         Self::new(pool).await
     }
 
     /// Connect to a database URL with default pool settings.
     ///
     /// Convenience wrapper around [`connect_with`](Self::connect_with).
-    /// See that method for default pool sizes per backend.
     pub async fn connect(url: &str) -> Result<Self, SqlColdError> {
-        Self::connect_with(url, PoolOverrides::default()).await
+        Self::connect_with(url, sqlx::pool::PoolOptions::new()).await
     }
 
     // ========================================================================
