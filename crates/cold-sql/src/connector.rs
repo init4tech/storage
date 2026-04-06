@@ -3,6 +3,7 @@
 use crate::{SqlColdBackend, SqlColdError};
 use signet_cold::ColdConnect;
 use sqlx::pool::PoolOptions;
+use std::time::Duration;
 
 /// Errors that can occur when initializing SQL connectors.
 #[derive(Debug, thiserror::Error)]
@@ -22,20 +23,20 @@ pub enum SqlConnectorError {
 /// - URLs starting with `postgres://` or `postgresql://` use PostgreSQL
 /// - URLs starting with `sqlite:` use SQLite
 ///
-/// Pool behaviour is configured via [`sqlx::pool::PoolOptions`] passed
-/// to [`with_pool_options`](Self::with_pool_options). For in-memory
-/// SQLite URLs, `max_connections` is forced to 1 regardless of the
-/// provided options.
+/// Pool behaviour is configured via builder methods that mirror
+/// [`sqlx::pool::PoolOptions`], or by passing a complete
+/// [`PoolOptions`] via [`with_pool_options`](Self::with_pool_options).
+/// For in-memory SQLite URLs, `max_connections` is forced to 1
+/// regardless of the provided options.
 ///
 /// # Example
 ///
 /// ```ignore
 /// use signet_cold_sql::SqlConnector;
-/// use sqlx::pool::PoolOptions;
 ///
 /// // PostgreSQL with custom pool size
 /// let pg = SqlConnector::new("postgres://localhost/signet")
-///     .with_pool_options(PoolOptions::new().max_connections(20));
+///     .with_max_connections(20);
 /// let backend = pg.connect().await?;
 ///
 /// // SQLite (defaults)
@@ -63,12 +64,44 @@ impl SqlConnector {
         &self.url
     }
 
-    /// Set the pool options for this connector.
+    /// Replace the pool options entirely.
     ///
     /// For in-memory SQLite URLs, `max_connections` is forced to 1
     /// regardless of the value set here.
     pub fn with_pool_options(mut self, pool_opts: PoolOptions<sqlx::Any>) -> Self {
         self.pool_opts = pool_opts;
+        self
+    }
+
+    /// Set the maximum number of pool connections.
+    ///
+    /// Ignored for in-memory SQLite URLs, which always use 1.
+    pub fn with_max_connections(mut self, n: u32) -> Self {
+        self.pool_opts = self.pool_opts.max_connections(n);
+        self
+    }
+
+    /// Set the minimum number of connections to maintain at all times.
+    pub fn with_min_connections(mut self, n: u32) -> Self {
+        self.pool_opts = self.pool_opts.min_connections(n);
+        self
+    }
+
+    /// Set the connection acquire timeout.
+    pub fn with_acquire_timeout(mut self, timeout: Duration) -> Self {
+        self.pool_opts = self.pool_opts.acquire_timeout(timeout);
+        self
+    }
+
+    /// Set the maximum lifetime of individual connections.
+    pub fn with_max_lifetime(mut self, lifetime: Option<Duration>) -> Self {
+        self.pool_opts = self.pool_opts.max_lifetime(lifetime);
+        self
+    }
+
+    /// Set the idle timeout for connections.
+    pub fn with_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.pool_opts = self.pool_opts.idle_timeout(timeout);
         self
     }
 
