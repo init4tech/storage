@@ -167,7 +167,7 @@ pub async fn test_confirmation_metadata(handle: &ColdStorageHandle) -> ColdResul
     let block = make_test_block_with_txs(600, 3);
     let expected_hash = block.header.hash();
     let tx_hashes: Vec<_> = block.transactions.iter().map(|tx| *tx.tx_hash()).collect();
-    let expected_senders: Vec<_> = block.transactions.iter().map(|tx| *tx.signer()).collect();
+    let expected_senders: Vec<_> = block.transactions.iter().map(|tx| tx.signer()).collect();
 
     handle.append_block(block).await?;
 
@@ -178,7 +178,7 @@ pub async fn test_confirmation_metadata(handle: &ColdStorageHandle) -> ColdResul
         assert_eq!(confirmed.meta().block_number(), 600);
         assert_eq!(confirmed.meta().block_hash(), expected_hash);
         assert_eq!(confirmed.meta().transaction_index(), idx as u64);
-        assert_eq!(*confirmed.inner().signer(), expected_senders[idx]);
+        assert_eq!(confirmed.inner().signer(), expected_senders[idx]);
     }
 
     // Verify transaction metadata via block+index lookup
@@ -189,7 +189,7 @@ pub async fn test_confirmation_metadata(handle: &ColdStorageHandle) -> ColdResul
     assert_eq!(confirmed.meta().block_number(), 600);
     assert_eq!(confirmed.meta().block_hash(), expected_hash);
     assert_eq!(confirmed.meta().transaction_index(), 1);
-    assert_eq!(*confirmed.inner().signer(), expected_senders[1]);
+    assert_eq!(confirmed.inner().signer(), expected_senders[1]);
 
     // Verify transaction metadata via block_hash+index lookup
     let confirmed = handle
@@ -201,13 +201,15 @@ pub async fn test_confirmation_metadata(handle: &ColdStorageHandle) -> ColdResul
         .unwrap();
     assert_eq!(confirmed.meta().block_number(), 600);
     assert_eq!(confirmed.meta().transaction_index(), 2);
-    assert_eq!(*confirmed.inner().signer(), expected_senders[2]);
+    assert_eq!(confirmed.inner().signer(), expected_senders[2]);
 
     // Verify receipt metadata via tx hash lookup
     let cold_receipt = handle.get_receipt(ReceiptSpecifier::TxHash(tx_hashes[0])).await?.unwrap();
     assert_eq!(cold_receipt.block_number, 600);
     assert_eq!(cold_receipt.block_hash, expected_hash);
     assert_eq!(cold_receipt.transaction_index, 0);
+    assert_eq!(cold_receipt.tx_hash, tx_hashes[0]);
+    assert_eq!(cold_receipt.from, expected_senders[0]);
 
     // Verify receipt metadata via block+index lookup
     let cold_receipt = handle
@@ -215,7 +217,10 @@ pub async fn test_confirmation_metadata(handle: &ColdStorageHandle) -> ColdResul
         .await?
         .unwrap();
     assert_eq!(cold_receipt.block_number, 600);
+    assert_eq!(cold_receipt.block_hash, expected_hash);
     assert_eq!(cold_receipt.transaction_index, 2);
+    assert_eq!(cold_receipt.tx_hash, tx_hashes[2]);
+    assert_eq!(cold_receipt.from, expected_senders[2]);
 
     // Non-existent lookups return None
     assert!(handle.get_transaction(TransactionSpecifier::Hash(B256::ZERO)).await?.is_none());
@@ -319,12 +324,23 @@ pub async fn test_cold_receipt_metadata(handle: &ColdStorageHandle) -> ColdResul
     assert_eq!(by_hash.from, expected_senders[1]);
     assert_eq!(by_hash.receipt.logs[0].log_index, Some(2));
 
-    // Verify gas_used on all receipts via get_receipts_in_block
+    // Verify all fields via get_receipts_in_block
     let all = handle.get_receipts_in_block(700).await?;
     assert_eq!(all.len(), 3);
-    assert_eq!(all[0].gas_used, 21000);
-    assert_eq!(all[1].gas_used, 21000);
-    assert_eq!(all[2].gas_used, 21000);
+    for (i, r) in all.iter().enumerate() {
+        assert_eq!(r.block_number, 700);
+        assert_eq!(r.block_hash, block_hash);
+        assert_eq!(r.transaction_index, i as u64);
+        assert_eq!(r.tx_hash, tx_hashes[i]);
+        assert_eq!(r.from, expected_senders[i]);
+        assert_eq!(r.gas_used, 21000);
+    }
+    // Verify log indices across all receipts
+    assert_eq!(all[0].receipt.logs[0].log_index, Some(0));
+    assert_eq!(all[0].receipt.logs[1].log_index, Some(1));
+    assert_eq!(all[1].receipt.logs[0].log_index, Some(2));
+    assert_eq!(all[1].receipt.logs[2].log_index, Some(4));
+    assert_eq!(all[2].receipt.logs[0].log_index, Some(5));
 
     // Non-existent returns None
     assert!(
@@ -611,27 +627,97 @@ pub async fn test_stream_logs(handle: &ColdStorageHandle) -> ColdResult<()> {
 }
 
 /// Test drain_above: reads receipts and truncates atomically.
+///
+/// Verifies that drained receipts carry correct `transaction_index`,
+/// `first_log_index`, `gas_used`, `tx_hash`, `from`, and block metadata —
+/// the same fields tested by [`test_cold_receipt_metadata`] for the
+/// single-receipt path.
 pub async fn test_drain_above(handle: &ColdStorageHandle) -> ColdResult<()> {
-    // Append 3 blocks with txs (use block numbers that don't collide)
-    handle.append_block(make_test_block_with_txs(900, 2)).await?;
-    handle.append_block(make_test_block_with_txs(901, 3)).await?;
-    handle.append_block(make_test_block_with_txs(902, 1)).await?;
+    // Block 900: anchor (not drained).
+    handle.append_block(make_test_block(900)).await?;
 
-    // Drain above block 900 — should return receipts for 901 and 902
+    // Block 901: 2 receipts — (2 logs, cumgas 21000), (3 logs, cumgas 42000).
+    let block_901 = {
+        let header = Header { number: 901, timestamp: 901 * 12, ..Default::default() };
+        let sealed = header.seal_slow();
+        let txs: Vec<RecoveredTx> = (0..2).map(|i| make_test_tx(901 * 100 + i)).collect();
+        let receipts =
+            vec![make_test_receipt_with_logs(2, 21000), make_test_receipt_with_logs(3, 42000)];
+        BlockData::new(sealed, txs, receipts, vec![], None)
+    };
+    let block_901_hash = block_901.header.hash();
+    let tx_hashes_901: Vec<_> = block_901.transactions.iter().map(|t| *t.tx_hash()).collect();
+    let senders_901: Vec<_> = block_901.transactions.iter().map(|t| t.signer()).collect();
+
+    // Block 902: 1 receipt — (1 log, cumgas 10000).
+    let block_902 = {
+        let header = Header { number: 902, timestamp: 902 * 12, ..Default::default() };
+        let sealed = header.seal_slow();
+        let txs: Vec<RecoveredTx> = vec![make_test_tx(902 * 100)];
+        let receipts = vec![make_test_receipt_with_logs(1, 10000)];
+        BlockData::new(sealed, txs, receipts, vec![], None)
+    };
+    let block_902_hash = block_902.header.hash();
+    let tx_hashes_902: Vec<_> = block_902.transactions.iter().map(|t| *t.tx_hash()).collect();
+    let senders_902: Vec<_> = block_902.transactions.iter().map(|t| t.signer()).collect();
+
+    handle.append_block(block_901).await?;
+    handle.append_block(block_902).await?;
+
+    // Drain above block 900 — should return receipts for 901 and 902.
     let drained = handle.drain_above(900).await?;
     assert_eq!(drained.len(), 2);
-    assert_eq!(drained[0].len(), 3); // block 901 had 3 txs
-    assert_eq!(drained[1].len(), 1); // block 902 had 1 tx
 
-    // Blocks 901 and 902 should be gone
+    // ── Block 901 receipts ──
+    let b901 = &drained[0];
+    assert_eq!(b901.len(), 2);
+
+    // Receipt 0: gas_used=21000, first_log_index=0, 2 logs
+    assert_eq!(b901[0].block_number, 901);
+    assert_eq!(b901[0].block_hash, block_901_hash);
+    assert_eq!(b901[0].block_timestamp, 901 * 12);
+    assert_eq!(b901[0].transaction_index, 0);
+    assert_eq!(b901[0].tx_hash, tx_hashes_901[0]);
+    assert_eq!(b901[0].from, senders_901[0]);
+    assert_eq!(b901[0].gas_used, 21000);
+    assert_eq!(b901[0].receipt.logs.len(), 2);
+    assert_eq!(b901[0].receipt.logs[0].log_index, Some(0));
+    assert_eq!(b901[0].receipt.logs[1].log_index, Some(1));
+
+    // Receipt 1: gas_used=21000, first_log_index=2, 3 logs
+    assert_eq!(b901[1].block_number, 901);
+    assert_eq!(b901[1].block_hash, block_901_hash);
+    assert_eq!(b901[1].transaction_index, 1);
+    assert_eq!(b901[1].tx_hash, tx_hashes_901[1]);
+    assert_eq!(b901[1].from, senders_901[1]);
+    assert_eq!(b901[1].gas_used, 21000);
+    assert_eq!(b901[1].receipt.logs.len(), 3);
+    assert_eq!(b901[1].receipt.logs[0].log_index, Some(2));
+    assert_eq!(b901[1].receipt.logs[2].log_index, Some(4));
+
+    // ── Block 902 receipts ──
+    let b902 = &drained[1];
+    assert_eq!(b902.len(), 1);
+
+    assert_eq!(b902[0].block_number, 902);
+    assert_eq!(b902[0].block_hash, block_902_hash);
+    assert_eq!(b902[0].block_timestamp, 902 * 12);
+    assert_eq!(b902[0].transaction_index, 0);
+    assert_eq!(b902[0].tx_hash, tx_hashes_902[0]);
+    assert_eq!(b902[0].from, senders_902[0]);
+    assert_eq!(b902[0].gas_used, 10000);
+    assert_eq!(b902[0].receipt.logs.len(), 1);
+    assert_eq!(b902[0].receipt.logs[0].log_index, Some(0));
+
+    // Blocks 901 and 902 should be gone.
     assert!(handle.get_header(HeaderSpecifier::Number(901)).await?.is_none());
     assert!(handle.get_header(HeaderSpecifier::Number(902)).await?.is_none());
 
-    // Block 900 should still exist
+    // Block 900 should still exist.
     assert!(handle.get_header(HeaderSpecifier::Number(900)).await?.is_some());
     assert_eq!(handle.get_latest_block().await?, Some(900));
 
-    // Drain with nothing above — should return empty
+    // Drain with nothing above — should return empty.
     let empty = handle.drain_above(900).await?;
     assert!(empty.is_empty());
 
