@@ -45,7 +45,7 @@ mod convert;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod backend;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-pub use backend::SqlColdBackend;
+pub use backend::{PoolOverrides, SqlColdBackend};
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod connector;
