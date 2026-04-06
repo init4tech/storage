@@ -1209,10 +1209,13 @@ impl ColdStorageRead for SqlColdBackend {
 
         // Fetch receipts joined with tx_hash and from_address
         let receipt_rows = sqlx::query(
-            "SELECT r.*, t.tx_hash, t.from_address
-             FROM receipts r
-             JOIN transactions t ON r.block_number = t.block_number AND r.tx_index = t.tx_index
-             WHERE r.block_number = $1
+            "SELECT r.block_number, r.tx_index, r.tx_type, r.success, \
+               r.cumulative_gas_used, r.first_log_index, \
+               t.tx_hash, t.from_address \
+             FROM receipts r \
+             JOIN transactions t ON r.block_number = t.block_number \
+               AND r.tx_index = t.tx_index \
+             WHERE r.block_number = $1 \
              ORDER BY r.tx_index",
         )
         .bind(bn)
@@ -1467,7 +1470,9 @@ impl ColdStorage for SqlColdBackend {
 
         // 2. Fetch all receipt + tx metadata above block.
         let receipt_rows = sqlx::query(
-            "SELECT r.*, t.tx_hash, t.from_address \
+            "SELECT r.block_number, r.tx_index, r.tx_type, r.success, \
+               r.cumulative_gas_used, r.first_log_index, \
+               t.tx_hash, t.from_address \
              FROM receipts r \
              JOIN transactions t ON r.block_number = t.block_number \
                AND r.tx_index = t.tx_index \
