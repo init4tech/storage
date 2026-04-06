@@ -84,3 +84,11 @@ pub(crate) const COL_PRIOR_GAS: &str = "prior_gas";
 pub(crate) const COL_BLOCK_LOG_INDEX: &str = "block_log_index";
 pub(crate) const COL_BLOCK_TIMESTAMP: &str = "block_timestamp";
 pub(crate) const COL_MAX_BN: &str = "max_bn";
+
+// ── get_receipt combined query aliases ──────────────────────────────────────
+pub(crate) const COL_R_TX_TYPE: &str = "r_tx_type";
+pub(crate) const COL_R_SUCCESS: &str = "r_success";
+pub(crate) const COL_R_CUMULATIVE_GAS_USED: &str = "r_cumulative_gas_used";
+pub(crate) const COL_R_FIRST_LOG_INDEX: &str = "r_first_log_index";
+pub(crate) const COL_R_TX_HASH: &str = "r_tx_hash";
+pub(crate) const COL_R_FROM_ADDRESS: &str = "r_from_address";

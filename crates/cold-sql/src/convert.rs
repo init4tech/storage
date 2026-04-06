@@ -20,12 +20,25 @@ use signet_storage_types::Receipt;
 // ============================================================================
 
 /// Convert u64 to i64 for SQL storage.
-pub(crate) const fn to_i64(v: u64) -> i64 {
+///
+/// # Panics
+///
+/// Debug-asserts that `v` fits in an `i64`. All block numbers, gas
+/// values, and indices in Ethereum are well below `i64::MAX`; a value
+/// that overflows indicates data corruption.
+pub(crate) fn to_i64(v: u64) -> i64 {
+    debug_assert!(v <= i64::MAX as u64, "u64 value {v} overflows i64");
     v as i64
 }
 
 /// Convert i64 from SQL back to u64.
-pub(crate) const fn from_i64(v: i64) -> u64 {
+///
+/// # Panics
+///
+/// Debug-asserts that `v` is non-negative. Negative values from the
+/// database indicate data corruption.
+pub(crate) fn from_i64(v: i64) -> u64 {
+    debug_assert!(v >= 0, "negative i64 value {v} cannot represent u64");
     v as u64
 }
 
@@ -208,13 +221,16 @@ pub(crate) fn decode_b256_vec(data: &[u8]) -> Result<Vec<B256>, SqlColdError> {
 
 /// Reconstruct a [`Receipt`] from primitive column values and decoded logs.
 pub(crate) fn build_receipt(
-    tx_type: i16,
+    tx_type_raw: i32,
     success: bool,
     cumulative_gas_used: i64,
     logs: Vec<Log>,
 ) -> Result<Receipt, SqlColdError> {
-    let tx_type = TxType::try_from(tx_type as u8)
-        .map_err(|_| SqlColdError::Convert(format!("invalid tx_type: {tx_type}")))?;
+    let tx_type_u8: u8 = tx_type_raw
+        .try_into()
+        .map_err(|_| SqlColdError::Convert(format!("tx_type out of u8 range: {tx_type_raw}")))?;
+    let tx_type = TxType::try_from(tx_type_u8)
+        .map_err(|_| SqlColdError::Convert(format!("invalid tx_type: {tx_type_u8}")))?;
     Ok(Receipt {
         tx_type,
         inner: AlloyReceipt {

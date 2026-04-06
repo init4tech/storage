@@ -14,11 +14,12 @@ use crate::columns::{
     COL_GAS_LIMIT, COL_GAS_PRICE, COL_GAS_USED, COL_HOST_BLOCK_NUMBER, COL_INPUT, COL_LOGS_BLOOM,
     COL_MAX_BN, COL_MAX_FEE_PER_BLOB_GAS, COL_MAX_FEE_PER_GAS, COL_MAX_PRIORITY_FEE_PER_GAS,
     COL_MIX_HASH, COL_NONCE, COL_OMMERS_HASH, COL_ORDER_INDEX, COL_PARENT_BEACON_BLOCK_ROOT,
-    COL_PARENT_HASH, COL_PRIOR_GAS, COL_RECEIPTS_ROOT, COL_REQUESTS_HASH, COL_REWARD_ADDRESS,
-    COL_ROLLUP_CHAIN_ID, COL_ROLLUP_RECIPIENT, COL_SENDER, COL_SIG_R, COL_SIG_S, COL_SIG_Y_PARITY,
-    COL_STATE_ROOT, COL_SUCCESS, COL_TIMESTAMP, COL_TO_ADDRESS, COL_TOKEN, COL_TOPIC0, COL_TOPIC1,
-    COL_TOPIC2, COL_TOPIC3, COL_TRANSACTIONS_ROOT, COL_TX_HASH, COL_TX_INDEX, COL_TX_TYPE,
-    COL_VALUE, COL_WITHDRAWALS_ROOT,
+    COL_PARENT_HASH, COL_PRIOR_GAS, COL_R_CUMULATIVE_GAS_USED, COL_R_FIRST_LOG_INDEX,
+    COL_R_FROM_ADDRESS, COL_R_SUCCESS, COL_R_TX_HASH, COL_R_TX_TYPE, COL_RECEIPTS_ROOT,
+    COL_REQUESTS_HASH, COL_REWARD_ADDRESS, COL_ROLLUP_CHAIN_ID, COL_ROLLUP_RECIPIENT, COL_SENDER,
+    COL_SIG_R, COL_SIG_S, COL_SIG_Y_PARITY, COL_STATE_ROOT, COL_SUCCESS, COL_TIMESTAMP,
+    COL_TO_ADDRESS, COL_TOKEN, COL_TOPIC0, COL_TOPIC1, COL_TOPIC2, COL_TOPIC3,
+    COL_TRANSACTIONS_ROOT, COL_TX_HASH, COL_TX_INDEX, COL_TX_TYPE, COL_VALUE, COL_WITHDRAWALS_ROOT,
 };
 use crate::convert::{
     EVENT_ENTER, EVENT_ENTER_TOKEN, EVENT_TRANSACT, build_receipt, decode_access_list_or_empty,
@@ -49,6 +50,7 @@ use signet_zenith::{
     Zenith,
 };
 use sqlx::{AnyPool, Row};
+use std::collections::BTreeMap;
 
 /// SQL-based cold storage backend.
 ///
@@ -73,6 +75,31 @@ use sqlx::{AnyPool, Row};
 pub struct SqlColdBackend {
     pool: AnyPool,
     is_postgres: bool,
+}
+
+/// Returns `true` if the URL refers to an in-memory SQLite database.
+///
+/// In-memory SQLite databases are per-connection, so the pool must be
+/// limited to a single connection to ensure all queries see the same
+/// state.
+fn is_in_memory_sqlite(url: &str) -> bool {
+    url == "sqlite::memory:" || url.contains("mode=memory")
+}
+
+/// Delete all rows with `block_number > bn` from every table, in
+/// child-first order to preserve foreign-key constraints.
+async fn delete_above_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    bn: i64,
+) -> Result<(), SqlColdError> {
+    for table in ["logs", "transactions", "receipts", "signet_events", "zenith_headers", "headers"]
+    {
+        sqlx::query(&format!("DELETE FROM {table} WHERE block_number > $1"))
+            .bind(bn)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
 }
 
 impl SqlColdBackend {
@@ -104,18 +131,30 @@ impl SqlColdBackend {
         Ok(Self { pool, is_postgres })
     }
 
-    /// Connect to a database URL and create the backend.
+    /// Connect to a database URL with explicit pool options.
     ///
     /// Installs the default sqlx drivers on the first call. The database
     /// type is inferred from the URL scheme (`sqlite:` or `postgres:`).
     ///
-    /// For SQLite in-memory databases (`sqlite::memory:`), the pool is
-    /// limited to one connection to ensure all operations share the same
-    /// database.
-    pub async fn connect(url: &str) -> Result<Self, SqlColdError> {
+    /// For in-memory SQLite URLs (`sqlite::memory:` or `mode=memory`),
+    /// `max_connections` is forced to 1 regardless of the provided
+    /// options, because in-memory databases are per-connection.
+    pub async fn connect_with(
+        url: &str,
+        pool_opts: sqlx::pool::PoolOptions<sqlx::Any>,
+    ) -> Result<Self, SqlColdError> {
         sqlx::any::install_default_drivers();
-        let pool: AnyPool = sqlx::pool::PoolOptions::new().max_connections(1).connect(url).await?;
+        let pool_opts =
+            if is_in_memory_sqlite(url) { pool_opts.max_connections(1) } else { pool_opts };
+        let pool: AnyPool = pool_opts.connect(url).await?;
         Self::new(pool).await
+    }
+
+    /// Connect to a database URL with default pool settings.
+    ///
+    /// Convenience wrapper around [`connect_with`](Self::connect_with).
+    pub async fn connect(url: &str) -> Result<Self, SqlColdError> {
+        Self::connect_with(url, sqlx::pool::PoolOptions::new()).await
     }
 
     // ========================================================================
@@ -334,9 +373,12 @@ fn tx_from_row(r: &sqlx::any::AnyRow) -> Result<TransactionSigned, SqlColdError>
     let sig =
         Signature::new(r.get(COL_SIG_R), r.get(COL_SIG_S), r.get::<i32, _>(COL_SIG_Y_PARITY) != 0);
 
-    let tx_type_raw = r.get::<i32, _>(COL_TX_TYPE) as u8;
-    let tx_type = TxType::try_from(tx_type_raw)
-        .map_err(|_| SqlColdError::Convert(format!("invalid tx_type: {tx_type_raw}")))?;
+    let tx_type_raw: i32 = r.get(COL_TX_TYPE);
+    let tx_type_u8: u8 = tx_type_raw
+        .try_into()
+        .map_err(|_| SqlColdError::Convert(format!("tx_type out of u8 range: {tx_type_raw}")))?;
+    let tx_type = TxType::try_from(tx_type_u8)
+        .map_err(|_| SqlColdError::Convert(format!("invalid tx_type: {tx_type_u8}")))?;
 
     let chain_id: Option<i64> = r.get(COL_CHAIN_ID);
     let nonce = from_i64(r.get(COL_NONCE));
@@ -1085,15 +1127,26 @@ impl ColdStorageRead for SqlColdBackend {
             ReceiptSpecifier::BlockAndIndex { block, index } => (block, index),
         };
 
-        let Some(header) = self.fetch_header_by_number(block).await? else {
-            return Ok(None);
-        };
-
-        // Fetch receipt + tx_hash + from_address
-        let receipt_row = sqlx::query(
-            "SELECT r.*, t.tx_hash, t.from_address
-             FROM receipts r
-             JOIN transactions t ON r.block_number = t.block_number AND r.tx_index = t.tx_index
+        // Combined query: receipt + tx metadata + full header + prior gas.
+        // Header columns use standard names (h.*) so header_from_row works.
+        // Receipt/tx columns use r_ prefix to avoid name collisions.
+        let combined = sqlx::query(
+            "SELECT h.*, \
+               r.tx_type AS r_tx_type, r.success AS r_success, \
+               r.cumulative_gas_used AS r_cumulative_gas_used, \
+               r.first_log_index AS r_first_log_index, \
+               t.tx_hash AS r_tx_hash, t.from_address AS r_from_address, \
+               COALESCE( \
+                 (SELECT CAST(MAX(r2.cumulative_gas_used) AS bigint) \
+                  FROM receipts r2 \
+                  WHERE r2.block_number = r.block_number \
+                    AND r2.tx_index < r.tx_index), \
+                 0 \
+               ) AS prior_gas \
+             FROM receipts r \
+             JOIN transactions t ON r.block_number = t.block_number \
+               AND r.tx_index = t.tx_index \
+             JOIN headers h ON r.block_number = h.block_number \
              WHERE r.block_number = $1 AND r.tx_index = $2",
         )
         .bind(to_i64(block))
@@ -1102,23 +1155,28 @@ impl ColdStorageRead for SqlColdBackend {
         .await
         .map_err(SqlColdError::from)?;
 
-        let Some(rr) = receipt_row else {
+        let Some(rr) = combined else {
             return Ok(None);
         };
 
-        let bn: i64 = rr.get(COL_BLOCK_NUMBER);
-        let tx_idx: i64 = rr.get(COL_TX_INDEX);
-        let tx_hash = rr.get(COL_TX_HASH);
-        let sender = rr.get(COL_FROM_ADDRESS);
-        let tx_type = rr.get::<i32, _>(COL_TX_TYPE) as i16;
-        let success = rr.get::<i32, _>(COL_SUCCESS) != 0;
-        let cumulative_gas_used: i64 = rr.get(COL_CUMULATIVE_GAS_USED);
+        // Extract header using existing helper (h.* columns are unaliased).
+        let header = header_from_row(&rr).map_err(ColdStorageError::from)?.seal_slow();
 
+        // Extract receipt fields from r_ prefixed aliases.
+        let tx_hash = rr.get(COL_R_TX_HASH);
+        let sender = rr.get(COL_R_FROM_ADDRESS);
+        let tx_type: i32 = rr.get(COL_R_TX_TYPE);
+        let success = rr.get::<i32, _>(COL_R_SUCCESS) != 0;
+        let cumulative_gas_used: i64 = rr.get(COL_R_CUMULATIVE_GAS_USED);
+        let first_log_index: u64 = from_i64(rr.get::<i64, _>(COL_R_FIRST_LOG_INDEX));
+        let prior_cumulative_gas: u64 = from_i64(rr.get::<i64, _>(COL_PRIOR_GAS));
+
+        // Logs still require a separate query (variable row count).
         let log_rows = sqlx::query(
             "SELECT * FROM logs WHERE block_number = $1 AND tx_index = $2 ORDER BY log_index",
         )
-        .bind(bn)
-        .bind(tx_idx)
+        .bind(to_i64(block))
+        .bind(to_i64(index))
         .fetch_all(&self.pool)
         .await
         .map_err(SqlColdError::from)?;
@@ -1126,21 +1184,14 @@ impl ColdStorageRead for SqlColdBackend {
         let logs = log_rows.iter().map(log_from_row).collect();
         let built = build_receipt(tx_type, success, cumulative_gas_used, logs)
             .map_err(ColdStorageError::from)?;
-
-        // Read first_log_index directly from the receipt row; compute
-        // gas_used from the prior receipt's cumulative gas.
-        let first_log_index: u64 = from_i64(rr.get::<i64, _>(COL_FIRST_LOG_INDEX));
-        let prior = sqlx::query(
-            "SELECT CAST(MAX(r.cumulative_gas_used) AS bigint) as prior_gas
-             FROM receipts r WHERE r.block_number = $1 AND r.tx_index < $2",
-        )
-        .bind(to_i64(block))
-        .bind(to_i64(index))
-        .fetch_one(&self.pool)
-        .await
-        .map_err(SqlColdError::from)?;
-        let prior_cumulative_gas: u64 =
-            prior.get::<Option<i64>, _>(COL_PRIOR_GAS).unwrap_or(0) as u64;
+        // Cumulative gas must be non-decreasing within a block; a violation
+        // indicates database corruption.
+        debug_assert!(
+            built.inner.cumulative_gas_used >= prior_cumulative_gas,
+            "cumulative gas decreased: {} < {}",
+            built.inner.cumulative_gas_used,
+            prior_cumulative_gas,
+        );
         let gas_used = built.inner.cumulative_gas_used - prior_cumulative_gas;
 
         let ir = IndexedReceipt { receipt: built, tx_hash, first_log_index, gas_used, sender };
@@ -1158,10 +1209,13 @@ impl ColdStorageRead for SqlColdBackend {
 
         // Fetch receipts joined with tx_hash and from_address
         let receipt_rows = sqlx::query(
-            "SELECT r.*, t.tx_hash, t.from_address
-             FROM receipts r
-             JOIN transactions t ON r.block_number = t.block_number AND r.tx_index = t.tx_index
-             WHERE r.block_number = $1
+            "SELECT r.block_number, r.tx_index, r.tx_type, r.success, \
+               r.cumulative_gas_used, r.first_log_index, \
+               t.tx_hash, t.from_address \
+             FROM receipts r \
+             JOIN transactions t ON r.block_number = t.block_number \
+               AND r.tx_index = t.tx_index \
+             WHERE r.block_number = $1 \
              ORDER BY r.tx_index",
         )
         .bind(bn)
@@ -1177,8 +1231,7 @@ impl ColdStorageRead for SqlColdBackend {
                 .map_err(SqlColdError::from)?;
 
         // Group logs by tx_index
-        let mut logs_by_tx: std::collections::BTreeMap<i64, Vec<Log>> =
-            std::collections::BTreeMap::new();
+        let mut logs_by_tx: BTreeMap<i64, Vec<Log>> = BTreeMap::new();
         for r in &all_log_rows {
             let tx_idx: i64 = r.get(COL_TX_INDEX);
             logs_by_tx.entry(tx_idx).or_default().push(log_from_row(r));
@@ -1193,7 +1246,7 @@ impl ColdStorageRead for SqlColdBackend {
                 let tx_idx: i64 = rr.get(COL_TX_INDEX);
                 let tx_hash = rr.get(COL_TX_HASH);
                 let sender = rr.get(COL_FROM_ADDRESS);
-                let tx_type = rr.get::<i32, _>(COL_TX_TYPE) as i16;
+                let tx_type = rr.get::<i32, _>(COL_TX_TYPE);
                 let success = rr.get::<i32, _>(COL_SUCCESS) != 0;
                 let cumulative_gas_used: i64 = rr.get(COL_CUMULATIVE_GAS_USED);
                 let logs = logs_by_tx.remove(&tx_idx).unwrap_or_default();
@@ -1298,21 +1351,11 @@ impl ColdStorageRead for SqlColdBackend {
         let (filter_clause, params) = build_log_filter_clause(filter, 3);
         let where_clause = format!("l.block_number >= $1 AND l.block_number <= $2{filter_clause}");
 
-        // Run a cheap COUNT(*) query first to reject queries that exceed
-        // the limit without loading any row data.
-        let count_sql = format!("SELECT COUNT(*) as cnt FROM logs l WHERE {where_clause}");
-        let mut count_query = sqlx::query(&count_sql).bind(to_i64(from)).bind(to_i64(to));
-        for param in &params {
-            count_query = count_query.bind(*param);
-        }
-        let count_row = count_query.fetch_one(&self.pool).await.map_err(SqlColdError::from)?;
-        let count = from_i64(count_row.get::<i64, _>(COL_CNT)) as usize;
-        if count > max_logs {
-            return Err(ColdStorageError::TooManyLogs { limit: max_logs });
-        }
-
-        // Fetch the actual log data with JOINs and the correlated subquery
-        // for block_log_index (absolute position within block).
+        // Use LIMIT to cap results. Fetch one extra row to detect overflow
+        // without a separate COUNT query. PostgreSQL stops scanning after
+        // finding enough rows, making this faster than COUNT in both the
+        // under-limit and over-limit cases.
+        let limit_idx = 3 + params.len() as u32;
         let data_sql = format!(
             "SELECT l.*, h.block_hash, h.timestamp AS block_timestamp, t.tx_hash, \
                (r.first_log_index + l.log_index) AS block_log_index \
@@ -1323,14 +1366,23 @@ impl ColdStorageRead for SqlColdBackend {
              JOIN receipts r ON l.block_number = r.block_number \
                AND l.tx_index = r.tx_index \
              WHERE {where_clause} \
-             ORDER BY l.block_number, l.tx_index, l.log_index"
+             ORDER BY l.block_number, l.tx_index, l.log_index \
+             LIMIT ${limit_idx}"
         );
         let mut query = sqlx::query(&data_sql).bind(to_i64(from)).bind(to_i64(to));
         for param in &params {
             query = query.bind(*param);
         }
+        // Clamp to i64::MAX before converting: SQL LIMIT is an i64, and
+        // saturating_add avoids overflow when max_logs is usize::MAX.
+        let limit = max_logs.saturating_add(1).min(i64::MAX as usize);
+        query = query.bind(to_i64(limit as u64));
 
         let rows = query.fetch_all(&self.pool).await.map_err(SqlColdError::from)?;
+
+        if rows.len() > max_logs {
+            return Err(ColdStorageError::TooManyLogs { limit: max_logs });
+        }
 
         rows.into_iter()
             .map(|r| {
@@ -1384,23 +1436,121 @@ impl ColdStorageWrite for SqlColdBackend {
         let bn = to_i64(block);
         let mut tx = self.pool.begin().await.map_err(SqlColdError::from)?;
 
-        // Delete child tables first, then headers (preserves FK ordering).
-        for table in
-            ["logs", "transactions", "receipts", "signet_events", "zenith_headers", "headers"]
-        {
-            sqlx::query(&format!("DELETE FROM {table} WHERE block_number > $1"))
-                .bind(bn)
-                .execute(&mut *tx)
-                .await
-                .map_err(SqlColdError::from)?;
-        }
+        delete_above_in_tx(&mut tx, bn).await.map_err(ColdStorageError::from)?;
 
         tx.commit().await.map_err(SqlColdError::from)?;
         Ok(())
     }
 }
 
-impl ColdStorage for SqlColdBackend {}
+impl ColdStorage for SqlColdBackend {
+    async fn drain_above(&mut self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
+        let bn = to_i64(block);
+        let mut tx = self.pool.begin().await.map_err(SqlColdError::from)?;
+
+        // 1. Fetch all headers above block.
+        let header_rows =
+            sqlx::query("SELECT * FROM headers WHERE block_number > $1 ORDER BY block_number")
+                .bind(bn)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(SqlColdError::from)?;
+
+        if header_rows.is_empty() {
+            tx.commit().await.map_err(SqlColdError::from)?;
+            return Ok(Vec::new());
+        }
+
+        let mut headers: BTreeMap<i64, SealedHeader> = BTreeMap::new();
+        for r in &header_rows {
+            let num: i64 = r.get(COL_BLOCK_NUMBER);
+            let h = header_from_row(r).map_err(ColdStorageError::from)?.seal_slow();
+            headers.insert(num, h);
+        }
+
+        // 2. Fetch all receipt + tx metadata above block.
+        let receipt_rows = sqlx::query(
+            "SELECT r.block_number, r.tx_index, r.tx_type, r.success, \
+               r.cumulative_gas_used, r.first_log_index, \
+               t.tx_hash, t.from_address \
+             FROM receipts r \
+             JOIN transactions t ON r.block_number = t.block_number \
+               AND r.tx_index = t.tx_index \
+             WHERE r.block_number > $1 \
+             ORDER BY r.block_number, r.tx_index",
+        )
+        .bind(bn)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(SqlColdError::from)?;
+
+        // 3. Fetch all logs above block.
+        let log_rows = sqlx::query(
+            "SELECT * FROM logs WHERE block_number > $1 \
+             ORDER BY block_number, tx_index, log_index",
+        )
+        .bind(bn)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(SqlColdError::from)?;
+
+        // Group logs by (block_number, tx_index).
+        let mut logs_by_block_tx: BTreeMap<(i64, i64), Vec<Log>> = BTreeMap::new();
+        for r in &log_rows {
+            let block_num: i64 = r.get(COL_BLOCK_NUMBER);
+            let tx_idx: i64 = r.get(COL_TX_INDEX);
+            logs_by_block_tx.entry((block_num, tx_idx)).or_default().push(log_from_row(r));
+        }
+
+        // Group receipt rows by block_number.
+        let mut receipts_by_block: BTreeMap<i64, Vec<&sqlx::any::AnyRow>> = BTreeMap::new();
+        for r in &receipt_rows {
+            let block_num: i64 = r.get(COL_BLOCK_NUMBER);
+            receipts_by_block.entry(block_num).or_default().push(r);
+        }
+
+        // 4. Assemble ColdReceipts per block.
+        let mut all_receipts = Vec::with_capacity(headers.len());
+        for (&block_num, header) in &headers {
+            let block_receipt_rows = receipts_by_block.remove(&block_num).unwrap_or_default();
+            let mut prior_cumulative_gas = 0u64;
+            let block_receipts: ColdResult<Vec<ColdReceipt>> = block_receipt_rows
+                .into_iter()
+                .map(|rr: &sqlx::any::AnyRow| {
+                    let tx_idx: i64 = rr.get(COL_TX_INDEX);
+                    let tx_hash = rr.get(COL_TX_HASH);
+                    let sender = rr.get(COL_FROM_ADDRESS);
+                    let tx_type: i32 = rr.get(COL_TX_TYPE);
+                    let success = rr.get::<i32, _>(COL_SUCCESS) != 0;
+                    let cumulative_gas_used: i64 = rr.get(COL_CUMULATIVE_GAS_USED);
+                    let first_log_index = from_i64(rr.get::<i64, _>(COL_FIRST_LOG_INDEX));
+                    let logs = logs_by_block_tx.remove(&(block_num, tx_idx)).unwrap_or_default();
+                    let receipt = build_receipt(tx_type, success, cumulative_gas_used, logs)
+                        .map_err(ColdStorageError::from)?;
+                    // Cumulative gas must be non-decreasing within a block; a violation
+                    // indicates database corruption.
+                    debug_assert!(
+                        receipt.inner.cumulative_gas_used >= prior_cumulative_gas,
+                        "cumulative gas decreased: {} < {}",
+                        receipt.inner.cumulative_gas_used,
+                        prior_cumulative_gas,
+                    );
+                    let gas_used = receipt.inner.cumulative_gas_used - prior_cumulative_gas;
+                    prior_cumulative_gas = receipt.inner.cumulative_gas_used;
+                    let ir = IndexedReceipt { receipt, tx_hash, first_log_index, gas_used, sender };
+                    Ok(ColdReceipt::new(ir, header, from_i64(tx_idx)))
+                })
+                .collect();
+            all_receipts.push(block_receipts?);
+        }
+
+        // 5. Delete from all tables (same order as truncate_above).
+        delete_above_in_tx(&mut tx, bn).await.map_err(ColdStorageError::from)?;
+
+        tx.commit().await.map_err(SqlColdError::from)?;
+        Ok(all_receipts)
+    }
+}
 
 #[cfg(all(test, feature = "test-utils"))]
 mod tests {
