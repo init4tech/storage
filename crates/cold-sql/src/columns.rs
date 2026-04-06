@@ -53,6 +53,7 @@ pub(crate) const COL_FROM_ADDRESS: &str = "from_address";
 // ── receipt columns ─────────────────────────────────────────────────────────
 pub(crate) const COL_SUCCESS: &str = "success";
 pub(crate) const COL_CUMULATIVE_GAS_USED: &str = "cumulative_gas_used";
+pub(crate) const COL_FIRST_LOG_INDEX: &str = "first_log_index";
 
 // ── log columns ─────────────────────────────────────────────────────────────
 pub(crate) const COL_ADDRESS: &str = "address";

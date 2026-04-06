@@ -10,16 +10,16 @@ use crate::columns::{
     COL_BENEFICIARY, COL_BLOB_GAS_USED, COL_BLOB_VERSIONED_HASHES, COL_BLOCK_DATA_HASH,
     COL_BLOCK_HASH, COL_BLOCK_LOG_INDEX, COL_BLOCK_NUMBER, COL_BLOCK_TIMESTAMP, COL_CHAIN_ID,
     COL_CNT, COL_CUMULATIVE_GAS_USED, COL_DATA, COL_DIFFICULTY, COL_EVENT_TYPE,
-    COL_EXCESS_BLOB_GAS, COL_EXTRA_DATA, COL_FROM_ADDRESS, COL_GAS, COL_GAS_LIMIT, COL_GAS_PRICE,
-    COL_GAS_USED, COL_HOST_BLOCK_NUMBER, COL_INPUT, COL_LOGS_BLOOM, COL_MAX_BN,
-    COL_MAX_FEE_PER_BLOB_GAS, COL_MAX_FEE_PER_GAS, COL_MAX_PRIORITY_FEE_PER_GAS, COL_MIX_HASH,
-    COL_NONCE, COL_OMMERS_HASH, COL_ORDER_INDEX, COL_PARENT_BEACON_BLOCK_ROOT, COL_PARENT_HASH,
-    COL_PRIOR_GAS, COL_R_CUMULATIVE_GAS_USED, COL_R_FIRST_LOG_INDEX, COL_R_FROM_ADDRESS,
-    COL_R_SUCCESS, COL_R_TX_HASH, COL_R_TX_TYPE, COL_RECEIPTS_ROOT, COL_REQUESTS_HASH,
-    COL_REWARD_ADDRESS, COL_ROLLUP_CHAIN_ID, COL_ROLLUP_RECIPIENT, COL_SENDER, COL_SIG_R,
-    COL_SIG_S, COL_SIG_Y_PARITY, COL_STATE_ROOT, COL_SUCCESS, COL_TIMESTAMP, COL_TO_ADDRESS,
-    COL_TOKEN, COL_TOPIC0, COL_TOPIC1, COL_TOPIC2, COL_TOPIC3, COL_TRANSACTIONS_ROOT, COL_TX_HASH,
-    COL_TX_INDEX, COL_TX_TYPE, COL_VALUE, COL_WITHDRAWALS_ROOT,
+    COL_EXCESS_BLOB_GAS, COL_EXTRA_DATA, COL_FIRST_LOG_INDEX, COL_FROM_ADDRESS, COL_GAS,
+    COL_GAS_LIMIT, COL_GAS_PRICE, COL_GAS_USED, COL_HOST_BLOCK_NUMBER, COL_INPUT, COL_LOGS_BLOOM,
+    COL_MAX_BN, COL_MAX_FEE_PER_BLOB_GAS, COL_MAX_FEE_PER_GAS, COL_MAX_PRIORITY_FEE_PER_GAS,
+    COL_MIX_HASH, COL_NONCE, COL_OMMERS_HASH, COL_ORDER_INDEX, COL_PARENT_BEACON_BLOCK_ROOT,
+    COL_PARENT_HASH, COL_PRIOR_GAS, COL_R_CUMULATIVE_GAS_USED, COL_R_FIRST_LOG_INDEX,
+    COL_R_FROM_ADDRESS, COL_R_SUCCESS, COL_R_TX_HASH, COL_R_TX_TYPE, COL_RECEIPTS_ROOT,
+    COL_REQUESTS_HASH, COL_REWARD_ADDRESS, COL_ROLLUP_CHAIN_ID, COL_ROLLUP_RECIPIENT, COL_SENDER,
+    COL_SIG_R, COL_SIG_S, COL_SIG_Y_PARITY, COL_STATE_ROOT, COL_SUCCESS, COL_TIMESTAMP,
+    COL_TO_ADDRESS, COL_TOKEN, COL_TOPIC0, COL_TOPIC1, COL_TOPIC2, COL_TOPIC3,
+    COL_TRANSACTIONS_ROOT, COL_TX_HASH, COL_TX_INDEX, COL_TX_TYPE, COL_VALUE, COL_WITHDRAWALS_ROOT,
 };
 use crate::convert::{
     EVENT_ENTER, EVENT_ENTER_TOKEN, EVENT_TRANSACT, build_receipt, decode_access_list_or_empty,
@@ -50,6 +50,7 @@ use signet_zenith::{
     Zenith,
 };
 use sqlx::{AnyPool, Row};
+use std::collections::BTreeMap;
 
 /// SQL-based cold storage backend.
 ///
@@ -83,6 +84,22 @@ pub struct SqlColdBackend {
 /// state.
 fn is_in_memory_sqlite(url: &str) -> bool {
     url == "sqlite::memory:" || url.contains("mode=memory")
+}
+
+/// Delete all rows with `block_number > bn` from every table, in
+/// child-first order to preserve foreign-key constraints.
+async fn delete_above_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    bn: i64,
+) -> Result<(), SqlColdError> {
+    for table in ["logs", "transactions", "receipts", "signet_events", "zenith_headers", "headers"]
+    {
+        sqlx::query(&format!("DELETE FROM {table} WHERE block_number > $1"))
+            .bind(bn)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
 }
 
 impl SqlColdBackend {
@@ -1118,7 +1135,6 @@ impl ColdStorageRead for SqlColdBackend {
                r.tx_type AS r_tx_type, r.success AS r_success, \
                r.cumulative_gas_used AS r_cumulative_gas_used, \
                r.first_log_index AS r_first_log_index, \
-               r.tx_index AS r_tx_index, \
                t.tx_hash AS r_tx_hash, t.from_address AS r_from_address, \
                COALESCE( \
                  (SELECT CAST(MAX(r2.cumulative_gas_used) AS bigint) \
@@ -1153,7 +1169,7 @@ impl ColdStorageRead for SqlColdBackend {
         let success = rr.get::<i32, _>(COL_R_SUCCESS) != 0;
         let cumulative_gas_used: i64 = rr.get(COL_R_CUMULATIVE_GAS_USED);
         let first_log_index: u64 = from_i64(rr.get::<i64, _>(COL_R_FIRST_LOG_INDEX));
-        let prior_cumulative_gas: u64 = rr.get::<Option<i64>, _>(COL_PRIOR_GAS).unwrap_or(0) as u64;
+        let prior_cumulative_gas: u64 = from_i64(rr.get::<i64, _>(COL_PRIOR_GAS));
 
         // Logs still require a separate query (variable row count).
         let log_rows = sqlx::query(
@@ -1168,6 +1184,14 @@ impl ColdStorageRead for SqlColdBackend {
         let logs = log_rows.iter().map(log_from_row).collect();
         let built = build_receipt(tx_type, success, cumulative_gas_used, logs)
             .map_err(ColdStorageError::from)?;
+        // Cumulative gas must be non-decreasing within a block; a violation
+        // indicates database corruption.
+        debug_assert!(
+            built.inner.cumulative_gas_used >= prior_cumulative_gas,
+            "cumulative gas decreased: {} < {}",
+            built.inner.cumulative_gas_used,
+            prior_cumulative_gas,
+        );
         let gas_used = built.inner.cumulative_gas_used - prior_cumulative_gas;
 
         let ir = IndexedReceipt { receipt: built, tx_hash, first_log_index, gas_used, sender };
@@ -1204,8 +1228,7 @@ impl ColdStorageRead for SqlColdBackend {
                 .map_err(SqlColdError::from)?;
 
         // Group logs by tx_index
-        let mut logs_by_tx: std::collections::BTreeMap<i64, Vec<Log>> =
-            std::collections::BTreeMap::new();
+        let mut logs_by_tx: BTreeMap<i64, Vec<Log>> = BTreeMap::new();
         for r in &all_log_rows {
             let tx_idx: i64 = r.get(COL_TX_INDEX);
             logs_by_tx.entry(tx_idx).or_default().push(log_from_row(r));
@@ -1410,16 +1433,7 @@ impl ColdStorageWrite for SqlColdBackend {
         let bn = to_i64(block);
         let mut tx = self.pool.begin().await.map_err(SqlColdError::from)?;
 
-        // Delete child tables first, then headers (preserves FK ordering).
-        for table in
-            ["logs", "transactions", "receipts", "signet_events", "zenith_headers", "headers"]
-        {
-            sqlx::query(&format!("DELETE FROM {table} WHERE block_number > $1"))
-                .bind(bn)
-                .execute(&mut *tx)
-                .await
-                .map_err(SqlColdError::from)?;
-        }
+        delete_above_in_tx(&mut tx, bn).await.map_err(ColdStorageError::from)?;
 
         tx.commit().await.map_err(SqlColdError::from)?;
         Ok(())
@@ -1444,8 +1458,7 @@ impl ColdStorage for SqlColdBackend {
             return Ok(Vec::new());
         }
 
-        let mut headers: std::collections::BTreeMap<i64, SealedHeader> =
-            std::collections::BTreeMap::new();
+        let mut headers: BTreeMap<i64, SealedHeader> = BTreeMap::new();
         for r in &header_rows {
             let num: i64 = r.get(COL_BLOCK_NUMBER);
             let h = header_from_row(r).map_err(ColdStorageError::from)?.seal_slow();
@@ -1477,8 +1490,7 @@ impl ColdStorage for SqlColdBackend {
         .map_err(SqlColdError::from)?;
 
         // Group logs by (block_number, tx_index).
-        let mut logs_by_block_tx: std::collections::BTreeMap<(i64, i64), Vec<Log>> =
-            std::collections::BTreeMap::new();
+        let mut logs_by_block_tx: BTreeMap<(i64, i64), Vec<Log>> = BTreeMap::new();
         for r in &log_rows {
             let block_num: i64 = r.get(COL_BLOCK_NUMBER);
             let tx_idx: i64 = r.get(COL_TX_INDEX);
@@ -1486,8 +1498,7 @@ impl ColdStorage for SqlColdBackend {
         }
 
         // Group receipt rows by block_number.
-        let mut receipts_by_block: std::collections::BTreeMap<i64, Vec<&sqlx::any::AnyRow>> =
-            std::collections::BTreeMap::new();
+        let mut receipts_by_block: BTreeMap<i64, Vec<&sqlx::any::AnyRow>> = BTreeMap::new();
         for r in &receipt_rows {
             let block_num: i64 = r.get(COL_BLOCK_NUMBER);
             receipts_by_block.entry(block_num).or_default().push(r);
@@ -1497,41 +1508,39 @@ impl ColdStorage for SqlColdBackend {
         let mut all_receipts = Vec::with_capacity(headers.len());
         for (&block_num, header) in &headers {
             let block_receipt_rows = receipts_by_block.remove(&block_num).unwrap_or_default();
-            let mut first_log_index = 0u64;
             let mut prior_cumulative_gas = 0u64;
             let block_receipts: ColdResult<Vec<ColdReceipt>> = block_receipt_rows
                 .into_iter()
-                .enumerate()
-                .map(|(idx, rr)| {
+                .map(|rr: &sqlx::any::AnyRow| {
                     let tx_idx: i64 = rr.get(COL_TX_INDEX);
                     let tx_hash = rr.get(COL_TX_HASH);
                     let sender = rr.get(COL_FROM_ADDRESS);
                     let tx_type: i32 = rr.get(COL_TX_TYPE);
                     let success = rr.get::<i32, _>(COL_SUCCESS) != 0;
                     let cumulative_gas_used: i64 = rr.get(COL_CUMULATIVE_GAS_USED);
+                    let first_log_index = from_i64(rr.get::<i64, _>(COL_FIRST_LOG_INDEX));
                     let logs = logs_by_block_tx.remove(&(block_num, tx_idx)).unwrap_or_default();
                     let receipt = build_receipt(tx_type, success, cumulative_gas_used, logs)
                         .map_err(ColdStorageError::from)?;
+                    // Cumulative gas must be non-decreasing within a block; a violation
+                    // indicates database corruption.
+                    debug_assert!(
+                        receipt.inner.cumulative_gas_used >= prior_cumulative_gas,
+                        "cumulative gas decreased: {} < {}",
+                        receipt.inner.cumulative_gas_used,
+                        prior_cumulative_gas,
+                    );
                     let gas_used = receipt.inner.cumulative_gas_used - prior_cumulative_gas;
                     prior_cumulative_gas = receipt.inner.cumulative_gas_used;
                     let ir = IndexedReceipt { receipt, tx_hash, first_log_index, gas_used, sender };
-                    first_log_index += ir.receipt.inner.logs.len() as u64;
-                    Ok(ColdReceipt::new(ir, header, idx as u64))
+                    Ok(ColdReceipt::new(ir, header, from_i64(tx_idx)))
                 })
                 .collect();
             all_receipts.push(block_receipts?);
         }
 
         // 5. Delete from all tables (same order as truncate_above).
-        for table in
-            ["logs", "transactions", "receipts", "signet_events", "zenith_headers", "headers"]
-        {
-            sqlx::query(&format!("DELETE FROM {table} WHERE block_number > $1"))
-                .bind(bn)
-                .execute(&mut *tx)
-                .await
-                .map_err(SqlColdError::from)?;
-        }
+        delete_above_in_tx(&mut tx, bn).await.map_err(ColdStorageError::from)?;
 
         tx.commit().await.map_err(SqlColdError::from)?;
         Ok(all_receipts)
