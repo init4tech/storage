@@ -112,21 +112,20 @@ impl SqlColdBackend {
     pub async fn new(pool: AnyPool) -> Result<Self, SqlColdError> {
         // Detect backend from a pooled connection.
         let conn = pool.acquire().await?;
-        let backend = conn.backend_name().to_owned();
-        drop(conn);
+        let backend = conn.backend_name();
 
-        let migration = match backend.as_str() {
-            "PostgreSQL" => include_str!("../migrations/001_initial_pg.sql"),
-            "SQLite" => include_str!("../migrations/001_initial.sql"),
+        let (migration, is_postgres) = match backend {
+            "PostgreSQL" => (include_str!("../migrations/001_initial_pg.sql"), true),
+            "SQLite" => (include_str!("../migrations/001_initial.sql"), false),
             other => {
                 return Err(SqlColdError::Convert(format!(
                     "unsupported database backend: {other}"
                 )));
             }
         };
+        drop(conn);
         // Execute via pool to ensure the migration uses the same
         // connection that subsequent queries will use.
-        let is_postgres = backend == "PostgreSQL";
         sqlx::raw_sql(migration).execute(&pool).await?;
         Ok(Self { pool, is_postgres })
     }
@@ -247,6 +246,10 @@ impl SqlColdBackend {
         // Build the parameterised query once. $1 is the block number
         // (bound per iteration); remaining parameters are the address
         // and topic filters from the user's request.
+        //
+        // ENG-2036: format!() allocates here, but the dynamic filter clause
+        // makes this unavoidable. sqlx's prepared-statement cache mitigates
+        // repeated execution cost.
         let (filter_clause, filter_params) = build_log_filter_clause(filter, 2);
         let data_sql = format!(
             "SELECT l.*, h.block_hash, h.timestamp AS block_timestamp, t.tx_hash, \
@@ -1348,6 +1351,8 @@ impl ColdStorageRead for SqlColdBackend {
         let to = filter.get_to_block().unwrap_or(u64::MAX);
 
         // Build WHERE clause: block range ($1, $2) + address/topic filters.
+        // ENG-2036: dynamic filter clause requires format!(); mitigated by
+        // sqlx prepared-statement cache.
         let (filter_clause, params) = build_log_filter_clause(filter, 3);
         let where_clause = format!("l.block_number >= $1 AND l.block_number <= $2{filter_clause}");
 

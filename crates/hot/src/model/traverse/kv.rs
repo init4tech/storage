@@ -43,6 +43,9 @@ pub trait KvTraverse<E: HotKvReadError> {
     where
         Self: Sized,
     {
+        // ENG-2036: into_owned() here eagerly materializes the first entry,
+        // wasting an allocation if the iterator is never consumed. Deferring
+        // this requires lifetime changes to the iterator struct.
         let first_entry = self.first()?.map(|(k, v)| (k.into_owned(), v.into_owned()));
         Ok(RawKvIter {
             cursor: self,
@@ -65,6 +68,7 @@ pub trait KvTraverse<E: HotKvReadError> {
     where
         Self: Sized,
     {
+        // ENG-2036: same eager into_owned() as iter() above.
         let first_entry = self.lower_bound(key)?.map(|(k, v)| (k.into_owned(), v.into_owned()));
         Ok(RawKvIter {
             cursor: self,

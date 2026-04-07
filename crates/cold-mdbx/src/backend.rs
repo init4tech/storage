@@ -40,31 +40,24 @@ fn write_block_to_tx(
     // Hash-keyed indices use put (keys are not sequential)
     tx.queue_put::<ColdBlockHashIndex>(&data.header.hash(), &block)?;
 
-    // Store transactions, senders, and build hash index
-    let tx_meta: Vec<_> = data
-        .transactions
-        .iter()
-        .enumerate()
-        .map(|(idx, recovered_tx)| {
-            let tx_idx = idx as u64;
-            let sender = recovered_tx.signer();
-            let tx_signed: &TransactionSigned = recovered_tx;
-            tx.queue_append_dual::<ColdTransactions>(&block, &tx_idx, tx_signed)?;
-            tx.queue_append_dual::<ColdTxSenders>(&block, &tx_idx, &sender)?;
-            tx.queue_put::<ColdTxHashIndex>(tx_signed.hash(), &TxLocation::new(block, tx_idx))?;
-            Ok((*tx_signed.hash(), sender))
-        })
-        .collect::<Result<_, MdbxColdError>>()?;
-
-    // Compute and store IndexedReceipts with precomputed metadata
+    // Store transactions, senders, hash indices, and receipts in a single
+    // pass to avoid an intermediate Vec of (tx_hash, sender) tuples.
     let mut first_log_index = 0u64;
     let mut prior_cumulative_gas = 0u64;
-    for (idx, (receipt, (tx_hash, sender))) in data.receipts.into_iter().zip(tx_meta).enumerate() {
+    for (idx, (recovered_tx, receipt)) in data.transactions.iter().zip(data.receipts).enumerate() {
+        let tx_idx = idx as u64;
+        let sender = recovered_tx.signer();
+        let tx_signed: &TransactionSigned = recovered_tx;
+        tx.queue_append_dual::<ColdTransactions>(&block, &tx_idx, tx_signed)?;
+        tx.queue_append_dual::<ColdTxSenders>(&block, &tx_idx, &sender)?;
+        tx.queue_put::<ColdTxHashIndex>(tx_signed.hash(), &TxLocation::new(block, tx_idx))?;
+
+        let tx_hash = *tx_signed.hash();
         let gas_used = receipt.inner.cumulative_gas_used - prior_cumulative_gas;
         prior_cumulative_gas = receipt.inner.cumulative_gas_used;
         let ir = IndexedReceipt { receipt, tx_hash, first_log_index, gas_used, sender };
         first_log_index += ir.receipt.inner.logs.len() as u64;
-        tx.queue_append_dual::<ColdReceipts>(&block, &(idx as u64), &ir)?;
+        tx.queue_append_dual::<ColdReceipts>(&block, &tx_idx, &ir)?;
     }
 
     for (idx, event) in data.signet_events.iter().enumerate() {
@@ -731,6 +724,9 @@ impl ColdStorageRead for MdbxColdBackend {
 
     async fn produce_log_stream(&self, filter: &Filter, params: signet_cold::StreamParams) {
         let env = self.env.clone();
+        // ENG-2036: clone required to move into spawn_blocking. Eliminating
+        // this would require changing the ColdStorage trait to pass owned
+        // Filter, which is a cross-crate API change.
         let filter = filter.clone();
         let std_deadline = params.deadline.into_std();
         let _ = tokio::task::spawn_blocking(move || {
