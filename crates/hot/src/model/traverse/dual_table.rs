@@ -38,11 +38,14 @@ pub trait DualTableTraverse<T: DualKey, E: HotKvReadError>: DualKeyTraverse<E> {
 
     /// Return the EXACT value for the specified dual key if it exists.
     fn exact_dual(&mut self, key1: &T::Key, key2: &T::Key2) -> Result<Option<T::Value>, E> {
-        let Some((k1, k2, v)) = DualTableTraverse::next_dual_above(self, key1, key2)? else {
-            return Ok(None);
-        };
+        let mut key1_buf = [0u8; MAX_KEY_SIZE];
+        let mut key2_buf = [0u8; MAX_KEY_SIZE];
+        let key1_bytes = key1.encode_key(&mut key1_buf);
+        let key2_bytes = key2.encode_key(&mut key2_buf);
 
-        if k1 == *key1 && k2 == *key2 { Ok(Some(v)) } else { Ok(None) }
+        DualKeyTraverse::exact_dual(self, key1_bytes, key2_bytes)?
+            .map(|v| T::decode_value(v).map_err(Into::into))
+            .transpose()
     }
 
     /// Seek to the next key-value pair AT or ABOVE the specified dual key.
