@@ -4,4 +4,6 @@ Cargo.lock
 .idea/
 .claude/*
 !.claude/skills/
+!.claude/hooks/
+!.claude/settings.json
 docs/
