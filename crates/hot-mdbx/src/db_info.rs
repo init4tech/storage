@@ -1,37 +1,37 @@
 use bytes::Buf;
 use parking_lot::RwLock;
-use signet_hot::ValSer;
+use signet_hot::{ValSer, tables::NUM_TABLES};
 use std::{collections::HashMap, sync::Arc};
 
 /// Inner storage for the two-tier FSI cache.
 ///
-/// The `known` array holds pre-populated entries for the 9 standard tables,
+/// The `known` array holds pre-populated entries for the standard tables,
 /// searched via lock-free linear scan. The `dynamic` map holds entries for
 /// tables created at runtime.
 #[derive(Debug)]
 struct FsiCacheInner {
     /// Pre-populated at open time. Lock-free linear scan.
-    known: [(&'static str, FixedSizeInfo); 9],
+    known: [(&'static str, FixedSizeInfo); NUM_TABLES],
     /// Locking fallback for dynamically created tables.
     dynamic: RwLock<HashMap<&'static str, FixedSizeInfo>>,
 }
 
 /// Two-tier cache for [`FixedSizeInfo`].
 ///
-/// The fast path is a lock-free linear scan over the 9 known table entries.
+/// The fast path is a lock-free linear scan over the known table entries.
 /// The slow path acquires a `RwLock` for dynamically created tables.
 #[derive(Debug, Clone)]
-pub struct FsiCache(Arc<FsiCacheInner>);
+pub(crate) struct FsiCache(Arc<FsiCacheInner>);
 
 impl Default for FsiCache {
     fn default() -> Self {
-        Self::new([("", FixedSizeInfo::None); 9])
+        Self::new([("", FixedSizeInfo::None); NUM_TABLES])
     }
 }
 
 impl FsiCache {
     /// Create a new `FsiCache` pre-populated with the known table entries.
-    pub fn new(known: [(&'static str, FixedSizeInfo); 9]) -> Self {
+    pub(crate) fn new(known: [(&'static str, FixedSizeInfo); NUM_TABLES]) -> Self {
         Self(Arc::new(FsiCacheInner { known, dynamic: RwLock::new(HashMap::new()) }))
     }
 
@@ -39,7 +39,7 @@ impl FsiCache {
     ///
     /// Checks the lock-free known array first, then the locked dynamic map.
     /// Returns `None` if the table is not cached.
-    pub fn get(&self, name: &str) -> Option<FixedSizeInfo> {
+    pub(crate) fn get(&self, name: &str) -> Option<FixedSizeInfo> {
         // Fast path: linear scan over known tables (no lock).
         for &(known_name, fsi) in &self.0.known {
             if known_name == name {
@@ -51,7 +51,7 @@ impl FsiCache {
     }
 
     /// Insert a dynamically created table's [`FixedSizeInfo`].
-    pub fn insert_dynamic(&self, name: &'static str, fsi: FixedSizeInfo) {
+    pub(crate) fn insert_dynamic(&self, name: &'static str, fsi: FixedSizeInfo) {
         self.0.dynamic.write().insert(name, fsi);
     }
 }

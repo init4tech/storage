@@ -61,7 +61,8 @@ mod cursor;
 pub use cursor::{Cursor, CursorRo, CursorRoSync, CursorRw, CursorRwSync};
 
 mod db_info;
-pub use db_info::{FixedSizeInfo, FsiCache};
+pub use db_info::FixedSizeInfo;
+use db_info::FsiCache;
 
 mod error;
 pub use error::MdbxError;
@@ -80,13 +81,13 @@ mod utils;
 use signet_hot::{
     model::{HotKv, HotKvError, HotKvWrite},
     tables::{
-        AccountChangeSets, AccountsHistory, Bytecodes, HeaderNumbers, Headers, PlainAccountState,
-        PlainStorageState, StorageChangeSets, StorageHistory, Table,
+        AccountChangeSets, AccountsHistory, Bytecodes, HeaderNumbers, Headers, NUM_TABLES,
+        PlainAccountState, PlainStorageState, StorageChangeSets, StorageHistory, Table,
     },
 };
 
-/// The 9 known table names, used to pre-populate the FSI cache at open time.
-const KNOWN_TABLE_NAMES: [&str; 9] = [
+/// The known table names, used to pre-populate the FSI cache at open time.
+const KNOWN_TABLE_NAMES: [&str; NUM_TABLES] = [
     Headers::NAME,
     HeaderNumbers::NAME,
     Bytecodes::NAME,
@@ -265,12 +266,11 @@ impl DatabaseArguments {
 pub struct DatabaseEnv {
     /// Libmdbx-sys environment.
     inner: Environment,
-    /// Cached FixedSizeInfo for tables.
+    /// Cached FixedSizeInfo for tables, pre-populated at open time.
     ///
-    /// Important: Do not manually close these DBIs, like via `mdbx_dbi_close`.
-    /// More generally, do not dynamically create, re-open, or drop tables at
-    /// runtime. It's better to perform table creation and migration only once
-    /// at startup.
+    /// The standard tables are created and their FSI entries cached during
+    /// [`DatabaseEnv::open`]. Do not manually close DBIs (e.g. via
+    /// `mdbx_dbi_close`) or dynamically drop tables at runtime.
     fsi_cache: FsiCache,
 
     /// Write lock for when dealing with a read-write environment.
@@ -445,9 +445,10 @@ impl HotKv for DatabaseEnv {
 /// [`FsiCache`]. Called during RW open.
 fn create_tables_and_populate_cache(env: &Environment) -> Result<FsiCache, MdbxError> {
     let inner_tx = env.begin_rw_unsync().map_err(MdbxError::Mdbx)?;
-    // Use a temporary empty FsiCache so the Tx can function during init.
-    // The cache returned by queue_db_init's store_fsi calls goes into the
-    // dynamic map, but we read the authoritative values below.
+    // Tx requires an FsiCache, so we pass a throwaway empty one. The FSI
+    // entries written by queue_db_init's store_fsi calls land in this
+    // temporary cache's dynamic map — they are discarded. We re-read the
+    // authoritative values from the metadata table via read_known_fsi.
     let tmp_cache = FsiCache::new(Default::default());
     let tx = Tx::new(inner_tx, tmp_cache);
     tx.queue_db_init()?;
@@ -460,8 +461,8 @@ fn create_tables_and_populate_cache(env: &Environment) -> Result<FsiCache, MdbxE
 /// Read FSI entries for all known tables from the metadata table.
 fn read_known_fsi<K: signet_libmdbx::TransactionKind>(
     tx: &Tx<K>,
-) -> Result<[(&'static str, FixedSizeInfo); 9], MdbxError> {
-    let mut known = [("", FixedSizeInfo::None); 9];
+) -> Result<[(&'static str, FixedSizeInfo); NUM_TABLES], MdbxError> {
+    let mut known = [("", FixedSizeInfo::None); NUM_TABLES];
     for (i, &name) in KNOWN_TABLE_NAMES.iter().enumerate() {
         known[i] = (name, tx.read_fsi_from_table(name)?);
     }
