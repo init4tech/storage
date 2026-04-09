@@ -1,15 +1,66 @@
 use bytes::Buf;
 use parking_lot::RwLock;
 use signet_hot::ValSer;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
-/// Type alias for the FixedSizeInfo cache.
-pub type FsiCache = std::sync::Arc<RwLock<HashMap<&'static str, FixedSizeInfo>>>;
+/// Inner storage for the two-tier FSI cache.
+///
+/// The `known` array holds pre-populated entries for the 9 standard tables,
+/// searched via lock-free linear scan. The `dynamic` map holds entries for
+/// tables created at runtime.
+#[derive(Debug)]
+struct FsiCacheInner {
+    /// Pre-populated at open time. Lock-free linear scan.
+    known: [(&'static str, FixedSizeInfo); 9],
+    /// Locking fallback for dynamically created tables.
+    dynamic: RwLock<HashMap<&'static str, FixedSizeInfo>>,
+}
+
+/// Two-tier cache for [`FixedSizeInfo`].
+///
+/// The fast path is a lock-free linear scan over the 9 known table entries.
+/// The slow path acquires a `RwLock` for dynamically created tables.
+#[derive(Debug, Clone)]
+pub struct FsiCache(Arc<FsiCacheInner>);
+
+impl Default for FsiCache {
+    fn default() -> Self {
+        Self::new([("", FixedSizeInfo::None); 9])
+    }
+}
+
+impl FsiCache {
+    /// Create a new `FsiCache` pre-populated with the known table entries.
+    pub fn new(known: [(&'static str, FixedSizeInfo); 9]) -> Self {
+        Self(Arc::new(FsiCacheInner { known, dynamic: RwLock::new(HashMap::new()) }))
+    }
+
+    /// Look up a table's [`FixedSizeInfo`].
+    ///
+    /// Checks the lock-free known array first, then the locked dynamic map.
+    /// Returns `None` if the table is not cached.
+    pub fn get(&self, name: &str) -> Option<FixedSizeInfo> {
+        // Fast path: linear scan over known tables (no lock).
+        for &(known_name, fsi) in &self.0.known {
+            if known_name == name {
+                return Some(fsi);
+            }
+        }
+        // Slow path: check dynamic map.
+        self.0.dynamic.read().get(name).copied()
+    }
+
+    /// Insert a dynamically created table's [`FixedSizeInfo`].
+    pub fn insert_dynamic(&self, name: &'static str, fsi: FixedSizeInfo) {
+        self.0.dynamic.write().insert(name, fsi);
+    }
+}
 
 /// Information about fixed size values in a database.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum FixedSizeInfo {
     /// Not a DUPSORT table.
+    #[default]
     None,
     /// DUPSORT table without DUP_FIXED (variable value size).
     DupSort {
@@ -143,5 +194,54 @@ mod tests {
             }
             other => panic!("expected InsufficientData, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn fsi_cache_known_path() {
+        let known = [
+            ("TableA", FixedSizeInfo::None),
+            ("TableB", FixedSizeInfo::DupSort { key2_size: 32 }),
+            ("TableC", FixedSizeInfo::DupFixed { key2_size: 32, total_size: 64 }),
+            ("TableD", FixedSizeInfo::None),
+            ("TableE", FixedSizeInfo::None),
+            ("TableF", FixedSizeInfo::None),
+            ("TableG", FixedSizeInfo::None),
+            ("TableH", FixedSizeInfo::None),
+            ("TableI", FixedSizeInfo::None),
+        ];
+        let cache = FsiCache::new(known);
+
+        assert_eq!(cache.get("TableA"), Some(FixedSizeInfo::None));
+        assert_eq!(cache.get("TableB"), Some(FixedSizeInfo::DupSort { key2_size: 32 }));
+        assert_eq!(
+            cache.get("TableC"),
+            Some(FixedSizeInfo::DupFixed { key2_size: 32, total_size: 64 })
+        );
+        // Unknown table returns None
+        assert_eq!(cache.get("Unknown"), None);
+    }
+
+    #[test]
+    fn fsi_cache_dynamic_path() {
+        let known = [
+            ("T1", FixedSizeInfo::None),
+            ("T2", FixedSizeInfo::None),
+            ("T3", FixedSizeInfo::None),
+            ("T4", FixedSizeInfo::None),
+            ("T5", FixedSizeInfo::None),
+            ("T6", FixedSizeInfo::None),
+            ("T7", FixedSizeInfo::None),
+            ("T8", FixedSizeInfo::None),
+            ("T9", FixedSizeInfo::None),
+        ];
+        let cache = FsiCache::new(known);
+
+        // Not in known set
+        assert_eq!(cache.get("DynTable"), None);
+
+        // Insert dynamically
+        let fsi = FixedSizeInfo::DupSort { key2_size: 20 };
+        cache.insert_dynamic("DynTable", fsi);
+        assert_eq!(cache.get("DynTable"), Some(fsi));
     }
 }

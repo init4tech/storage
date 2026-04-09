@@ -51,12 +51,11 @@
 #![deny(unused_must_use, rust_2018_idioms)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-use parking_lot::RwLock;
 use signet_libmdbx::{
     Environment, EnvironmentFlags, Geometry, Mode, Ro, RoSync, Rw, RwSync, SyncMode, ffi,
     sys::{HandleSlowReadersReturnCode, PageSize},
 };
-use std::{collections::HashMap, ops::Range, path::Path, sync::Arc};
+use std::{ops::Range, path::Path};
 
 mod cursor;
 pub use cursor::{Cursor, CursorRo, CursorRoSync, CursorRw, CursorRwSync};
@@ -366,7 +365,7 @@ impl DatabaseEnv {
         // https://github.com/paradigmxyz/reth/blob/fa2b9b685ed9787636d962f4366caf34a9186e66/crates/storage/libmdbx-rs/mdbx-sys/libmdbx/mdbx.c#L16017.
         inner_env.set_rp_augment_limit(256 * 1024);
 
-        let fsi_cache = Arc::new(RwLock::new(HashMap::new()));
+        let fsi_cache = FsiCache::default();
         let env = Self { inner: inner_env.open(path)?, fsi_cache, _lock_file };
 
         if kind.is_rw() {
