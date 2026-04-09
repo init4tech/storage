@@ -44,6 +44,7 @@ fn write_block_to_tx(
     // pass to avoid an intermediate Vec of (tx_hash, sender) tuples.
     let mut first_log_index = 0u64;
     let mut prior_cumulative_gas = 0u64;
+    debug_assert_eq!(data.transactions.len(), data.receipts.len());
     for (idx, (recovered_tx, receipt)) in data.transactions.iter().zip(data.receipts).enumerate() {
         let tx_idx = idx as u64;
         let sender = recovered_tx.signer();
