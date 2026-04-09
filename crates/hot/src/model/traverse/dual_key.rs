@@ -85,6 +85,9 @@ pub trait DualKeyTraverse<E: HotKvReadError> {
     where
         Self: Sized,
     {
+        // ENG-2036: into_owned() here eagerly materializes the first entry,
+        // wasting an allocation if the iterator is never consumed. Deferring
+        // this requires lifetime changes to the iterator struct.
         let first_entry =
             self.first()?.map(|(k1, k2, v)| (k1.into_owned(), k2.into_owned(), v.into_owned()));
         Ok(RawDualKeyIter {
@@ -107,6 +110,7 @@ pub trait DualKeyTraverse<E: HotKvReadError> {
     where
         Self: Sized,
     {
+        // ENG-2036: same eager into_owned() as iter() above.
         let first_entry = self
             .next_dual_above(k1, k2)?
             .map(|(k1, k2, v)| (k1.into_owned(), k2.into_owned(), v.into_owned()));

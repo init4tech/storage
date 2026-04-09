@@ -47,40 +47,42 @@ impl ColdReceipt {
         let block_hash = header.hash();
         let block_timestamp = header.timestamp;
 
-        let rpc_logs: Vec<RpcLog> = ir
-            .receipt
+        // Destructure to move fields instead of cloning logs.
+        let IndexedReceipt { receipt: typed_receipt, tx_hash, first_log_index, gas_used, sender } =
+            ir;
+        let tx_type = typed_receipt.tx_type;
+        let status = typed_receipt.inner.status;
+        let cumulative_gas_used = typed_receipt.inner.cumulative_gas_used;
+
+        let rpc_logs: Vec<RpcLog> = typed_receipt
             .inner
             .logs
-            .iter()
+            .into_iter()
             .enumerate()
             .map(|(log_idx, log)| RpcLog {
-                inner: log.clone(),
+                inner: log,
                 block_hash: Some(block_hash),
                 block_number: Some(block_number),
                 block_timestamp: Some(block_timestamp),
-                transaction_hash: Some(ir.tx_hash),
+                transaction_hash: Some(tx_hash),
                 transaction_index: Some(transaction_index),
-                log_index: Some(ir.first_log_index + log_idx as u64),
+                log_index: Some(first_log_index + log_idx as u64),
                 removed: false,
             })
             .collect();
 
-        let receipt = ConsensusReceipt {
-            status: ir.receipt.inner.status,
-            cumulative_gas_used: ir.receipt.inner.cumulative_gas_used,
-            logs: rpc_logs,
-        };
+        let receipt = ConsensusReceipt { status, cumulative_gas_used, logs: rpc_logs };
 
         Self {
             receipt,
-            tx_type: ir.receipt.tx_type,
-            tx_hash: ir.tx_hash,
-            gas_used: ir.gas_used,
+            tx_type,
+            tx_hash,
+            gas_used,
             block_number,
             block_hash,
             block_timestamp,
             transaction_index,
-            from: ir.sender,
+            from: sender,
         }
     }
 }

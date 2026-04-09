@@ -266,14 +266,13 @@ impl<H: HotKv> UnifiedStorage<H> {
         // 3. Atomically drain cold (best-effort — failure = normal cold lag)
         let cold_receipts = self.cold.drain_above(block).await.unwrap_or_default();
 
-        // 4. Assemble drained blocks (zip headers with receipts, default empty)
+        // 4. Assemble drained blocks (zip headers with receipts, default empty).
+        // Pad cold_receipts to match headers length so zip consumes both
+        // without cloning.
         let drained = headers
             .into_iter()
-            .enumerate()
-            .map(|(i, header)| {
-                let receipts = cold_receipts.get(i).cloned().unwrap_or_default();
-                DrainedBlock { header, receipts }
-            })
+            .zip(cold_receipts.into_iter().chain(std::iter::repeat_with(Vec::new)))
+            .map(|(header, receipts)| DrainedBlock { header, receipts })
             .collect();
 
         Ok(drained)
