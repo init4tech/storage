@@ -47,6 +47,18 @@ Common pattern across crates:
 - For `signet-cold-sql`: ALWAYS run `./scripts/test-postgres.sh` to verify
   the PostgreSQL backend against the conformance suite.
 
+### Pre-push Checks (enforced by Claude hook)
+
+A Claude hook in `.claude/settings.json` runs `.claude/hooks/pre-push.sh`
+before every `git push`. The push is blocked if any check fails. The checks:
+
+- `cargo +nightly fmt -- --check`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo clippy --workspace --all-targets --no-default-features -- -D warnings`
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`
+
+Clippy and doc warnings are hard failures.
+
 ## Research
 
 - ALWAYS prefer building crate docs and reading them over grep/find/GitHub.
