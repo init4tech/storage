@@ -40,7 +40,10 @@ impl<K: TransactionKind> Tx<K> {
     }
 
     /// Reads FixedSizeInfo from the metadata table.
-    fn read_fsi_from_table(&self, name: &'static str) -> Result<FixedSizeInfo, MdbxError> {
+    pub(crate) fn read_fsi_from_table(
+        &self,
+        name: &'static str,
+    ) -> Result<FixedSizeInfo, MdbxError> {
         let db = self.inner.open_db(None)?;
 
         let data: [u8; 8] = self

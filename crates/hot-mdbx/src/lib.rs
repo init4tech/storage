@@ -77,7 +77,26 @@ pub use tx::Tx;
 
 mod utils;
 
-use signet_hot::model::{HotKv, HotKvError, HotKvWrite};
+use signet_hot::{
+    model::{HotKv, HotKvError, HotKvWrite},
+    tables::{
+        AccountChangeSets, AccountsHistory, Bytecodes, HeaderNumbers, Headers, PlainAccountState,
+        PlainStorageState, StorageChangeSets, StorageHistory, Table,
+    },
+};
+
+/// The 9 known table names, used to pre-populate the FSI cache at open time.
+const KNOWN_TABLE_NAMES: [&str; 9] = [
+    Headers::NAME,
+    HeaderNumbers::NAME,
+    Bytecodes::NAME,
+    PlainAccountState::NAME,
+    PlainStorageState::NAME,
+    AccountsHistory::NAME,
+    AccountChangeSets::NAME,
+    StorageHistory::NAME,
+    StorageChangeSets::NAME,
+];
 
 /// 1 KB in bytes
 pub const KILOBYTE: usize = 1024;
@@ -365,24 +384,15 @@ impl DatabaseEnv {
         // https://github.com/paradigmxyz/reth/blob/fa2b9b685ed9787636d962f4366caf34a9186e66/crates/storage/libmdbx-rs/mdbx-sys/libmdbx/mdbx.c#L16017.
         inner_env.set_rp_augment_limit(256 * 1024);
 
-        let fsi_cache = FsiCache::default();
-        let env = Self { inner: inner_env.open(path)?, fsi_cache, _lock_file };
+        let inner = inner_env.open(path)?;
 
-        if kind.is_rw() {
-            env.create_tables()?;
-        }
+        let fsi_cache = if kind.is_rw() {
+            create_tables_and_populate_cache(&inner)?
+        } else {
+            populate_cache_ro(&inner)?
+        };
 
-        Ok(env)
-    }
-
-    /// Create all standard hot storage tables.
-    ///
-    /// Called automatically when opening in read-write mode.
-    fn create_tables(&self) -> Result<(), MdbxError> {
-        let tx = self.tx_rw()?;
-        tx.queue_db_init()?;
-        tx.raw_commit()?;
-        Ok(())
+        Ok(Self { inner, fsi_cache, _lock_file })
     }
 
     /// Start a new read-only transaction.
@@ -429,4 +439,41 @@ impl HotKv for DatabaseEnv {
     fn writer(&self) -> Result<Self::RwTx, HotKvError> {
         self.tx_rw().map_err(HotKvError::from_err)
     }
+}
+
+/// Create all standard hot storage tables and return a pre-populated
+/// [`FsiCache`]. Called during RW open.
+fn create_tables_and_populate_cache(env: &Environment) -> Result<FsiCache, MdbxError> {
+    let inner_tx = env.begin_rw_unsync().map_err(MdbxError::Mdbx)?;
+    // Use a temporary empty FsiCache so the Tx can function during init.
+    // The cache returned by queue_db_init's store_fsi calls goes into the
+    // dynamic map, but we read the authoritative values below.
+    let tmp_cache = FsiCache::new(Default::default());
+    let tx = Tx::new(inner_tx, tmp_cache);
+    tx.queue_db_init()?;
+
+    let known = read_known_fsi(&tx)?;
+    tx.raw_commit()?;
+    Ok(FsiCache::new(known))
+}
+
+/// Read FSI entries for all known tables from the metadata table.
+fn read_known_fsi<K: signet_libmdbx::TransactionKind>(
+    tx: &Tx<K>,
+) -> Result<[(&'static str, FixedSizeInfo); 9], MdbxError> {
+    let mut known = [("", FixedSizeInfo::None); 9];
+    for (i, &name) in KNOWN_TABLE_NAMES.iter().enumerate() {
+        known[i] = (name, tx.read_fsi_from_table(name)?);
+    }
+    Ok(known)
+}
+
+/// Read FSI entries for all known tables via a temporary RO transaction.
+/// Called during RO open.
+fn populate_cache_ro(env: &Environment) -> Result<FsiCache, MdbxError> {
+    let inner_tx = env.begin_ro_unsync().map_err(MdbxError::Mdbx)?;
+    let tmp_cache = FsiCache::new(Default::default());
+    let tx = Tx::new(inner_tx, tmp_cache);
+    let known = read_known_fsi(&tx)?;
+    Ok(FsiCache::new(known))
 }
