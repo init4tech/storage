@@ -5,6 +5,11 @@ mod macros;
 mod definitions;
 pub use definitions::*;
 
+/// The number of standard hot storage tables created by
+/// [`queue_db_init`](crate::model::HotKvWrite::queue_db_init). Update this
+/// constant whenever a table is added to or removed from `queue_db_init`.
+pub const NUM_TABLES: usize = 9;
+
 use crate::{
     DeserError, KeySer, MAX_FIXED_VAL_SIZE, MAX_KEY_SIZE, ValSer,
     model::{DualKeyValue, KeyValue},

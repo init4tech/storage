@@ -40,7 +40,10 @@ impl<K: TransactionKind> Tx<K> {
     }
 
     /// Reads FixedSizeInfo from the metadata table.
-    fn read_fsi_from_table(&self, name: &'static str) -> Result<FixedSizeInfo, MdbxError> {
+    pub(crate) fn read_fsi_from_table(
+        &self,
+        name: &'static str,
+    ) -> Result<FixedSizeInfo, MdbxError> {
         let db = self.inner.open_db(None)?;
 
         let data: [u8; 8] = self
@@ -54,13 +57,13 @@ impl<K: TransactionKind> Tx<K> {
 
     /// Gets cached FixedSizeInfo for a table.
     pub fn get_fsi(&self, name: &'static str) -> Result<FixedSizeInfo, MdbxError> {
-        // Fast path: read lock
-        if let Some(&fsi) = self.fsi_cache.read().get(name) {
+        // Fast path: lock-free scan over known tables, then locked dynamic map.
+        if let Some(fsi) = self.fsi_cache.get(name) {
             return Ok(fsi);
         }
-        // Slow path: read from table, then write lock
+        // Slow path: read from table, then insert into dynamic map.
         let fsi = self.read_fsi_from_table(name)?;
-        self.fsi_cache.write().insert(name, fsi);
+        self.fsi_cache.insert_dynamic(name, fsi);
         Ok(fsi)
     }
 
@@ -135,7 +138,7 @@ impl<K: TransactionKind + WriteMarker> Tx<K> {
         fsi.encode_value_to(&mut value_buf.as_mut_slice());
 
         self.inner.put(db, fsi_name_to_key(table).as_slice(), value_buf, WriteFlags::UPSERT)?;
-        self.fsi_cache.write().insert(table, fsi);
+        self.fsi_cache.insert_dynamic(table, fsi);
 
         Ok(())
     }
