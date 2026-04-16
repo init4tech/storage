@@ -127,6 +127,9 @@ impl SqlColdBackend {
         // Execute via pool to ensure the migration uses the same
         // connection that subsequent queries will use.
         sqlx::raw_sql(migration).execute(&pool).await?;
+        sqlx::raw_sql(include_str!("../migrations/002_add_topic_indexes.sql"))
+            .execute(&pool)
+            .await?;
         Ok(Self { pool, is_postgres })
     }
 
