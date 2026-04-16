@@ -115,9 +115,15 @@ impl SqlColdBackend {
         let backend = conn.backend_name().to_owned();
         drop(conn);
 
-        let migration = match backend.as_str() {
-            "PostgreSQL" => include_str!("../migrations/001_initial_pg.sql"),
-            "SQLite" => include_str!("../migrations/001_initial.sql"),
+        let (migration, migration_002) = match backend.as_str() {
+            "PostgreSQL" => (
+                include_str!("../migrations/001_initial_pg.sql"),
+                include_str!("../migrations/002_add_topic_indexes_pg.sql"),
+            ),
+            "SQLite" => (
+                include_str!("../migrations/001_initial.sql"),
+                include_str!("../migrations/002_add_topic_indexes.sql"),
+            ),
             other => {
                 return Err(SqlColdError::Convert(format!(
                     "unsupported database backend: {other}"
@@ -128,6 +134,7 @@ impl SqlColdBackend {
         // connection that subsequent queries will use.
         let is_postgres = backend == "PostgreSQL";
         sqlx::raw_sql(migration).execute(&pool).await?;
+        sqlx::raw_sql(migration_002).execute(&pool).await?;
         Ok(Self { pool, is_postgres })
     }
 
