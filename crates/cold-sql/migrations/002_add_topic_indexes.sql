@@ -1,6 +1,6 @@
 -- Add indexes on topic1, topic2, topic3 for log filtering.
 --
--- topic0 already has an index (001_initial.sql). Most ERC-20/721
+-- topic0 already has an index (001_initial). Most ERC-20/721
 -- Transfer lookups filter on topic1 (from) or topic2 (to), which
 -- previously required sequential scans.
 
