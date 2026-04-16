@@ -4,8 +4,13 @@
 //! them to the storage backend. Reads and writes use separate channels:
 //!
 //! - **Reads**: Processed concurrently (up to 64 in flight) via spawned tasks.
-//!   In-flight reads are drained before each write.
+//!   Each reader holds a permit on `read_semaphore` for the lifetime of the
+//!   handler; the semaphore is the backpressure mechanism. In-flight reads
+//!   are drained before each write.
 //! - **Writes**: Processed sequentially (inline await) to maintain ordering.
+//!   Draining is implemented by acquiring all [`MAX_CONCURRENT_READERS`]
+//!   permits on `read_semaphore`, which unblocks only once every in-flight
+//!   reader has finished and released its permit.
 //! - **Streams**: Log-streaming producers run independently, tracked for
 //!   graceful shutdown but not drained before writes. Backends must provide
 //!   their own read isolation (e.g. snapshot semantics).
@@ -264,8 +269,18 @@ pub struct ColdStorageTask<B: ColdStorage> {
     read_receiver: mpsc::Receiver<ColdReadRequest>,
     write_receiver: mpsc::Receiver<ColdWriteRequest>,
     cancel_token: CancellationToken,
-    /// Task tracker for concurrent read handlers only.
+    /// Tracks spawned read handlers so the graceful-shutdown path can wait
+    /// for them to finish. Not used for backpressure — see `read_semaphore`.
     task_tracker: TaskTracker,
+    /// Bounds in-flight read handlers and serves as the drain barrier for
+    /// writes.
+    ///
+    /// A reader acquires one permit before being spawned; the permit is
+    /// released when the spawned task completes (or panics). Writes acquire
+    /// all [`MAX_CONCURRENT_READERS`] permits at once, which blocks until
+    /// every in-flight reader has finished, giving the write exclusive
+    /// backend access for the drain-before-write invariant.
+    read_semaphore: Arc<Semaphore>,
 }
 
 impl<B: ColdStorage> std::fmt::Debug for ColdStorageTask<B> {
@@ -293,6 +308,7 @@ impl<B: ColdStorage> ColdStorageTask<B> {
             write_receiver,
             cancel_token,
             task_tracker: TaskTracker::new(),
+            read_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_READERS)),
         };
         let handle = ColdStorageHandle::new(read_sender, write_sender);
         (task, handle)
@@ -360,14 +376,25 @@ impl<B: ColdStorage> ColdStorageTask<B> {
                         debug!("Cold storage write channel closed");
                         break;
                     };
-                    // Drain in-flight read tasks before executing the write.
-                    // Stream producers are NOT drained here — they rely on
-                    // backend-level read isolation (snapshot semantics).
-                    self.task_tracker.close();
-                    self.task_tracker.wait().await;
-                    self.task_tracker.reopen();
+                    // Drain in-flight read tasks before executing the write by
+                    // acquiring every read permit. This blocks until all
+                    // in-flight readers have released their permits, giving the
+                    // write exclusive backend access. Stream producers are NOT
+                    // drained here — they rely on backend-level read isolation
+                    // (snapshot semantics).
+                    //
+                    // `acquire_many_owned` only errors if the semaphore is
+                    // closed; the semaphore lives for the lifetime of the run
+                    // loop, so this is infallible here.
+                    let _drain = self
+                        .read_semaphore
+                        .clone()
+                        .acquire_many_owned(MAX_CONCURRENT_READERS as u32)
+                        .await
+                        .expect("read semaphore outlives the run loop");
 
                     self.handle_write(req).await;
+                    // `_drain` drops here, restoring all permits.
                 }
 
                 maybe_read = self.read_receiver.recv() => {
@@ -376,19 +403,26 @@ impl<B: ColdStorage> ColdStorageTask<B> {
                         break;
                     };
 
-                    // Apply backpressure: wait if we've hit the concurrent reader limit
-                    while self.task_tracker.len() >= MAX_CONCURRENT_READERS {
-                        tokio::select! {
-                            _ = self.cancel_token.cancelled() => {
-                                debug!("Cancellation while waiting for read task slot");
-                                break;
-                            }
-                            _ = self.task_tracker.wait() => {}
+                    // Apply backpressure: acquire a permit before spawning.
+                    // When the semaphore is saturated (64 in-flight readers, or
+                    // a write holding all permits to drain), this waits until
+                    // a permit becomes available. Cancel-safe: a cancellation
+                    // signal exits the run loop without spawning.
+                    let permit = tokio::select! {
+                        _ = self.cancel_token.cancelled() => {
+                            debug!("Cancellation while waiting for read permit");
+                            break;
                         }
-                    }
+                        permit = self.read_semaphore.clone().acquire_owned() => {
+                            permit.expect("read semaphore outlives the run loop")
+                        }
+                    };
 
                     let inner = Arc::clone(&self.inner);
                     self.task_tracker.spawn(async move {
+                        // Hold the permit for the lifetime of the handler —
+                        // it is released on completion or panic.
+                        let _permit = permit;
                         inner.handle_read(req).await;
                     });
                 }
