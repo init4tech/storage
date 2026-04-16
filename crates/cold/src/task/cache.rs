@@ -10,9 +10,6 @@ use signet_storage_types::{RecoveredTx, SealedHeader};
 use std::num::NonZeroUsize;
 
 /// Default capacity for each LRU cache map.
-///
-/// Sized for RPC workloads where the same recent blocks, transactions,
-/// and receipts are queried repeatedly by different callers.
 const DEFAULT_CACHE_CAPACITY: usize = 2048;
 
 /// Evict all entries from an LRU cache whose keys satisfy the predicate.
