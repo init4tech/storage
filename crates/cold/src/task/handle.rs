@@ -11,13 +11,13 @@
 
 use crate::{
     AppendBlockRequest, BlockData, ColdReadRequest, ColdReceipt, ColdResult, ColdStorageError,
-    ColdWriteRequest, Confirmed, Filter, HeaderSpecifier, LogStream, ReceiptSpecifier, RpcLog,
-    SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
+    ColdWriteRequest, Confirmed, Filter, HeaderSpecifier, LogStream, PermittedReadRequest,
+    ReceiptSpecifier, RpcLog, SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::primitives::{B256, BlockNumber};
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
-use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use std::{sync::Arc, time::Duration};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 
 /// Map a [`mpsc::error::TrySendError`] to the appropriate
 /// [`ColdStorageError`] variant.
@@ -52,22 +52,40 @@ fn map_dispatch_error<T>(e: mpsc::error::TrySendError<T>) -> ColdStorageError {
 /// Multiple readers can query concurrently without blocking writes.
 #[derive(Clone, Debug)]
 pub struct ColdStorageReadHandle {
-    sender: mpsc::Sender<ColdReadRequest>,
+    sender: mpsc::Sender<PermittedReadRequest>,
+    sem: Arc<Semaphore>,
 }
 
 impl ColdStorageReadHandle {
-    /// Create a new read-only handle with the given sender.
-    pub(crate) const fn new(sender: mpsc::Sender<ColdReadRequest>) -> Self {
-        Self { sender }
+    /// Create a new read-only handle with the given sender and permit
+    /// pool.
+    pub(crate) const fn new(
+        sender: mpsc::Sender<PermittedReadRequest>,
+        sem: Arc<Semaphore>,
+    ) -> Self {
+        Self { sender, sem }
     }
 
     /// Send a read request and wait for the response.
+    ///
+    /// Acquires a concurrency permit before sending. The channel is
+    /// sized to match the permit pool, so once a permit is held, send
+    /// is guaranteed to have capacity.
     async fn send<T>(
         &self,
         req: ColdReadRequest,
         rx: oneshot::Receiver<ColdResult<T>>,
     ) -> ColdResult<T> {
-        self.sender.send(req).await.map_err(|_| ColdStorageError::Cancelled)?;
+        let permit = Arc::clone(&self.sem)
+            .acquire_owned()
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?;
+        self.sender.try_send(PermittedReadRequest::new(permit, req)).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => {
+                unreachable!("semaphore permit implies channel capacity")
+            }
+            mpsc::error::TrySendError::Closed(_) => ColdStorageError::TaskTerminated,
+        })?;
         rx.await.map_err(|_| ColdStorageError::Cancelled)?
     }
 
@@ -357,12 +375,13 @@ pub struct ColdStorageHandle {
 }
 
 impl ColdStorageHandle {
-    /// Create a new handle with the given senders.
+    /// Create a new handle with the given senders and permit pool.
     pub(crate) const fn new(
-        read_sender: mpsc::Sender<ColdReadRequest>,
+        read_sender: mpsc::Sender<PermittedReadRequest>,
+        read_sem: Arc<Semaphore>,
         write_sender: mpsc::Sender<ColdWriteRequest>,
     ) -> Self {
-        Self { reader: ColdStorageReadHandle::new(read_sender), write_sender }
+        Self { reader: ColdStorageReadHandle::new(read_sender, read_sem), write_sender }
     }
 
     /// Get a read-only handle that shares the read channel.

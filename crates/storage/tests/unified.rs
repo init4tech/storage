@@ -2,16 +2,36 @@
 
 use alloy::{
     consensus::{Header, Sealable, Signed, TxLegacy, transaction::Recovered},
-    primitives::{Address, B256, Signature, TxKind, U256},
+    primitives::{Address, B256, BlockNumber, Signature, TxKind, U256},
 };
-use signet_cold::{ColdStorageTask, HeaderSpecifier, mem::MemColdBackend};
+use signet_cold::{ColdStorageReadHandle, ColdStorageTask, HeaderSpecifier, mem::MemColdBackend};
 use signet_hot::{HistoryRead, HistoryWrite, HotKv, mem::MemKv, model::HotKvWrite};
 use signet_storage::UnifiedStorage;
 use signet_storage_types::{
     ExecutedBlock, ExecutedBlockBuilder, Receipt, RecoveredTx, SealedHeader, TransactionSigned,
 };
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use trevm::revm::database::BundleState;
+
+/// Poll cold storage until its latest block reaches `target`, or the
+/// deadline elapses. `UnifiedStorage::append_blocks` dispatches to
+/// cold asynchronously, so callers that need deterministic reads must
+/// wait before querying. See
+/// `components/crates/node-tests/src/context.rs` for the production
+/// version of this pattern.
+async fn wait_for_cold_height(cold: &ColdStorageReadHandle, target: BlockNumber) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match cold.get_latest_block().await {
+                Ok(Some(latest)) if latest >= target => break,
+                _ => tokio::task::yield_now().await,
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("cold storage did not reach height {target} within 5s"));
+}
 
 /// Build a chain of blocks with valid parent hash linkage.
 fn make_chain(count: u64) -> Vec<ExecutedBlock> {
@@ -93,7 +113,9 @@ async fn append_and_read_back() {
     let tip = reader.get_chain_tip().unwrap();
     assert_eq!(tip, Some((0, expected_hash)));
 
-    // Verify cold storage has the header
+    // Wait for cold to absorb the dispatched write, then verify cold
+    // storage has the header.
+    wait_for_cold_height(&cold_handle.reader(), 0).await;
     let header = cold_handle.get_header(HeaderSpecifier::Number(0)).await.unwrap();
     assert!(header.is_some());
 
@@ -156,8 +178,9 @@ async fn drain_above_empty_when_at_tip() {
     let cold_handle = ColdStorageTask::spawn(MemColdBackend::new(), cancel.clone());
     let storage = UnifiedStorage::new(hot.clone(), cold_handle);
 
-    // Append 2 blocks (0, 1)
+    // Append 2 blocks (0, 1) and wait for cold to catch up.
     storage.append_blocks(make_chain_with_txs(2, 1)).unwrap();
+    wait_for_cold_height(&storage.cold().reader(), 1).await;
 
     // drain_above(1) — nothing above tip
     let drained = storage.drain_above(1).await.unwrap();
