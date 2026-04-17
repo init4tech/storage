@@ -10,7 +10,7 @@ use crate::{
 use alloy::primitives::BlockNumber;
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
 use std::time::Duration;
-use tokio::sync::oneshot;
+use tokio::sync::{OwnedSemaphorePermit, oneshot};
 
 /// Response sender type alias that propagates Result types.
 pub type Responder<T, E = ColdStorageError> = oneshot::Sender<Result<T, E>>;
@@ -22,6 +22,27 @@ pub struct AppendBlockRequest {
     pub data: BlockData,
     /// The response channel.
     pub resp: Responder<()>,
+}
+
+/// A read request with an attached concurrency permit.
+///
+/// The permit is acquired on the handle side before sending, bounds
+/// concurrent in-flight readers, and doubles as the drain-before-write
+/// marker in the task runner. It is released when the spawned handler
+/// completes (or panics, or is dropped on deadline expiry).
+#[derive(Debug)]
+pub struct PermittedReadRequest {
+    /// The concurrency permit, released when the handler future is dropped.
+    pub permit: OwnedSemaphorePermit,
+    /// The read request itself.
+    pub req: ColdReadRequest,
+}
+
+impl PermittedReadRequest {
+    /// Construct a new permitted request.
+    pub const fn new(permit: OwnedSemaphorePermit, req: ColdReadRequest) -> Self {
+        Self { permit, req }
+    }
 }
 
 /// Read requests for cold storage.
@@ -137,6 +158,27 @@ pub enum ColdReadRequest {
         /// The response channel.
         resp: Responder<Option<BlockNumber>>,
     },
+}
+
+impl ColdReadRequest {
+    /// Short static name of the request variant, for logging and metrics.
+    pub const fn variant_name(&self) -> &'static str {
+        match self {
+            Self::GetHeader { .. } => "GetHeader",
+            Self::GetHeaders { .. } => "GetHeaders",
+            Self::GetTransaction { .. } => "GetTransaction",
+            Self::GetTransactionsInBlock { .. } => "GetTransactionsInBlock",
+            Self::GetTransactionCount { .. } => "GetTransactionCount",
+            Self::GetReceipt { .. } => "GetReceipt",
+            Self::GetReceiptsInBlock { .. } => "GetReceiptsInBlock",
+            Self::GetSignetEvents { .. } => "GetSignetEvents",
+            Self::GetZenithHeader { .. } => "GetZenithHeader",
+            Self::GetZenithHeaders { .. } => "GetZenithHeaders",
+            Self::GetLogs { .. } => "GetLogs",
+            Self::StreamLogs { .. } => "StreamLogs",
+            Self::GetLatestBlock { .. } => "GetLatestBlock",
+        }
+    }
 }
 
 /// Write requests for cold storage.

@@ -49,6 +49,16 @@ pub enum ColdStorageError {
     #[error("stream deadline exceeded")]
     StreamDeadlineExceeded,
 
+    /// A non-streaming read operation exceeded its deadline.
+    ///
+    /// The task enforces a wall-clock limit on in-task read handlers so
+    /// that a stuck backend call cannot indefinitely hold a concurrency
+    /// permit and block the drain-before-write barrier. Operations that
+    /// legitimately take longer than this deadline should use
+    /// [`StreamLogs`](crate::ColdReadRequest::StreamLogs) instead.
+    #[error("cold read deadline exceeded")]
+    Timeout,
+
     /// A reorg was detected during a streaming operation.
     ///
     /// The anchor block hash changed between chunks, indicating that
