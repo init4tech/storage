@@ -7,11 +7,11 @@
 //! # Concurrency
 //!
 //! - Reads are gated by a `read_sem` (up to 64 in flight).
-//! - Writes are gated by a `write_sem` (serialized: 1 in flight).
-//! - Log streams are gated by a `stream_sem` (up to 8 in flight).
-//!
-//! All three semaphores are independent; the full drain-barrier between reads
-//! and writes is deferred to a later task in this refactor sequence.
+//! - Writes are gated by a `write_sem` (serialized: 1 in flight) and
+//!   additionally acquire all `read_sem` permits as a drain barrier, so no
+//!   read is in flight while a write commits.
+//! - Log streams are gated by a `stream_sem` (up to 8 in flight) and do not
+//!   participate in the drain barrier.
 
 use crate::{
     BlockData, ColdReceipt, ColdResult, ColdStorageBackend, ColdStorageError, Confirmed, Filter,
@@ -130,10 +130,16 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
             .map_err(|_| ColdStorageError::TaskTerminated)?
     }
 
-    /// Spawn a write task under the `write_sem` permit.
+    /// Spawn a write task under the `write_sem` permit, holding a full drain
+    /// on `read_sem` for the duration of the write.
     ///
-    /// The drain barrier that excludes in-flight reads is deferred to a
-    /// later refactor task.
+    /// Acquisition order is: `write_sem` first, then all `MAX_CONCURRENT_READERS`
+    /// read permits. This ensures concurrent writers queue on `write_sem` so
+    /// only one writer at a time waits on the drain, preventing starvation of
+    /// the read pool.
+    ///
+    /// Drop order inside the spawned task releases the drain before the write
+    /// permit, so readers regain access immediately once the write completes.
     async fn spawn_write<T, F, Fut>(&self, f: F) -> ColdResult<T>
     where
         T: Send + 'static,
@@ -147,12 +153,20 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
             .acquire_owned()
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?;
+        let drain = self
+            .inner
+            .read_sem
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_READERS as u32)
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?;
         let inner = Arc::clone(&self.inner);
         self.inner
             .tracker
             .spawn(
                 async move {
                     let _w = write_permit;
+                    let _d = drain;
                     f(inner).await
                 }
                 .in_current_span(),
