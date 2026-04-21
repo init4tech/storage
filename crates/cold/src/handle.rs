@@ -53,7 +53,6 @@ pub(crate) struct Inner<B> {
     pub(crate) write_sem: Arc<Semaphore>,
     pub(crate) stream_sem: Arc<Semaphore>,
     pub(crate) tracker: TaskTracker,
-    #[allow(dead_code)]
     pub(crate) cancel: CancellationToken,
 }
 
@@ -81,7 +80,11 @@ impl<B: ColdStorageBackend> std::fmt::Debug for ColdStorage<B> {
 impl<B: ColdStorageBackend> ColdStorage<B> {
     /// Create a new cold storage handle wrapping `backend`.
     ///
-    /// The `cancel` token is held for future shutdown coordination.
+    /// A hidden coordinator task watches `cancel` and, on fire, closes the
+    /// read/write/stream semaphores and the task tracker. After cancel,
+    /// all handle methods fail fast with [`ColdStorageError::TaskTerminated`]
+    /// on permit acquisition; in-flight spawned tasks drain to completion
+    /// bounded by backend timeouts.
     pub fn new(backend: B, cancel: CancellationToken) -> Self {
         let inner = Arc::new(Inner {
             backend,
@@ -93,10 +96,23 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
             tracker: TaskTracker::new(),
             cancel,
         });
+        let inner_s = Arc::clone(&inner);
+        // Shutdown coordinator: must NOT be tracked by `tracker`, otherwise
+        // `tracker.wait()` would deadlock waiting on this task.
+        tokio::spawn(async move {
+            inner_s.cancel.cancelled().await;
+            inner_s.read_sem.close();
+            inner_s.write_sem.close();
+            inner_s.stream_sem.close();
+            inner_s.tracker.close();
+        });
         Self { inner }
     }
 
     /// Close the task tracker and wait for all in-flight tasks to finish.
+    ///
+    /// Idempotent with the shutdown coordinator: safe to call whether or not
+    /// the cancel token has fired.
     pub async fn wait_shutdown(&self) {
         self.inner.tracker.close();
         self.inner.tracker.wait().await;
