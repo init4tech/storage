@@ -20,12 +20,18 @@ use tokio::sync::Semaphore;
 pub struct GatedBackend {
     inner: MemColdBackend,
     gate: Arc<Semaphore>,
+    stream_gate: Arc<Semaphore>,
 }
 
 impl GatedBackend {
     /// Build a backend whose read gate is closed (zero permits).
     pub fn closed() -> Self {
-        Self { inner: MemColdBackend::new(), gate: Arc::new(Semaphore::new(0)) }
+        Self {
+            inner: MemColdBackend::new(),
+            gate: Arc::new(Semaphore::new(0)),
+            // Streams are ungated by default: effectively unbounded permits.
+            stream_gate: Arc::new(Semaphore::new(usize::MAX >> 4)),
+        }
     }
 
     /// Build a backend whose read gate is effectively open.
@@ -36,10 +42,24 @@ impl GatedBackend {
         me
     }
 
+    /// Replace the stream gate with a closed (zero-permit) gate so
+    /// `produce_log_stream` parks until permits are released.
+    #[allow(dead_code)]
+    pub fn with_gated_streams(mut self) -> Self {
+        self.stream_gate = Arc::new(Semaphore::new(0));
+        self
+    }
+
     /// Release `n` additional read permits on the gate.
     #[allow(dead_code)]
     pub fn release(&self, n: usize) {
         self.gate.add_permits(n);
+    }
+
+    /// Release `n` additional stream permits on the stream gate.
+    #[allow(dead_code)]
+    pub fn release_streams(&self, n: usize) {
+        self.stream_gate.add_permits(n);
     }
 }
 
@@ -126,7 +146,7 @@ impl ColdStorageRead for GatedBackend {
     }
 
     async fn produce_log_stream(&self, filter: &Filter, params: StreamParams) {
-        // Streams ungated.
+        let _p = self.stream_gate.clone().acquire_owned().await.ok();
         self.inner.produce_log_stream(filter, params).await;
     }
 }
