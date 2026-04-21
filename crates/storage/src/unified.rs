@@ -7,7 +7,7 @@
 use crate::StorageResult;
 use alloy::primitives::BlockNumber;
 use signet_cold::{
-    BlockData, ColdReceipt, ColdStorage, ColdStorageError, ColdStorageHandle,
+    BlockData, ColdReceipt, ColdStorageBackend, ColdStorageError, ColdStorageHandle,
     ColdStorageReadHandle, ColdStorageTask,
 };
 use signet_hot::{
@@ -107,7 +107,11 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// Use [`new`](Self::new) instead if you need manual control over
     /// the cold storage task lifecycle or need to share the
     /// [`ColdStorageHandle`] before constructing unified storage.
-    pub fn spawn<B: ColdStorage>(hot: H, cold_backend: B, cancel_token: CancellationToken) -> Self {
+    pub fn spawn<B: ColdStorageBackend>(
+        hot: H,
+        cold_backend: B,
+        cancel_token: CancellationToken,
+    ) -> Self {
         let cold = ColdStorageTask::spawn(cold_backend, cancel_token);
         Self::new(hot, cold)
     }

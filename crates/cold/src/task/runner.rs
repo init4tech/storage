@@ -22,9 +22,9 @@
 
 use super::cache::ColdCache;
 use crate::{
-    ColdReadRequest, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, ColdStorageHandle,
-    ColdStorageRead, ColdWriteRequest, Confirmed, HeaderSpecifier, LogStream, ReceiptSpecifier,
-    TransactionSpecifier,
+    ColdReadRequest, ColdReceipt, ColdResult, ColdStorageBackend, ColdStorageError,
+    ColdStorageHandle, ColdStorageRead, ColdWriteRequest, Confirmed, HeaderSpecifier, LogStream,
+    ReceiptSpecifier, TransactionSpecifier,
 };
 use signet_storage_types::{RecoveredTx, SealedHeader};
 use std::{sync::Arc, time::Duration};
@@ -258,7 +258,7 @@ impl<B: ColdStorageRead> ColdStorageTaskInner<B> {
 /// Transaction, receipt, and header lookups are served from an LRU cache
 /// when possible. Cache entries are invalidated on
 /// [`truncate_above`](crate::ColdStorageWrite::truncate_above) to handle reorgs.
-pub struct ColdStorageTask<B: ColdStorage> {
+pub struct ColdStorageTask<B: ColdStorageBackend> {
     inner: Arc<ColdStorageTaskInner<B>>,
     write_backend: B,
     read_receiver: mpsc::Receiver<ColdReadRequest>,
@@ -268,13 +268,13 @@ pub struct ColdStorageTask<B: ColdStorage> {
     task_tracker: TaskTracker,
 }
 
-impl<B: ColdStorage> std::fmt::Debug for ColdStorageTask<B> {
+impl<B: ColdStorageBackend> std::fmt::Debug for ColdStorageTask<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ColdStorageTask").finish_non_exhaustive()
     }
 }
 
-impl<B: ColdStorage> ColdStorageTask<B> {
+impl<B: ColdStorageBackend> ColdStorageTask<B> {
     /// Create a new cold storage task and return its handle.
     pub fn new(backend: B, cancel_token: CancellationToken) -> (Self, ColdStorageHandle) {
         let (read_sender, read_receiver) = mpsc::channel(READ_CHANNEL_SIZE);

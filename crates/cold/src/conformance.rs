@@ -1,12 +1,12 @@
-//! Conformance tests for ColdStorage backends.
+//! Conformance tests for ColdStorageBackend backends.
 //!
 //! These tests verify that any backend implementation behaves correctly
-//! according to the ColdStorage trait contract. To use these tests with
+//! according to the ColdStorageBackend trait contract. To use these tests with
 //! a custom backend, call the test functions with your backend instance.
 
 use crate::{
-    BlockData, ColdResult, ColdStorage, ColdStorageError, ColdStorageHandle, ColdStorageTask,
-    Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog, TransactionSpecifier,
+    BlockData, ColdResult, ColdStorageBackend, ColdStorageError, ColdStorageHandle,
+    ColdStorageTask, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog, TransactionSpecifier,
 };
 use alloy::{
     consensus::{
@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 /// Run all conformance tests against a backend.
 ///
 /// This is the main entry point for testing a custom backend implementation.
-pub async fn conformance<B: ColdStorage>(backend: B) -> ColdResult<()> {
+pub async fn conformance<B: ColdStorageBackend>(backend: B) -> ColdResult<()> {
     let cancel = CancellationToken::new();
     let handle = ColdStorageTask::spawn(backend, cancel.clone());
     test_empty_storage(&handle).await?;

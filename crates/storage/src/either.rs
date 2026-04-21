@@ -3,11 +3,11 @@
 //! The `Either` type enables runtime backend selection while maintaining compile-time
 //! type safety and zero-cost abstraction. The `dispatch_async!` macro reduces
 //! boilerplate for the `EitherCold` implementation by generating the repetitive
-//! match-and-forward pattern for all ColdStorage trait methods.
+//! match-and-forward pattern for all ColdStorageBackend trait methods.
 
 use alloy::primitives::BlockNumber;
 use signet_cold::{
-    BlockData, ColdConnect, ColdReceipt, ColdResult, ColdStorage, ColdStorageRead,
+    BlockData, ColdConnect, ColdReceipt, ColdResult, ColdStorageBackend, ColdStorageRead,
     ColdStorageWrite, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier,
     StreamParams, TransactionSpecifier, ZenithHeaderSpecifier,
 };
@@ -166,29 +166,23 @@ impl ColdStorageRead for EitherCold {
 
 #[allow(clippy::manual_async_fn)]
 impl ColdStorageWrite for EitherCold {
-    fn append_block(&mut self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send {
+    fn append_block(&self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send {
         dispatch_async!(self, append_block(data))
     }
 
-    fn append_blocks(
-        &mut self,
-        data: Vec<BlockData>,
-    ) -> impl Future<Output = ColdResult<()>> + Send {
+    fn append_blocks(&self, data: Vec<BlockData>) -> impl Future<Output = ColdResult<()>> + Send {
         dispatch_async!(self, append_blocks(data))
     }
 
-    fn truncate_above(
-        &mut self,
-        block: BlockNumber,
-    ) -> impl Future<Output = ColdResult<()>> + Send {
+    fn truncate_above(&self, block: BlockNumber) -> impl Future<Output = ColdResult<()>> + Send {
         dispatch_async!(self, truncate_above(block))
     }
 }
 
 #[allow(clippy::manual_async_fn)]
-impl ColdStorage for EitherCold {
+impl ColdStorageBackend for EitherCold {
     fn drain_above(
-        &mut self,
+        &self,
         block: BlockNumber,
     ) -> impl Future<Output = ColdResult<Vec<Vec<ColdReceipt>>>> + Send {
         dispatch_async!(self, drain_above(block))

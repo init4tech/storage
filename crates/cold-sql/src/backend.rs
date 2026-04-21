@@ -36,7 +36,7 @@ use alloy::{
     },
 };
 use signet_cold::{
-    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, ColdStorageRead,
+    BlockData, ColdReceipt, ColdResult, ColdStorageBackend, ColdStorageError, ColdStorageRead,
     ColdStorageWrite, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
@@ -1016,7 +1016,7 @@ fn build_log_filter_clause(filter: &Filter, start_idx: u32) -> (String, Vec<&[u8
 }
 
 // ============================================================================
-// ColdStorage implementation
+// ColdStorageBackend implementation
 // ============================================================================
 
 impl ColdStorageRead for SqlColdBackend {
@@ -1427,11 +1427,11 @@ impl ColdStorageRead for SqlColdBackend {
 }
 
 impl ColdStorageWrite for SqlColdBackend {
-    async fn append_block(&mut self, data: BlockData) -> ColdResult<()> {
+    async fn append_block(&self, data: BlockData) -> ColdResult<()> {
         self.insert_block(data).await.map_err(ColdStorageError::from)
     }
 
-    async fn append_blocks(&mut self, data: Vec<BlockData>) -> ColdResult<()> {
+    async fn append_blocks(&self, data: Vec<BlockData>) -> ColdResult<()> {
         let mut tx = self.pool.begin().await.map_err(SqlColdError::from)?;
         for block_data in data {
             write_block_to_tx(&mut tx, block_data).await.map_err(ColdStorageError::from)?;
@@ -1440,7 +1440,7 @@ impl ColdStorageWrite for SqlColdBackend {
         Ok(())
     }
 
-    async fn truncate_above(&mut self, block: BlockNumber) -> ColdResult<()> {
+    async fn truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
         let bn = to_i64(block);
         let mut tx = self.pool.begin().await.map_err(SqlColdError::from)?;
 
@@ -1451,8 +1451,8 @@ impl ColdStorageWrite for SqlColdBackend {
     }
 }
 
-impl ColdStorage for SqlColdBackend {
-    async fn drain_above(&mut self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
+impl ColdStorageBackend for SqlColdBackend {
+    async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
         let bn = to_i64(block);
         let mut tx = self.pool.begin().await.map_err(SqlColdError::from)?;
 

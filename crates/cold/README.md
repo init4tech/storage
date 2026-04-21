@@ -11,7 +11,7 @@ handling.
 The cold storage engine uses a task-based architecture with separate channels
 for reads and writes:
 
-- `ColdStorage` trait defines the backend interface
+- `ColdStorageBackend` trait defines the backend interface
 - `ColdStorageTask` processes requests from channels
 - `ColdStorageHandle` provides full read/write access
 - `ColdStorageReadHandle` provides read-only access

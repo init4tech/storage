@@ -13,7 +13,7 @@
 //!
 //! The cold storage engine uses a task-based architecture:
 //!
-//! - [`ColdStorage`] trait defines the backend interface
+//! - [`ColdStorageBackend`] trait defines the backend interface
 //! - [`ColdStorageTask`] processes requests from channels
 //! - [`ColdStorageHandle`] provides full read/write access
 //! - [`ColdStorageReadHandle`] provides read-only access
@@ -126,7 +126,7 @@
 //! # Feature Flags
 //!
 //! - **`in-memory`**: Enables the `mem` module, providing an in-memory
-//!   [`ColdStorage`] backend for testing.
+//!   [`ColdStorageBackend`] backend for testing.
 //! - **`test-utils`**: Enables the `conformance` module with backend
 //!   conformance tests. Implies `in-memory`.
 
@@ -159,7 +159,7 @@ pub use cold_receipt::ColdReceipt;
 mod stream;
 pub use stream::{StreamParams, produce_log_stream_default};
 mod traits;
-pub use traits::{BlockData, ColdStorage, ColdStorageRead, ColdStorageWrite, LogStream};
+pub use traits::{BlockData, ColdStorageBackend, ColdStorageRead, ColdStorageWrite, LogStream};
 
 pub mod connect;
 pub use connect::ColdConnect;

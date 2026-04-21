@@ -3,8 +3,8 @@
 //! The cold storage interface is split into three traits:
 //!
 //! - [`ColdStorageRead`] — read-only access (`&self`, `Clone`)
-//! - [`ColdStorageWrite`] — write access (`&mut self`)
-//! - [`ColdStorage`] — supertrait combining both, with `drain_above`
+//! - [`ColdStorageWrite`] — write access (`&self`)
+//! - [`ColdStorageBackend`] — supertrait combining both, with `drain_above`
 
 use crate::{
     ColdReceipt, ColdResult, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
@@ -244,30 +244,26 @@ pub trait ColdStorageRead: Clone + Send + Sync + 'static {
 ///   transaction by hash) require the implementation to maintain appropriate
 ///   indexes. These indexes must be updated during `append_block` and cleaned
 ///   during `truncate_above`.
-pub trait ColdStorageWrite: Send + 'static {
+pub trait ColdStorageWrite: Send + Sync + 'static {
     /// Append a single block to cold storage.
-    fn append_block(&mut self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send;
+    fn append_block(&self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send;
 
     /// Append multiple blocks to cold storage.
-    fn append_blocks(
-        &mut self,
-        data: Vec<BlockData>,
-    ) -> impl Future<Output = ColdResult<()>> + Send;
+    fn append_blocks(&self, data: Vec<BlockData>) -> impl Future<Output = ColdResult<()>> + Send;
 
     /// Truncate all data above the given block number (exclusive).
     ///
     /// This removes block N+1 and higher from all tables. Used for reorg handling.
-    fn truncate_above(&mut self, block: BlockNumber)
-    -> impl Future<Output = ColdResult<()>> + Send;
+    fn truncate_above(&self, block: BlockNumber) -> impl Future<Output = ColdResult<()>> + Send;
 }
 
 /// Combined read and write cold storage backend trait.
 ///
 /// Combines [`ColdStorageRead`] and [`ColdStorageWrite`] and provides
-/// [`drain_above`](ColdStorage::drain_above), which reads receipts then
+/// [`drain_above`](ColdStorageBackend::drain_above), which reads receipts then
 /// truncates. The default implementation is correct but not atomic;
 /// backends should override with an atomic version when possible.
-pub trait ColdStorage: ColdStorageRead + ColdStorageWrite {
+pub trait ColdStorageBackend: ColdStorageRead + ColdStorageWrite {
     /// Read and remove all blocks above the given block number.
     ///
     /// Returns receipts for each block above `block` in ascending order,
@@ -279,7 +275,7 @@ pub trait ColdStorage: ColdStorageRead + ColdStorageWrite {
     /// not atomic. Backends should override with an atomic version
     /// when possible.
     fn drain_above(
-        &mut self,
+        &self,
         block: BlockNumber,
     ) -> impl Future<Output = ColdResult<Vec<Vec<ColdReceipt>>>> + Send {
         async move {
