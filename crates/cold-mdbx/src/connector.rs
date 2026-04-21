@@ -2,11 +2,14 @@
 //!
 //! Unified connector that can open both hot and cold MDBX databases.
 
-use crate::{MdbxColdBackend, MdbxColdError};
+use crate::{
+    MdbxColdBackend, MdbxColdError,
+    backend::{DEFAULT_READ_TIMEOUT, DEFAULT_WRITE_TIMEOUT},
+};
 use signet_cold::ColdConnect;
 use signet_hot::HotConnect;
 use signet_hot_mdbx::{DatabaseArguments, DatabaseEnv, MdbxError};
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 /// Errors that can occur when initializing MDBX connectors.
 #[derive(Debug, thiserror::Error)]
@@ -46,12 +49,19 @@ pub enum MdbxConnectorError {
 pub struct MdbxConnector {
     path: PathBuf,
     db_args: DatabaseArguments,
+    read_timeout: Duration,
+    write_timeout: Duration,
 }
 
 impl MdbxConnector {
     /// Create a new MDBX connector with default database arguments.
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into(), db_args: DatabaseArguments::new() }
+        Self {
+            path: path.into(),
+            db_args: DatabaseArguments::new(),
+            read_timeout: DEFAULT_READ_TIMEOUT,
+            write_timeout: DEFAULT_WRITE_TIMEOUT,
+        }
     }
 
     /// Set custom database arguments.
@@ -61,6 +71,22 @@ impl MdbxConnector {
     #[must_use]
     pub const fn with_db_args(mut self, db_args: DatabaseArguments) -> Self {
         self.db_args = db_args;
+        self
+    }
+
+    /// Set the read deadline applied to the cold backend produced by
+    /// [`ColdConnect::connect`]. See [`MdbxColdBackend::with_read_timeout`].
+    #[must_use]
+    pub const fn with_read_timeout(mut self, read_timeout: Duration) -> Self {
+        self.read_timeout = read_timeout;
+        self
+    }
+
+    /// Set the advisory write deadline applied to the cold backend produced
+    /// by [`ColdConnect::connect`]. See [`MdbxColdBackend::with_write_timeout`].
+    #[must_use]
+    pub const fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
+        self.write_timeout = write_timeout;
         self
     }
 
@@ -111,6 +137,11 @@ impl ColdConnect for MdbxConnector {
         // MDBX open is sync, but wrapped in async for trait consistency
         // Opens read-write and creates tables
         let path = self.path.clone();
-        async move { MdbxColdBackend::open_rw(&path) }
+        let read_timeout = self.read_timeout;
+        let write_timeout = self.write_timeout;
+        async move {
+            MdbxColdBackend::open_rw(&path)
+                .map(|b| b.with_read_timeout(read_timeout).with_write_timeout(write_timeout))
+        }
     }
 }
