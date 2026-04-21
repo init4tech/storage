@@ -263,6 +263,41 @@ pub trait ColdStorageWrite: Send + Sync + 'static {
 /// [`drain_above`](ColdStorageBackend::drain_above), which reads receipts then
 /// truncates. The default implementation is correct but not atomic;
 /// backends should override with an atomic version when possible.
+///
+/// # Timeouts (mandatory)
+///
+/// Every implementation MUST enforce a wall-clock timeout on both read
+/// and write operations. The handle does not apply a dispatcher-side
+/// deadline; the backend is the only place where a stuck call can be
+/// bounded.
+///
+/// - Implementations using a pooled async client (e.g. sqlx) MUST apply
+///   a server-side statement-level timeout at the start of every
+///   transaction.
+/// - Implementations using synchronous, uninterruptible calls (e.g.
+///   MDBX) MUST perform in-body deadline checks between iteration
+///   steps. Single-step point lookups may rely on the backend's native
+///   latency bounds and skip the check.
+/// - Timeouts MUST be configurable per operation class (read, write)
+///   via builder methods on the connector. Defaults SHOULD be 500ms
+///   for reads and 2s for writes unless the backend's latency profile
+///   requires different values.
+/// - Timeout expiry MUST return an error at any callable-abort point
+///   (pre-commit iteration, async cancellation, pooled-client
+///   server-side cancellation) and MUST NOT return stale or partial
+///   results from such an abort.
+/// - For synchronous, uninterruptible commits (e.g. MDBX writes), the
+///   implementation MAY complete an in-flight commit past the
+///   deadline; in that case it MUST log the overrun and the
+///   `write_timeout` acts as an SLO + alerting signal rather than a
+///   hard abort. The commit, if it completes, is authoritative.
+/// - Where abort IS possible, the implementation MUST ensure the
+///   underlying transaction rolls back on timeout so backend state
+///   remains consistent.
+///
+/// Backends that cannot honor this contract (e.g. a toy in-memory stub
+/// used for tests) may document their exemption explicitly in their
+/// own type docs; the trait docs remain the authoritative contract.
 pub trait ColdStorageBackend: ColdStorageRead + ColdStorageWrite {
     /// Read and remove all blocks above the given block number.
     ///
