@@ -16,7 +16,7 @@
 use crate::{
     BlockData, ColdReceipt, ColdResult, ColdStorageBackend, ColdStorageError, Confirmed, Filter,
     HeaderSpecifier, LogStream, ReceiptSpecifier, RpcLog, SignetEventsSpecifier, StreamParams,
-    TransactionSpecifier, ZenithHeaderSpecifier, cache::ColdCache,
+    TransactionSpecifier, ZenithHeaderSpecifier, cache::ColdCache, metrics,
 };
 use alloy::primitives::{B256, BlockNumber};
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
@@ -119,12 +119,13 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
     }
 
     /// Spawn a read task under the `read_sem` permit.
-    async fn spawn_read<T, F, Fut>(&self, f: F) -> ColdResult<T>
+    async fn spawn_read<T, F, Fut>(&self, op: &'static str, f: F) -> ColdResult<T>
     where
         T: Send + 'static,
         F: FnOnce(Arc<Inner<B>>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ColdResult<T>> + Send,
     {
+        let wait = Instant::now();
         let permit = self
             .inner
             .read_sem
@@ -132,13 +133,22 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
             .acquire_owned()
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?;
+        metrics::record_permit_wait("read", wait.elapsed());
+        metrics::inc_in_flight("read");
         let inner = Arc::clone(&self.inner);
         self.inner
             .tracker
             .spawn(
                 async move {
                     let _p = permit;
-                    f(inner).await
+                    let start = Instant::now();
+                    let result = f(inner).await;
+                    metrics::record_op_duration(op, start.elapsed());
+                    if let Err(ref e) = result {
+                        metrics::record_op_error(op, e.kind());
+                    }
+                    metrics::dec_in_flight("read");
+                    result
                 }
                 .in_current_span(),
             )
@@ -156,12 +166,13 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
     ///
     /// Drop order inside the spawned task releases the drain before the write
     /// permit, so readers regain access immediately once the write completes.
-    async fn spawn_write<T, F, Fut>(&self, f: F) -> ColdResult<T>
+    async fn spawn_write<T, F, Fut>(&self, op: &'static str, f: F) -> ColdResult<T>
     where
         T: Send + 'static,
         F: FnOnce(Arc<Inner<B>>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ColdResult<T>> + Send,
     {
+        let wait = Instant::now();
         let write_permit = self
             .inner
             .write_sem
@@ -169,6 +180,9 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
             .acquire_owned()
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?;
+        metrics::record_permit_wait("write", wait.elapsed());
+
+        let drain_wait = Instant::now();
         let drain = self
             .inner
             .read_sem
@@ -176,6 +190,9 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
             .acquire_many_owned(MAX_CONCURRENT_READERS as u32)
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?;
+        metrics::record_permit_wait("drain", drain_wait.elapsed());
+        metrics::inc_in_flight("write");
+
         let inner = Arc::clone(&self.inner);
         self.inner
             .tracker
@@ -183,7 +200,14 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
                 async move {
                     let _w = write_permit;
                     let _d = drain;
-                    f(inner).await
+                    let start = Instant::now();
+                    let result = f(inner).await;
+                    metrics::record_op_duration(op, start.elapsed());
+                    if let Err(ref e) = result {
+                        metrics::record_op_error(op, e.kind());
+                    }
+                    metrics::dec_in_flight("write");
+                    result
                 }
                 .in_current_span(),
             )
@@ -198,12 +222,14 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
     /// Get a header by specifier.
     #[tracing::instrument(skip(self, spec), fields(op = "get_header"))]
     pub async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<SealedHeader>> {
+        let op_start = Instant::now();
         if let HeaderSpecifier::Number(n) = &spec
             && let Some(hit) = self.inner.cache.lock().await.get_header(n)
         {
+            metrics::record_op_duration("get_header", op_start.elapsed());
             return Ok(Some(hit));
         }
-        self.spawn_read(move |inner| async move {
+        self.spawn_read("get_header", move |inner| async move {
             let result = inner.backend.get_header(spec).await;
             if let Ok(Some(ref h)) = result {
                 inner.cache.lock().await.put_header(h.number, h.clone());
@@ -232,7 +258,10 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         &self,
         specs: Vec<HeaderSpecifier>,
     ) -> ColdResult<Vec<Option<SealedHeader>>> {
-        self.spawn_read(move |inner| async move { inner.backend.get_headers(specs).await }).await
+        self.spawn_read("get_headers", move |inner| async move {
+            inner.backend.get_headers(specs).await
+        })
+        .await
     }
 
     // ==========================================================================
@@ -245,12 +274,14 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         &self,
         spec: TransactionSpecifier,
     ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
+        let op_start = Instant::now();
         if let TransactionSpecifier::BlockAndIndex { block, index } = &spec
             && let Some(hit) = self.inner.cache.lock().await.get_tx(&(*block, *index))
         {
+            metrics::record_op_duration("get_transaction", op_start.elapsed());
             return Ok(Some(hit));
         }
-        self.spawn_read(move |inner| async move {
+        self.spawn_read("get_transaction", move |inner| async move {
             let result = inner.backend.get_transaction(spec).await;
             if let Ok(Some(ref c)) = result {
                 let meta = c.meta();
@@ -294,18 +325,18 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         &self,
         block: BlockNumber,
     ) -> ColdResult<Vec<RecoveredTx>> {
-        self.spawn_read(
-            move |inner| async move { inner.backend.get_transactions_in_block(block).await },
-        )
+        self.spawn_read("get_transactions_in_block", move |inner| async move {
+            inner.backend.get_transactions_in_block(block).await
+        })
         .await
     }
 
     /// Get the transaction count for a block.
     #[tracing::instrument(skip(self), fields(op = "get_transaction_count"))]
     pub async fn get_transaction_count(&self, block: BlockNumber) -> ColdResult<u64> {
-        self.spawn_read(
-            move |inner| async move { inner.backend.get_transaction_count(block).await },
-        )
+        self.spawn_read("get_transaction_count", move |inner| async move {
+            inner.backend.get_transaction_count(block).await
+        })
         .await
     }
 
@@ -316,12 +347,14 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
     /// Get a receipt by specifier.
     #[tracing::instrument(skip(self, spec), fields(op = "get_receipt"))]
     pub async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<ColdReceipt>> {
+        let op_start = Instant::now();
         if let ReceiptSpecifier::BlockAndIndex { block, index } = &spec
             && let Some(hit) = self.inner.cache.lock().await.get_receipt(&(*block, *index))
         {
+            metrics::record_op_duration("get_receipt", op_start.elapsed());
             return Ok(Some(hit));
         }
-        self.spawn_read(move |inner| async move {
+        self.spawn_read("get_receipt", move |inner| async move {
             let result = inner.backend.get_receipt(spec).await;
             if let Ok(Some(ref c)) = result {
                 inner
@@ -352,9 +385,9 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
     /// Get all receipts in a block.
     #[tracing::instrument(skip(self), fields(op = "get_receipts_in_block"))]
     pub async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<ColdReceipt>> {
-        self.spawn_read(
-            move |inner| async move { inner.backend.get_receipts_in_block(block).await },
-        )
+        self.spawn_read("get_receipts_in_block", move |inner| async move {
+            inner.backend.get_receipts_in_block(block).await
+        })
         .await
     }
 
@@ -368,8 +401,10 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         &self,
         spec: SignetEventsSpecifier,
     ) -> ColdResult<Vec<DbSignetEvent>> {
-        self.spawn_read(move |inner| async move { inner.backend.get_signet_events(spec).await })
-            .await
+        self.spawn_read("get_signet_events", move |inner| async move {
+            inner.backend.get_signet_events(spec).await
+        })
+        .await
     }
 
     /// Get signet events in a block.
@@ -407,8 +442,10 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         &self,
         spec: ZenithHeaderSpecifier,
     ) -> ColdResult<Option<DbZenithHeader>> {
-        self.spawn_read(move |inner| async move { inner.backend.get_zenith_header(spec).await })
-            .await
+        self.spawn_read("get_zenith_header_by_spec", move |inner| async move {
+            inner.backend.get_zenith_header(spec).await
+        })
+        .await
     }
 
     /// Get zenith headers by specifier.
@@ -417,8 +454,10 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         &self,
         spec: ZenithHeaderSpecifier,
     ) -> ColdResult<Vec<DbZenithHeader>> {
-        self.spawn_read(move |inner| async move { inner.backend.get_zenith_headers(spec).await })
-            .await
+        self.spawn_read("get_zenith_headers", move |inner| async move {
+            inner.backend.get_zenith_headers(spec).await
+        })
+        .await
     }
 
     /// Get zenith headers in a range of blocks.
@@ -440,8 +479,10 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
     /// `(block_number, tx_index, log_index)`.
     #[tracing::instrument(skip(self, filter), fields(op = "get_logs"))]
     pub async fn get_logs(&self, filter: Filter, max_logs: usize) -> ColdResult<Vec<RpcLog>> {
-        self.spawn_read(move |inner| async move { inner.backend.get_logs(&filter, max_logs).await })
-            .await
+        self.spawn_read("get_logs", move |inner| async move {
+            inner.backend.get_logs(&filter, max_logs).await
+        })
+        .await
     }
 
     /// Stream logs matching a filter.
@@ -458,6 +499,7 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         max_logs: usize,
         deadline: Duration,
     ) -> ColdResult<LogStream> {
+        let wait = Instant::now();
         let permit = self
             .inner
             .stream_sem
@@ -465,6 +507,7 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
             .acquire_owned()
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?;
+        metrics::record_permit_wait("stream", wait.elapsed());
 
         let from = filter.get_from_block().unwrap_or(0);
         // Setup reads (resolving the open-ended `to` block) intentionally
@@ -487,12 +530,16 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         let deadline_instant = Instant::now() + effective;
         let (sender, rx) = mpsc::channel(STREAM_CHANNEL_BUFFER);
         let inner = Arc::clone(&self.inner);
+        metrics::inc_in_flight("stream");
+        let started = Instant::now();
         self.inner.tracker.spawn(
             async move {
                 let _p = permit;
                 let params =
                     StreamParams { from, to, max_logs, sender, deadline: deadline_instant };
                 inner.backend.produce_log_stream(&filter, params).await;
+                metrics::record_stream_lifetime(started.elapsed());
+                metrics::dec_in_flight("stream");
             }
             .in_current_span(),
         );
@@ -506,7 +553,10 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
     /// Get the latest block number in storage.
     #[tracing::instrument(skip(self), fields(op = "get_latest_block"))]
     pub async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
-        self.spawn_read(move |inner| async move { inner.backend.get_latest_block().await }).await
+        self.spawn_read("get_latest_block", move |inner| async move {
+            inner.backend.get_latest_block().await
+        })
+        .await
     }
 
     // ==========================================================================
@@ -516,13 +566,19 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
     /// Append a single block to cold storage.
     #[tracing::instrument(skip(self, data), fields(op = "append_block"))]
     pub async fn append_block(&self, data: BlockData) -> ColdResult<()> {
-        self.spawn_write(move |inner| async move { inner.backend.append_block(data).await }).await
+        self.spawn_write("append_block", move |inner| async move {
+            inner.backend.append_block(data).await
+        })
+        .await
     }
 
     /// Append multiple blocks to cold storage.
     #[tracing::instrument(skip(self, data), fields(op = "append_blocks"))]
     pub async fn append_blocks(&self, data: Vec<BlockData>) -> ColdResult<()> {
-        self.spawn_write(move |inner| async move { inner.backend.append_blocks(data).await }).await
+        self.spawn_write("append_blocks", move |inner| async move {
+            inner.backend.append_blocks(data).await
+        })
+        .await
     }
 
     /// Truncate all data above the given block number.
@@ -531,7 +587,7 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
     /// cached lookups above `block`.
     #[tracing::instrument(skip(self), fields(op = "truncate_above"))]
     pub async fn truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
-        self.spawn_write(move |inner| async move {
+        self.spawn_write("truncate_above", move |inner| async move {
             let result = inner.backend.truncate_above(block).await;
             if result.is_ok() {
                 inner.cache.lock().await.invalidate_above(block);
@@ -547,7 +603,7 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
     /// then truncates. Index 0 = block+1, index 1 = block+2, etc.
     #[tracing::instrument(skip(self), fields(op = "drain_above"))]
     pub async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
-        self.spawn_write(move |inner| async move {
+        self.spawn_write("drain_above", move |inner| async move {
             let result = inner.backend.drain_above(block).await;
             if result.is_ok() {
                 inner.cache.lock().await.invalidate_above(block);

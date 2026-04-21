@@ -57,4 +57,17 @@ impl ColdStorageError {
     {
         Self::Backend(Box::new(error))
     }
+
+    /// Short, stable label identifying the error variant. Used as a metric
+    /// label.
+    pub(crate) const fn kind(&self) -> &'static str {
+        match self {
+            Self::Backend(_) => "backend",
+            Self::NotFound(_) => "not_found",
+            Self::TooManyLogs { .. } => "too_many_logs",
+            Self::StreamDeadlineExceeded => "stream_deadline",
+            Self::ReorgDetected => "reorg",
+            Self::TaskTerminated => "task_terminated",
+        }
+    }
 }

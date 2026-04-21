@@ -136,6 +136,7 @@
 
 mod cache;
 mod error;
+mod metrics;
 pub use error::{ColdResult, ColdStorageError};
 mod handle;
 pub use handle::ColdStorage;
