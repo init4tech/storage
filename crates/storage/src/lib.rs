@@ -82,8 +82,7 @@ pub use signet_cold_sql::SqlConnector;
 
 // Re-export key types for convenience
 pub use signet_cold::{
-    ColdStorageBackend, ColdStorageError, ColdStorageHandle, ColdStorageRead, ColdStorageTask,
-    ColdStorageWrite,
+    ColdStorage, ColdStorageBackend, ColdStorageError, ColdStorageRead, ColdStorageWrite,
 };
 pub use signet_cold_mdbx::MdbxColdBackend;
 pub use signet_hot::{

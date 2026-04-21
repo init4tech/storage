@@ -5,8 +5,8 @@
 //! a custom backend, call the test functions with your backend instance.
 
 use crate::{
-    BlockData, ColdResult, ColdStorageBackend, ColdStorageError, ColdStorageHandle,
-    ColdStorageTask, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog, TransactionSpecifier,
+    BlockData, ColdResult, ColdStorage, ColdStorageBackend, ColdStorageError, Filter,
+    HeaderSpecifier, ReceiptSpecifier, RpcLog, TransactionSpecifier,
 };
 use alloy::{
     consensus::{
@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 /// This is the main entry point for testing a custom backend implementation.
 pub async fn conformance<B: ColdStorageBackend>(backend: B) -> ColdResult<()> {
     let cancel = CancellationToken::new();
-    let handle = ColdStorageTask::spawn(backend, cancel.clone());
+    let handle = ColdStorage::new(backend, cancel.clone());
     test_empty_storage(&handle).await?;
     test_append_and_read_header(&handle).await?;
     test_header_hash_lookup(&handle).await?;
@@ -97,7 +97,7 @@ fn make_test_block_with_txs(block_number: BlockNumber, tx_count: usize) -> Block
 }
 
 /// Test that empty storage returns None/empty for all lookups.
-pub async fn test_empty_storage(handle: &ColdStorageHandle) -> ColdResult<()> {
+pub async fn test_empty_storage<B: ColdStorageBackend>(handle: &ColdStorage<B>) -> ColdResult<()> {
     assert!(handle.get_header(HeaderSpecifier::Number(0)).await?.is_none());
     assert!(handle.get_header(HeaderSpecifier::Hash(B256::ZERO)).await?.is_none());
     assert!(handle.get_latest_block().await?.is_none());
@@ -108,7 +108,9 @@ pub async fn test_empty_storage(handle: &ColdStorageHandle) -> ColdResult<()> {
 }
 
 /// Test basic append and read for headers.
-pub async fn test_append_and_read_header(handle: &ColdStorageHandle) -> ColdResult<()> {
+pub async fn test_append_and_read_header<B: ColdStorageBackend>(
+    handle: &ColdStorage<B>,
+) -> ColdResult<()> {
     let block_data = make_test_block(100);
     let expected_header = block_data.header.clone();
 
@@ -121,7 +123,9 @@ pub async fn test_append_and_read_header(handle: &ColdStorageHandle) -> ColdResu
 }
 
 /// Test header lookup by hash.
-pub async fn test_header_hash_lookup(handle: &ColdStorageHandle) -> ColdResult<()> {
+pub async fn test_header_hash_lookup<B: ColdStorageBackend>(
+    handle: &ColdStorage<B>,
+) -> ColdResult<()> {
     let block_data = make_test_block(101);
     let header_hash = block_data.header.hash();
 
@@ -138,7 +142,9 @@ pub async fn test_header_hash_lookup(handle: &ColdStorageHandle) -> ColdResult<(
 }
 
 /// Test transaction lookups by hash and by block+index.
-pub async fn test_transaction_lookups(handle: &ColdStorageHandle) -> ColdResult<()> {
+pub async fn test_transaction_lookups<B: ColdStorageBackend>(
+    handle: &ColdStorage<B>,
+) -> ColdResult<()> {
     let block_data = make_test_block(200);
 
     handle.append_block(block_data).await?;
@@ -151,7 +157,9 @@ pub async fn test_transaction_lookups(handle: &ColdStorageHandle) -> ColdResult<
 }
 
 /// Test receipt lookups.
-pub async fn test_receipt_lookups(handle: &ColdStorageHandle) -> ColdResult<()> {
+pub async fn test_receipt_lookups<B: ColdStorageBackend>(
+    handle: &ColdStorage<B>,
+) -> ColdResult<()> {
     let block_data = make_test_block(201);
 
     handle.append_block(block_data).await?;
@@ -163,7 +171,9 @@ pub async fn test_receipt_lookups(handle: &ColdStorageHandle) -> ColdResult<()> 
 }
 
 /// Test that transaction and receipt lookups return correct metadata.
-pub async fn test_confirmation_metadata(handle: &ColdStorageHandle) -> ColdResult<()> {
+pub async fn test_confirmation_metadata<B: ColdStorageBackend>(
+    handle: &ColdStorage<B>,
+) -> ColdResult<()> {
     let block = make_test_block_with_txs(600, 3);
     let expected_hash = block.header.hash();
     let tx_hashes: Vec<_> = block.transactions.iter().map(|tx| *tx.tx_hash()).collect();
@@ -230,7 +240,7 @@ pub async fn test_confirmation_metadata(handle: &ColdStorageHandle) -> ColdResul
 }
 
 /// Test truncation removes data correctly.
-pub async fn test_truncation(handle: &ColdStorageHandle) -> ColdResult<()> {
+pub async fn test_truncation<B: ColdStorageBackend>(handle: &ColdStorage<B>) -> ColdResult<()> {
     // Append blocks 300, 301, 302
     handle.append_block(make_test_block(300)).await?;
     handle.append_block(make_test_block(301)).await?;
@@ -253,7 +263,7 @@ pub async fn test_truncation(handle: &ColdStorageHandle) -> ColdResult<()> {
 }
 
 /// Test batch append.
-pub async fn test_batch_append(handle: &ColdStorageHandle) -> ColdResult<()> {
+pub async fn test_batch_append<B: ColdStorageBackend>(handle: &ColdStorage<B>) -> ColdResult<()> {
     let blocks = vec![make_test_block(400), make_test_block(401), make_test_block(402)];
 
     handle.append_blocks(blocks).await?;
@@ -267,7 +277,9 @@ pub async fn test_batch_append(handle: &ColdStorageHandle) -> ColdResult<()> {
 
 /// Test ColdReceipt metadata: gas_used, first_log_index, tx_hash,
 /// block_hash, block_number, transaction_index, from.
-pub async fn test_cold_receipt_metadata(handle: &ColdStorageHandle) -> ColdResult<()> {
+pub async fn test_cold_receipt_metadata<B: ColdStorageBackend>(
+    handle: &ColdStorage<B>,
+) -> ColdResult<()> {
     // Block with 3 receipts having 2, 3, and 1 logs respectively.
     let header = Header { number: 700, ..Default::default() };
     let sealed = header.seal_slow();
@@ -376,7 +388,7 @@ fn make_test_block_with_receipts(block_number: BlockNumber, receipts: Vec<Receip
 }
 
 /// Test get_logs with various filter combinations.
-pub async fn test_get_logs(handle: &ColdStorageHandle) -> ColdResult<()> {
+pub async fn test_get_logs<B: ColdStorageBackend>(handle: &ColdStorage<B>) -> ColdResult<()> {
     let addr_a = Address::with_last_byte(0xAA);
     let addr_b = Address::with_last_byte(0xBB);
     let topic0_transfer = B256::with_last_byte(0x01);
@@ -535,9 +547,8 @@ async fn collect_stream(mut stream: crate::LogStream) -> ColdResult<Vec<RpcLog>>
 /// combinations from the existing test_get_logs suite.
 ///
 /// Uses block numbers 850-851 to avoid collisions with test_get_logs data
-/// (800-801). Streaming is tested via [`ColdStorageHandle`] since the
-/// streaming loop lives in [`ColdStorageTask`].
-pub async fn test_stream_logs(handle: &ColdStorageHandle) -> ColdResult<()> {
+/// (800-801). Streaming is tested via [`ColdStorage<B>`].
+pub async fn test_stream_logs<B: ColdStorageBackend>(handle: &ColdStorage<B>) -> ColdResult<()> {
     let addr_a = Address::with_last_byte(0xAA);
     let addr_b = Address::with_last_byte(0xBB);
     let topic0_transfer = B256::with_last_byte(0x01);
@@ -632,7 +643,7 @@ pub async fn test_stream_logs(handle: &ColdStorageHandle) -> ColdResult<()> {
 /// `first_log_index`, `gas_used`, `tx_hash`, `from`, and block metadata —
 /// the same fields tested by [`test_cold_receipt_metadata`] for the
 /// single-receipt path.
-pub async fn test_drain_above(handle: &ColdStorageHandle) -> ColdResult<()> {
+pub async fn test_drain_above<B: ColdStorageBackend>(handle: &ColdStorage<B>) -> ColdResult<()> {
     // Block 900: anchor (not drained).
     handle.append_block(make_test_block(900)).await?;
 

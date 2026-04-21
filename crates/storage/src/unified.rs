@@ -6,10 +6,7 @@
 
 use crate::StorageResult;
 use alloy::primitives::BlockNumber;
-use signet_cold::{
-    BlockData, ColdReceipt, ColdStorageBackend, ColdStorageError, ColdStorageHandle,
-    ColdStorageReadHandle, ColdStorageTask,
-};
+use signet_cold::{BlockData, ColdReceipt, ColdStorage, ColdStorageBackend, ColdStorageError};
 use signet_hot::{
     HistoryRead, HistoryWrite, HotKv,
     model::{HotKvReadError, HotKvWrite, RevmRead},
@@ -36,40 +33,30 @@ pub struct DrainedBlock {
 ///
 /// # Write Semantics
 ///
-/// - Hot storage writes are synchronous and use database transactions
-/// - Cold storage writes are dispatched synchronously via the handle (non-blocking)
-/// - On `append_blocks`, hot storage is written first, then cold storage is notified
+/// - Hot storage writes are synchronous and use database transactions.
+/// - Cold storage writes are awaited through a [`ColdStorage`] handle, which
+///   serializes writes internally.
 ///
 /// # Error Handling
 ///
-/// Both hot storage and cold storage errors are returned. Cold storage dispatch
-/// fails immediately if the channel is full (non-blocking).
+/// Both hot storage and cold storage errors are returned. Callers decide
+/// whether cold-storage failures should halt execution or be retried via
+/// [`replay_to_cold`](Self::replay_to_cold).
 ///
 /// # Backpressure and Failure Recovery
 ///
-/// Cold storage dispatch uses non-blocking sends. Two distinct errors indicate
-/// dispatch failure:
+/// Cold storage writes are serialized by the handle's write semaphore. If the
+/// backend is slow, `append_blocks` will block the caller until capacity is
+/// available. If the handle is shutting down, writes return
+/// [`ColdStorageError::TaskTerminated`].
 ///
-/// - [`ColdStorageError::Backpressure`]: Channel full. The task is alive but
-///   cannot keep up. Transient; may resolve on its own or with retry.
-/// - [`ColdStorageError::TaskTerminated`]: Channel closed. The task has stopped
-///   and must be restarted. Persistent until recovery.
-///
-/// **Important**: Hot storage is always authoritative. When cold dispatch fails:
+/// **Important**: Hot storage is always authoritative. When cold writes fail:
 ///
 /// 1. Hot storage already contains the committed data
-/// 2. Cold storage may be behind (backpressure) or unavailable (task failure)
+/// 2. Cold storage may lag or be unavailable
 /// 3. Use [`cold_lag`](Self::cold_lag) to detect gaps between hot and cold
 /// 4. Use [`replay_to_cold`](Self::replay_to_cold) to recover cold storage
 ///
-/// Callers should decide based on their requirements and the error type:
-///
-/// - **Backpressure**: Log and continue, or retry with backoff. The task will
-///   catch up eventually. Use `cold_lag()` to monitor.
-/// - **TaskTerminated**: The task must be restarted. Halt or switch to degraded
-///   mode until recovery, then replay missing blocks.
-///
-/// [`ColdStorageError::Backpressure`]: signet_cold::ColdStorageError::Backpressure
 /// [`ColdStorageError::TaskTerminated`]: signet_cold::ColdStorageError::TaskTerminated
 ///
 /// # Example
@@ -80,39 +67,30 @@ pub struct DrainedBlock {
 /// let storage = UnifiedStorage::new(hot_db, cold_handle);
 ///
 /// // Append executed blocks (takes ownership)
-/// storage.append_blocks(blocks)?;
+/// storage.append_blocks(blocks).await?;
 ///
 /// // Handle reorgs
-/// storage.unwind_above(reorg_block)?;
+/// storage.unwind_above(reorg_block).await?;
 /// ```
 #[derive(Debug)]
-pub struct UnifiedStorage<H: HotKv> {
+pub struct UnifiedStorage<H: HotKv, B: ColdStorageBackend> {
     hot: H,
-    cold: ColdStorageHandle,
+    cold: ColdStorage<B>,
 }
 
-impl<H: HotKv> UnifiedStorage<H> {
+impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B> {
     /// Create a new unified storage instance.
-    pub const fn new(hot: H, cold: ColdStorageHandle) -> Self {
+    pub const fn new(hot: H, cold: ColdStorage<B>) -> Self {
         Self { hot, cold }
     }
 
     /// Spawn a unified storage instance from hot and cold backends.
     ///
-    /// This spawns the [`ColdStorageTask`] internally and returns a
-    /// fully-assembled [`UnifiedStorage`]. The cold storage task runs
-    /// until the cancellation token is triggered or all handles are
-    /// dropped.
-    ///
-    /// Use [`new`](Self::new) instead if you need manual control over
-    /// the cold storage task lifecycle or need to share the
-    /// [`ColdStorageHandle`] before constructing unified storage.
-    pub fn spawn<B: ColdStorageBackend>(
-        hot: H,
-        cold_backend: B,
-        cancel_token: CancellationToken,
-    ) -> Self {
-        let cold = ColdStorageTask::spawn(cold_backend, cancel_token);
+    /// Constructs a [`ColdStorage`] wrapping `cold_backend` and returns a
+    /// fully-assembled [`UnifiedStorage`]. The cold storage handle retains
+    /// the `cancel_token` for future shutdown coordination.
+    pub fn spawn(hot: H, cold_backend: B, cancel_token: CancellationToken) -> Self {
+        let cold = ColdStorage::new(cold_backend, cancel_token);
         Self::new(hot, cold)
     }
 
@@ -127,16 +105,16 @@ impl<H: HotKv> UnifiedStorage<H> {
     }
 
     /// Get a reference to the cold storage handle.
-    pub const fn cold(&self) -> &ColdStorageHandle {
+    pub const fn cold(&self) -> &ColdStorage<B> {
         &self.cold
     }
 
-    /// Get a read-only cold storage handle.
+    /// Get a clone of the cold storage handle.
     ///
-    /// The returned handle can only perform read operations and cannot modify
-    /// storage. Use this for components that only need to query historical data.
-    pub fn cold_reader(&self) -> ColdStorageReadHandle {
-        self.cold.reader()
+    /// Cloning is cheap (reference-counted). Components that only perform
+    /// read operations should use this instead of borrowing.
+    pub fn cold_reader(&self) -> ColdStorage<B> {
+        self.cold.clone()
     }
 
     /// Create a read-only transaction for hot storage.
@@ -149,33 +127,12 @@ impl<H: HotKv> UnifiedStorage<H> {
     }
 
     /// Create a revm-compatible read-only database adapter.
-    ///
-    /// The returned [`RevmRead`] implements revm's `Database` and `DatabaseRef`
-    /// traits, allowing it to be used directly with revm for EVM execution.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the transaction cannot be created.
     pub fn revm_reader(&self) -> StorageResult<RevmRead<H::RoTx>> {
         self.hot.revm_reader().map_err(Into::into)
     }
 
     /// Create a revm-compatible read-only database adapter that reads state
     /// at a specific block height.
-    ///
-    /// The returned [`RevmRead`] uses history and change set tables to
-    /// reconstruct state as it was at `height`.
-    ///
-    /// # Errors
-    ///
-    /// - [`NoBlocks`] if the database has no blocks.
-    /// - [`HeightOutOfRange`] if `height` is outside the
-    ///   stored block range.
-    /// - [`Inner`] if the transaction cannot be created.
-    ///
-    /// [`NoBlocks`]: signet_hot::model::HotKvError::NoBlocks
-    /// [`HeightOutOfRange`]: signet_hot::model::HotKvError::HeightOutOfRange
-    /// [`Inner`]: signet_hot::model::HotKvError::Inner
     pub fn revm_reader_at_height(&self, height: u64) -> StorageResult<RevmRead<H::RoTx>> {
         self.hot.revm_reader_at_height(height).map_err(Into::into)
     }
@@ -184,24 +141,18 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// This method:
     /// 1. Writes to hot storage synchronously (validates chain extension, updates state)
-    /// 2. Dispatches writes to cold storage synchronously (non-blocking)
+    /// 2. Awaits cold storage write via the [`ColdStorage`] handle
     ///
     /// # Errors
     ///
     /// - [`Hot`]: Hot storage write failed. No data was written.
-    /// - [`Cold`]: Hot storage succeeded but cold dispatch failed.
-    ///   Check the inner [`ColdStorageError`] variant:
-    ///   - [`Backpressure`]: Task alive but channel full. May retry or continue.
-    ///   - [`TaskTerminated`]: Task stopped. Requires restart.
-    ///
-    /// In both cold error cases, data is safely in hot storage and can be
-    /// recovered later via [`replay_to_cold`](Self::replay_to_cold).
+    /// - [`Cold`]: Hot storage succeeded but cold write failed. Data is safely
+    ///   in hot storage and can be recovered later via
+    ///   [`replay_to_cold`](Self::replay_to_cold).
     ///
     /// [`Hot`]: crate::StorageError::Hot
     /// [`Cold`]: crate::StorageError::Cold
-    /// [`Backpressure`]: signet_cold::ColdStorageError::Backpressure
-    /// [`TaskTerminated`]: signet_cold::ColdStorageError::TaskTerminated
-    pub fn append_blocks(&self, blocks: Vec<ExecutedBlock>) -> StorageResult<()> {
+    pub async fn append_blocks(&self, blocks: Vec<ExecutedBlock>) -> StorageResult<()> {
         if blocks.is_empty() {
             return Ok(());
         }
@@ -209,8 +160,9 @@ impl<H: HotKv> UnifiedStorage<H> {
         // 1. Write to hot storage (borrows blocks)
         self.write_hot(&blocks)?;
 
-        // 2. Dispatch to cold storage (consumes blocks)
-        self.dispatch_cold(blocks)
+        // 2. Write to cold storage (consumes blocks)
+        let cold_data: Vec<_> = blocks.into_iter().map(BlockData::from).collect();
+        self.cold.append_blocks(cold_data).await.map_err(Into::into)
     }
 
     /// Write blocks to hot storage.
@@ -225,14 +177,6 @@ impl<H: HotKv> UnifiedStorage<H> {
         Ok(())
     }
 
-    /// Dispatch blocks to cold storage synchronously (non-blocking).
-    ///
-    /// Consumes the blocks to avoid cloning.
-    fn dispatch_cold(&self, blocks: Vec<ExecutedBlock>) -> StorageResult<()> {
-        let cold_data: Vec<_> = blocks.into_iter().map(BlockData::from).collect();
-        self.cold.dispatch_append_blocks(cold_data).map_err(Into::into)
-    }
-
     /// Read and remove all blocks above the given block number.
     ///
     /// This combines reading the about-to-be-removed data with unwinding,
@@ -241,9 +185,8 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// # Implementation
     ///
     /// 1. Reads headers from hot storage (sync)
-    /// 2. Reads receipts from cold storage (async, best-effort)
-    /// 3. Unwinds hot storage (sync)
-    /// 4. Drains cold storage (async, best-effort)
+    /// 2. Unwinds hot storage (sync)
+    /// 3. Drains cold storage (async, best-effort)
     ///
     /// # Cold Lag
     ///
@@ -254,14 +197,12 @@ impl<H: HotKv> UnifiedStorage<H> {
     /// # Errors
     ///
     /// - [`Hot`]: Hot storage read or unwind failed.
-    /// - [`Cold`]: Hot storage unwound but cold truncate dispatch failed.
+    /// - [`Cold`]: Hot storage unwound but cold drain failed.
     ///
     /// [`Hot`]: crate::StorageError::Hot
     /// [`Cold`]: crate::StorageError::Cold
     pub async fn drain_above(&self, block: BlockNumber) -> StorageResult<Vec<DrainedBlock>> {
         // 1–2. Read headers and unwind hot storage synchronously.
-        //      Extracted to a sync helper so the `!Send` write transaction
-        //      does not appear in the async state machine.
         let headers = self.unwind_hot_above(block)?;
         if headers.is_empty() {
             return Ok(Vec::new());
@@ -271,8 +212,6 @@ impl<H: HotKv> UnifiedStorage<H> {
         let cold_receipts = self.cold.drain_above(block).await.unwrap_or_default();
 
         // 4. Assemble drained blocks (zip headers with receipts, default empty).
-        // Pad cold_receipts to match headers length so zip consumes both
-        // without cloning.
         let drained = headers
             .into_iter()
             .zip(cold_receipts.into_iter().chain(std::iter::repeat_with(Vec::new)))
@@ -302,32 +241,30 @@ impl<H: HotKv> UnifiedStorage<H> {
     ///
     /// This method:
     /// 1. Unwinds hot storage synchronously (restores previous state)
-    /// 2. Truncates cold storage synchronously (non-blocking dispatch)
+    /// 2. Truncates cold storage via the [`ColdStorage`] handle
     ///
     /// # Errors
     ///
     /// - [`Hot`]: Hot storage unwind failed. State is unchanged.
-    /// - [`Cold`]: Hot storage unwound but cold truncate dispatch
-    ///   failed. Check the inner [`ColdStorageError`] variant:
-    ///   - [`Backpressure`]: Task alive but channel full.
-    ///   - [`TaskTerminated`]: Task stopped.
-    ///
-    /// Cold storage may temporarily contain stale blocks until the truncate is
-    /// replayed. This is safe: hot storage is authoritative.
+    /// - [`Cold`]: Hot storage unwound but cold truncate failed.
     ///
     /// [`Hot`]: crate::StorageError::Hot
     /// [`Cold`]: crate::StorageError::Cold
-    /// [`Backpressure`]: signet_cold::ColdStorageError::Backpressure
-    /// [`TaskTerminated`]: signet_cold::ColdStorageError::TaskTerminated
-    pub fn unwind_above(&self, block: BlockNumber) -> StorageResult<()> {
-        // 1. Unwind hot storage synchronously
-        let writer = self.hot.writer()?;
+    pub async fn unwind_above(&self, block: BlockNumber) -> StorageResult<()> {
+        // 1. Unwind hot storage synchronously (helper scopes the !Send writer)
+        self.unwind_hot_sync(block)?;
 
+        // 2. Truncate cold storage
+        self.cold.truncate_above(block).await.map_err(Into::into)
+    }
+
+    /// Unwind hot storage to `block`. Kept sync so the `!Send` write
+    /// transaction does not leak into any async state machine.
+    fn unwind_hot_sync(&self, block: BlockNumber) -> StorageResult<()> {
+        let writer = self.hot.writer()?;
         writer.unwind_above(block).map_err(|e| e.map_db(|e| e.into_hot_kv_error()))?;
         writer.raw_commit().map_err(|e| e.into_hot_kv_error())?;
-
-        // 2. Truncate cold storage synchronously (non-blocking dispatch)
-        self.cold.dispatch_truncate_above(block).map_err(Into::into)
+        Ok(())
     }
 
     /// Check how far behind cold storage is compared to hot storage.
@@ -369,20 +306,27 @@ impl<H: HotKv> UnifiedStorage<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signet_cold_mdbx::MdbxColdBackend;
     use signet_hot_mdbx::DatabaseEnv;
 
-    /// Compile-time canaries: all async methods on `UnifiedStorage<DatabaseEnv>`
+    /// Compile-time canaries: all async methods on `UnifiedStorage<DatabaseEnv, MdbxColdBackend>`
     /// must return `Send` futures, even though MDBX write transactions are
     /// `!Send`. If a `!Send` type leaks into the async state machine, these
     /// will fail to compile.
     fn _assert_send<T: Send>(_: T) {}
-    fn _drain_above_is_send(s: &UnifiedStorage<DatabaseEnv>) {
+    fn _drain_above_is_send(s: &UnifiedStorage<DatabaseEnv, MdbxColdBackend>) {
         _assert_send(s.drain_above(0));
     }
-    fn _cold_lag_is_send(s: &UnifiedStorage<DatabaseEnv>) {
+    fn _cold_lag_is_send(s: &UnifiedStorage<DatabaseEnv, MdbxColdBackend>) {
         _assert_send(s.cold_lag());
     }
-    fn _replay_to_cold_is_send(s: &UnifiedStorage<DatabaseEnv>) {
+    fn _replay_to_cold_is_send(s: &UnifiedStorage<DatabaseEnv, MdbxColdBackend>) {
         _assert_send(s.replay_to_cold(Vec::new()));
+    }
+    fn _append_blocks_is_send(s: &UnifiedStorage<DatabaseEnv, MdbxColdBackend>) {
+        _assert_send(s.append_blocks(Vec::new()));
+    }
+    fn _unwind_above_is_send(s: &UnifiedStorage<DatabaseEnv, MdbxColdBackend>) {
+        _assert_send(s.unwind_above(0));
     }
 }

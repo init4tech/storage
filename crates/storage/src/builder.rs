@@ -88,7 +88,7 @@ where
     /// Build the unified storage instance.
     ///
     /// Opens both hot and cold backends and spawns the cold storage task.
-    pub async fn build(self) -> StorageResult<UnifiedStorage<H::Hot>> {
+    pub async fn build(self) -> StorageResult<UnifiedStorage<H::Hot, C::Cold>> {
         // Connect to hot storage (sync)
         let hot = self
             .hot_connector
