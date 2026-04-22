@@ -20,13 +20,19 @@ use crate::{
 };
 use alloy::primitives::{B256, BlockNumber};
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Weak},
+    time::Duration,
+};
 use tokio::{
     sync::{Mutex, Semaphore, mpsc},
     time::Instant,
 };
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::{
+    sync::{CancellationToken, DropGuard},
+    task::TaskTracker,
+};
 use tracing::Instrument;
 
 /// Default maximum deadline for streaming operations.
@@ -53,7 +59,10 @@ pub(crate) struct Inner<B> {
     pub(crate) write_sem: Arc<Semaphore>,
     pub(crate) stream_sem: Arc<Semaphore>,
     pub(crate) tracker: TaskTracker,
-    pub(crate) cancel: CancellationToken,
+    /// Fires `shutdown` (a child of the user's cancel token) when `Inner`
+    /// drops, waking the coordinator task so it exits without waiting on
+    /// user-side cancel.
+    _shutdown_guard: DropGuard,
 }
 
 /// Unified handle for interacting with a cold storage backend.
@@ -86,6 +95,11 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
     /// on permit acquisition; in-flight spawned tasks drain to completion
     /// bounded by backend timeouts.
     pub fn new(backend: B, cancel: CancellationToken) -> Self {
+        // `shutdown` fires on user-side cancel (via the parent) OR when
+        // `Inner` drops (via the DropGuard). The coordinator holds only a
+        // `Weak<Inner>` so it never pins the backend.
+        let shutdown = cancel.child_token();
+        let shutdown_guard = shutdown.clone().drop_guard();
         let inner = Arc::new(Inner {
             backend,
             cache: Mutex::new(ColdCache::new()),
@@ -94,17 +108,20 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
             write_sem: Arc::new(Semaphore::new(MAX_CONCURRENT_WRITES)),
             stream_sem: Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS)),
             tracker: TaskTracker::new(),
-            cancel,
+            _shutdown_guard: shutdown_guard,
         });
-        let inner_s = Arc::clone(&inner);
+        let weak: Weak<Inner<B>> = Arc::downgrade(&inner);
         // Shutdown coordinator: must NOT be tracked by `tracker`, otherwise
-        // `tracker.wait()` would deadlock waiting on this task.
+        // `tracker.wait()` would deadlock waiting on this task. Holds only a
+        // `Weak` ref so `Inner` (and the backend) can drop when all handles
+        // and in-flight tasks are gone.
         tokio::spawn(async move {
-            inner_s.cancel.cancelled().await;
-            inner_s.read_sem.close();
-            inner_s.write_sem.close();
-            inner_s.stream_sem.close();
-            inner_s.tracker.close();
+            shutdown.cancelled().await;
+            let Some(inner) = weak.upgrade() else { return };
+            inner.read_sem.close();
+            inner.write_sem.close();
+            inner.stream_sem.close();
+            inner.tracker.close();
         });
         Self { inner }
     }
