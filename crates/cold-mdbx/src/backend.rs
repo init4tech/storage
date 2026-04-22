@@ -700,7 +700,7 @@ impl ColdStorageRead for MdbxColdBackend {
         tokio::task::spawn_blocking(move || Self::get_header_inner(&env, spec))
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?
-            .map_err(ColdStorageError::backend)
+            .map_err(ColdStorageError::from)
     }
 
     async fn get_headers(
@@ -715,7 +715,7 @@ impl ColdStorageRead for MdbxColdBackend {
         })
         .await
         .map_err(|_| ColdStorageError::TaskTerminated)?
-        .map_err(ColdStorageError::backend)
+        .map_err(ColdStorageError::from)
     }
 
     async fn get_transaction(
@@ -726,7 +726,7 @@ impl ColdStorageRead for MdbxColdBackend {
         tokio::task::spawn_blocking(move || Self::get_transaction_inner(&env, spec))
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?
-            .map_err(ColdStorageError::backend)
+            .map_err(ColdStorageError::from)
     }
 
     async fn get_transactions_in_block(&self, block: BlockNumber) -> ColdResult<Vec<RecoveredTx>> {
@@ -734,7 +734,7 @@ impl ColdStorageRead for MdbxColdBackend {
         tokio::task::spawn_blocking(move || Self::collect_transactions_in_block(&env, block))
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?
-            .map_err(ColdStorageError::backend)
+            .map_err(ColdStorageError::from)
     }
 
     async fn get_transaction_count(&self, block: BlockNumber) -> ColdResult<u64> {
@@ -742,7 +742,7 @@ impl ColdStorageRead for MdbxColdBackend {
         tokio::task::spawn_blocking(move || Self::count_transactions_in_block(&env, block))
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?
-            .map_err(ColdStorageError::backend)
+            .map_err(ColdStorageError::from)
     }
 
     async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<ColdReceipt>> {
@@ -750,7 +750,7 @@ impl ColdStorageRead for MdbxColdBackend {
         tokio::task::spawn_blocking(move || Self::get_receipt_inner(&env, spec))
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?
-            .map_err(ColdStorageError::backend)
+            .map_err(ColdStorageError::from)
     }
 
     async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<ColdReceipt>> {
@@ -758,7 +758,7 @@ impl ColdStorageRead for MdbxColdBackend {
         tokio::task::spawn_blocking(move || Self::collect_receipts_in_block(&env, block))
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?
-            .map_err(ColdStorageError::backend)
+            .map_err(ColdStorageError::from)
     }
 
     async fn get_signet_events(
@@ -780,7 +780,7 @@ impl ColdStorageRead for MdbxColdBackend {
         })
         .await
         .map_err(|_| ColdStorageError::TaskTerminated)?
-        .map_err(ColdStorageError::backend)
+        .map_err(ColdStorageError::from)
     }
 
     async fn get_zenith_header(
@@ -795,7 +795,7 @@ impl ColdStorageRead for MdbxColdBackend {
         tokio::task::spawn_blocking(move || Self::get_zenith_header_by_number(&env, block))
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?
-            .map_err(ColdStorageError::backend)
+            .map_err(ColdStorageError::from)
     }
 
     async fn get_zenith_headers(
@@ -817,7 +817,7 @@ impl ColdStorageRead for MdbxColdBackend {
         })
         .await
         .map_err(|_| ColdStorageError::TaskTerminated)?
-        .map_err(ColdStorageError::backend)
+        .map_err(ColdStorageError::from)
     }
 
     async fn get_logs(
@@ -834,7 +834,7 @@ impl ColdStorageRead for MdbxColdBackend {
         })
         .await
         .map_err(|_| ColdStorageError::TaskTerminated)?
-        .map_err(ColdStorageError::backend)
+        .map_err(ColdStorageError::from)
     }
 
     async fn produce_log_stream(&self, filter: &Filter, params: signet_cold::StreamParams) {
@@ -871,7 +871,7 @@ impl ColdStorageRead for MdbxColdBackend {
         })
         .await
         .map_err(|_| ColdStorageError::TaskTerminated)?
-        .map_err(ColdStorageError::backend)
+        .map_err(ColdStorageError::from)
     }
 }
 
