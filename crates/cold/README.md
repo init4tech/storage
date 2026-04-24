@@ -45,8 +45,9 @@ always authoritative.
 
 - **Normal operation**: Writes are dispatched asynchronously. Cold may be a few
   blocks behind hot.
-- **Backpressure**: If cold cannot keep up, dispatch returns
-  `ColdStorageError::Backpressure`.
+- **Deadline exceeded**: Reads that overrun their configured timeout return
+  `ColdStorageError::DeadlineExceeded`; streams return
+  `ColdStorageError::StreamDeadlineExceeded`.
 - **Task failure**: If the task stops, dispatch returns
   `ColdStorageError::TaskTerminated`.
 

@@ -19,13 +19,14 @@ use crate::{
     TransactionSpecifier, ZenithHeaderSpecifier, cache::ColdCache, metrics,
 };
 use alloy::primitives::{B256, BlockNumber};
+use parking_lot::Mutex;
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
 use std::{
     sync::{Arc, Weak},
     time::Duration,
 };
 use tokio::{
-    sync::{Mutex, Semaphore, mpsc},
+    sync::{Semaphore, mpsc},
     time::Instant,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -151,20 +152,19 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?;
         metrics::record_permit_wait("read", wait.elapsed());
-        metrics::inc_in_flight("read");
         let inner = Arc::clone(&self.inner);
         self.inner
             .tracker
             .spawn(
                 async move {
                     let _p = permit;
+                    let _guard = metrics::InFlightGuard::new("read");
                     let start = Instant::now();
                     let result = f(inner).await;
                     metrics::record_op_duration(op, start.elapsed());
                     if let Err(ref e) = result {
                         metrics::record_op_error(op, e.kind());
                     }
-                    metrics::dec_in_flight("read");
                     result
                 }
                 .in_current_span(),
@@ -208,7 +208,6 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?;
         metrics::record_permit_wait("drain", drain_wait.elapsed());
-        metrics::inc_in_flight("write");
 
         let inner = Arc::clone(&self.inner);
         self.inner
@@ -217,13 +216,13 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
                 async move {
                     let _w = write_permit;
                     let _d = drain;
+                    let _guard = metrics::InFlightGuard::new("write");
                     let start = Instant::now();
                     let result = f(inner).await;
                     metrics::record_op_duration(op, start.elapsed());
                     if let Err(ref e) = result {
                         metrics::record_op_error(op, e.kind());
                     }
-                    metrics::dec_in_flight("write");
                     result
                 }
                 .in_current_span(),
@@ -241,7 +240,7 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
     pub async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<SealedHeader>> {
         let op_start = Instant::now();
         if let HeaderSpecifier::Number(n) = &spec
-            && let Some(hit) = self.inner.cache.lock().await.get_header(n)
+            && let Some(hit) = self.inner.cache.lock().get_header(n)
         {
             metrics::record_op_duration("get_header", op_start.elapsed());
             return Ok(Some(hit));
@@ -249,7 +248,7 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         self.spawn_read("get_header", move |inner| async move {
             let result = inner.backend.get_header(spec).await;
             if let Ok(Some(ref h)) = result {
-                inner.cache.lock().await.put_header(h.number, h.clone());
+                inner.cache.lock().put_header(h.number, h.clone());
             }
             result
         })
@@ -293,7 +292,7 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
     ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
         let op_start = Instant::now();
         if let TransactionSpecifier::BlockAndIndex { block, index } = &spec
-            && let Some(hit) = self.inner.cache.lock().await.get_tx(&(*block, *index))
+            && let Some(hit) = self.inner.cache.lock().get_tx(&(*block, *index))
         {
             metrics::record_op_duration("get_transaction", op_start.elapsed());
             return Ok(Some(hit));
@@ -305,7 +304,6 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
                 inner
                     .cache
                     .lock()
-                    .await
                     .put_tx((meta.block_number(), meta.transaction_index()), c.clone());
             }
             result
@@ -366,7 +364,7 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
     pub async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<ColdReceipt>> {
         let op_start = Instant::now();
         if let ReceiptSpecifier::BlockAndIndex { block, index } = &spec
-            && let Some(hit) = self.inner.cache.lock().await.get_receipt(&(*block, *index))
+            && let Some(hit) = self.inner.cache.lock().get_receipt(&(*block, *index))
         {
             metrics::record_op_duration("get_receipt", op_start.elapsed());
             return Ok(Some(hit));
@@ -374,11 +372,7 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         self.spawn_read("get_receipt", move |inner| async move {
             let result = inner.backend.get_receipt(spec).await;
             if let Ok(Some(ref c)) = result {
-                inner
-                    .cache
-                    .lock()
-                    .await
-                    .put_receipt((c.block_number, c.transaction_index), c.clone());
+                inner.cache.lock().put_receipt((c.block_number, c.transaction_index), c.clone());
             }
             result
         })
@@ -516,22 +510,14 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         max_logs: usize,
         deadline: Duration,
     ) -> ColdResult<LogStream> {
-        let wait = Instant::now();
-        let permit = self
-            .inner
-            .stream_sem
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| ColdStorageError::TaskTerminated)?;
-        metrics::record_permit_wait("stream", wait.elapsed());
-
         let from = filter.get_from_block().unwrap_or(0);
-        // Setup reads (resolving the open-ended `to` block) intentionally
-        // bypass `read_sem` and the drain barrier. A stream asking for
+        // Resolve `to` BEFORE acquiring `stream_sem`. Holding the permit
+        // across setup I/O (especially when falling back to
+        // `get_latest_block`) lets a stuck backend pin all 8 permits and
+        // prevent any new stream from starting. Setup reads intentionally
+        // bypass `read_sem` and the drain barrier: a stream asking for
         // "latest" should observe latest at setup time even alongside an
-        // in-flight write. Concurrency is bounded by `stream_sem` (8) +
-        // the backend's read timeout.
+        // in-flight write.
         let to = match filter.get_to_block() {
             Some(to) => to,
             None => match self.inner.backend.get_latest_block().await? {
@@ -543,20 +529,29 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
             },
         };
 
+        let wait = Instant::now();
+        let permit = self
+            .inner
+            .stream_sem
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?;
+        metrics::record_permit_wait("stream", wait.elapsed());
+
         let effective = deadline.min(self.inner.max_stream_deadline);
         let deadline_instant = Instant::now() + effective;
         let (sender, rx) = mpsc::channel(STREAM_CHANNEL_BUFFER);
         let inner = Arc::clone(&self.inner);
-        metrics::inc_in_flight("stream");
         let started = Instant::now();
         self.inner.tracker.spawn(
             async move {
                 let _p = permit;
+                let _guard = metrics::InFlightGuard::new("stream");
                 let params =
                     StreamParams { from, to, max_logs, sender, deadline: deadline_instant };
                 inner.backend.produce_log_stream(&filter, params).await;
                 metrics::record_stream_lifetime(started.elapsed());
-                metrics::dec_in_flight("stream");
             }
             .in_current_span(),
         );
@@ -607,7 +602,7 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         self.spawn_write("truncate_above", move |inner| async move {
             let result = inner.backend.truncate_above(block).await;
             if result.is_ok() {
-                inner.cache.lock().await.invalidate_above(block);
+                inner.cache.lock().invalidate_above(block);
             }
             result
         })
@@ -623,7 +618,7 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         self.spawn_write("drain_above", move |inner| async move {
             let result = inner.backend.drain_above(block).await;
             if result.is_ok() {
-                inner.cache.lock().await.invalidate_above(block);
+                inner.cache.lock().invalidate_above(block);
             }
             result
         })

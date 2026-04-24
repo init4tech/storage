@@ -110,3 +110,28 @@ pub(crate) fn record_stream_lifetime(d: Duration) {
     ensure_described();
     histogram!(STREAM_LIFETIME_MS).record(d.as_millis() as f64);
 }
+
+/// RAII guard that increments the in-flight gauge for `pool` on construction
+/// and decrements it on drop.
+///
+/// Using a guard ensures the decrement always runs, even if the spawned task
+/// body panics between start and end. Without this, a panic leaks the gauge
+/// and corrupts any Prometheus alerting built on `cold.*_in_flight`.
+pub(crate) struct InFlightGuard {
+    pool: &'static str,
+}
+
+impl InFlightGuard {
+    /// Increment the gauge for `pool` and return a guard that decrements on
+    /// drop. `pool` is one of `"read"`, `"write"`, `"stream"`.
+    pub(crate) fn new(pool: &'static str) -> Self {
+        inc_in_flight(pool);
+        Self { pool }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        dec_in_flight(self.pool);
+    }
+}

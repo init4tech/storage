@@ -47,6 +47,18 @@ struct MemColdBackendInner {
 ///
 /// This backend is thread-safe and suitable for concurrent access.
 /// All operations are protected by an async read-write lock.
+///
+/// # Timeout exemption
+///
+/// [`MemColdBackend`] does NOT honor the "Timeouts (mandatory)" clause of
+/// [`ColdStorageBackend`]'s trait contract. All operations are pure
+/// in-memory `BTreeMap`/`HashMap` work with no blocking I/O, so a
+/// wall-clock deadline has no meaningful effect. This is a deliberate
+/// exemption: the backend is intended for tests and development only, and
+/// MUST NOT be used as the basis for SLO measurement or production
+/// deployment.
+///
+/// [`ColdStorageBackend`]: crate::ColdStorageBackend
 #[derive(Clone)]
 pub struct MemColdBackend {
     inner: Arc<RwLock<MemColdBackendInner>>,

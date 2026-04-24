@@ -1,5 +1,7 @@
 //! Error types for cold storage operations.
 
+use std::time::Duration;
+
 /// Result type alias for cold storage operations.
 pub type ColdResult<T, E = ColdStorageError> = Result<T, E>;
 
@@ -24,6 +26,14 @@ pub enum ColdStorageError {
         /// The limit that was exceeded.
         limit: usize,
     },
+
+    /// A non-streaming read exceeded its configured deadline.
+    ///
+    /// Backends with native timeout support (iterator reads, pooled
+    /// clients) surface this as a first-class variant so callers can
+    /// match on it without downcasting [`Self::Backend`].
+    #[error("read deadline exceeded after {0:?}")]
+    DeadlineExceeded(Duration),
 
     /// The streaming operation exceeded its deadline.
     ///
@@ -65,6 +75,7 @@ impl ColdStorageError {
             Self::Backend(_) => "backend",
             Self::NotFound(_) => "not_found",
             Self::TooManyLogs { .. } => "too_many_logs",
+            Self::DeadlineExceeded(_) => "deadline",
             Self::StreamDeadlineExceeded => "stream_deadline",
             Self::ReorgDetected => "reorg",
             Self::TaskTerminated => "task_terminated",
