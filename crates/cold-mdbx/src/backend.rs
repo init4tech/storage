@@ -1,4 +1,4 @@
-//! MDBX backend implementation for [`ColdStorage`].
+//! MDBX backend implementation for [`ColdStorageBackend`].
 //!
 //! This module provides an MDBX-based implementation of the cold storage
 //! backend. It uses the table definitions from this crate and the MDBX
@@ -10,7 +10,7 @@ use crate::{
 };
 use alloy::{consensus::transaction::Recovered, primitives::BlockNumber};
 use signet_cold::{
-    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, ColdStorageRead,
+    BlockData, ColdReceipt, ColdResult, ColdStorageBackend, ColdStorageError, ColdStorageRead,
     ColdStorageWrite, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
@@ -24,7 +24,15 @@ use signet_storage_types::{
     ConfirmationMeta, DbSignetEvent, DbZenithHeader, IndexedReceipt, RecoveredTx, SealedHeader,
     TransactionSigned, TxLocation,
 };
-use std::path::Path;
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
+
+/// Default read deadline for MDBX read operations.
+pub(crate) const DEFAULT_READ_TIMEOUT: Duration = Duration::from_millis(500);
+/// Default advisory write deadline for MDBX write operations.
+pub(crate) const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Write a single block's data into an open read-write transaction.
 ///
@@ -139,12 +147,27 @@ fn produce_log_stream_blocking(
         let mut block_count = 0usize;
 
         for result in iter {
+            // Per-receipt deadline check bounds iteration cost across
+            // blocks with many receipts.
+            if std::time::Instant::now() > deadline {
+                let _ = sender.blocking_send(Err(ColdStorageError::StreamDeadlineExceeded));
+                return;
+            }
             let (tx_idx, ir): (u64, IndexedReceipt) = try_stream!(sender, result);
             let tx_hash = ir.tx_hash;
             let first_log_index = ir.first_log_index;
             for (log_idx, log) in ir.receipt.inner.logs.into_iter().enumerate() {
                 if !filter.matches(&log) {
                     continue;
+                }
+                // Per-log deadline check bounds stall time when the
+                // consumer is slow: `blocking_send` parks this thread,
+                // so without this check a single block with thousands
+                // of matching logs can run arbitrarily past the
+                // deadline.
+                if std::time::Instant::now() > deadline {
+                    let _ = sender.blocking_send(Err(ColdStorageError::StreamDeadlineExceeded));
+                    return;
                 }
                 // Enforce the global log limit across all blocks.
                 block_count += 1;
@@ -183,12 +206,41 @@ fn produce_log_stream_blocking(
 /// MDBX-based cold storage backend.
 ///
 /// This backend stores historical blockchain data in an MDBX database.
-/// It implements the [`ColdStorage`] trait for use with the cold storage
+/// It implements the [`ColdStorageBackend`] trait for use with the cold storage
 /// task runner.
+///
+/// # Timeout semantics
+///
+/// - **Iterator reads** (`get_logs`, `get_signet_events` range,
+///   `get_zenith_headers` range, `produce_log_stream`) enforce
+///   `read_timeout` via in-body `Instant::now()` checks between
+///   iteration steps. See [`with_read_timeout`](Self::with_read_timeout).
+/// - **Point lookups** (`get_header`, `get_transaction`, `get_receipt`,
+///   `get_zenith_header`, `get_latest_block`, and the per-block
+///   `*_in_block` helpers) do **NOT** enforce a wall-clock deadline.
+///   MDBX point reads are expected to be sub-millisecond on hot pages,
+///   but may block on disk I/O for cold pages or while an adjacent
+///   writer performs a page split. An unbounded stall here ties up one
+///   `spawn_blocking` worker AND one `read_sem` permit on the handle
+///   side — the handle does not wrap these calls in
+///   `tokio::time::timeout`. Callers that need fail-fast behavior on
+///   stuck I/O should apply their own timeout at the call site.
+/// - **Writes** (`append_block`, `append_blocks`, `truncate_above`,
+///   `drain_above`) record elapsed time against `write_timeout` and
+///   emit a [`tracing::warn!`] on overrun, but the commit is
+///   uninterruptible: `write_timeout` is an SLO/alerting signal only,
+///   not a hard abort.
 #[derive(Clone)]
 pub struct MdbxColdBackend {
     /// The MDBX environment.
     env: DatabaseEnv,
+    /// Wall-clock deadline for iterator read operations; checked between
+    /// per-block (and per-receipt / per-event) iteration steps. Point
+    /// lookups do NOT consult this deadline — see the type-level docs.
+    read_timeout: Duration,
+    /// Advisory deadline for write operations. Writes that exceed this are
+    /// logged via [`tracing::warn!`] but still report success.
+    write_timeout: Duration,
 }
 
 impl std::fmt::Debug for MdbxColdBackend {
@@ -200,7 +252,29 @@ impl std::fmt::Debug for MdbxColdBackend {
 impl MdbxColdBackend {
     /// Create a new backend from an existing MDBX environment.
     const fn from_env(env: DatabaseEnv) -> Self {
-        Self { env }
+        Self { env, read_timeout: DEFAULT_READ_TIMEOUT, write_timeout: DEFAULT_WRITE_TIMEOUT }
+    }
+
+    /// Set the read deadline for iterator reads.
+    ///
+    /// Applied between per-block and per-item iteration steps on iterator
+    /// reads (`get_logs`, range queries, `produce_log_stream`). Point
+    /// lookups (`get_header`, `get_transaction`, etc.) do NOT consult
+    /// this deadline — see the type-level docs on [`MdbxColdBackend`]
+    /// for the exemption rationale and its operational implications.
+    #[must_use]
+    pub const fn with_read_timeout(mut self, read_timeout: Duration) -> Self {
+        self.read_timeout = read_timeout;
+        self
+    }
+
+    /// Set the advisory write deadline. Writes exceeding this threshold
+    /// emit a [`tracing::warn!`] but still report success to the caller;
+    /// MDBX commits are uninterruptible.
+    #[must_use]
+    pub const fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
+        self.write_timeout = write_timeout;
+        self
     }
 
     /// Open an existing MDBX cold storage database in read-only mode.
@@ -272,10 +346,10 @@ impl MdbxColdBackend {
     }
 
     fn get_header_inner(
-        &self,
+        env: &DatabaseEnv,
         spec: HeaderSpecifier,
     ) -> Result<Option<SealedHeader>, MdbxColdError> {
-        let tx = self.env.tx()?;
+        let tx = env.tx()?;
         let block_num = match spec {
             HeaderSpecifier::Number(n) => n,
             HeaderSpecifier::Hash(h) => {
@@ -289,31 +363,35 @@ impl MdbxColdBackend {
     }
 
     fn get_headers_inner(
-        &self,
+        env: &DatabaseEnv,
         specs: Vec<HeaderSpecifier>,
+        deadline: Instant,
+        read_timeout: Duration,
     ) -> Result<Vec<Option<SealedHeader>>, MdbxColdError> {
-        let tx = self.env.tx()?;
-        specs
-            .into_iter()
-            .map(|spec| {
-                let block_num = match spec {
-                    HeaderSpecifier::Number(n) => Some(n),
-                    HeaderSpecifier::Hash(h) => tx.traverse::<ColdBlockHashIndex>()?.exact(&h)?,
-                };
-                block_num
-                    .map(|n| tx.traverse::<ColdHeaders>()?.exact(&n))
-                    .transpose()
-                    .map(Option::flatten)
-            })
-            .collect::<Result<_, _>>()
-            .map_err(Into::into)
+        let tx = env.tx()?;
+        let mut out = Vec::with_capacity(specs.len());
+        for spec in specs {
+            if Instant::now() > deadline {
+                return Err(MdbxColdError::Timeout(read_timeout));
+            }
+            let block_num = match spec {
+                HeaderSpecifier::Number(n) => Some(n),
+                HeaderSpecifier::Hash(h) => tx.traverse::<ColdBlockHashIndex>()?.exact(&h)?,
+            };
+            let header = match block_num {
+                Some(n) => tx.traverse::<ColdHeaders>()?.exact(&n)?,
+                None => None,
+            };
+            out.push(header);
+        }
+        Ok(out)
     }
 
     fn get_transaction_inner(
-        &self,
+        env: &DatabaseEnv,
         spec: TransactionSpecifier,
     ) -> Result<Option<Confirmed<RecoveredTx>>, MdbxColdError> {
-        let tx = self.env.tx()?;
+        let tx = env.tx()?;
         let (block, index) = match spec {
             TransactionSpecifier::Hash(h) => {
                 let Some(loc) = tx.traverse::<ColdTxHashIndex>()?.exact(&h)? else {
@@ -346,10 +424,10 @@ impl MdbxColdBackend {
     }
 
     fn get_receipt_inner(
-        &self,
+        env: &DatabaseEnv,
         spec: ReceiptSpecifier,
     ) -> Result<Option<ColdReceipt>, MdbxColdError> {
-        let tx = self.env.tx()?;
+        let tx = env.tx()?;
         let (block, index) = match spec {
             ReceiptSpecifier::TxHash(h) => {
                 let Some(loc) = tx.traverse::<ColdTxHashIndex>()?.exact(&h)? else {
@@ -369,18 +447,18 @@ impl MdbxColdBackend {
     }
 
     fn get_zenith_header_by_number(
-        &self,
+        env: &DatabaseEnv,
         block: BlockNumber,
     ) -> Result<Option<DbZenithHeader>, MdbxColdError> {
-        let tx = self.env.tx()?;
+        let tx = env.tx()?;
         Ok(tx.traverse::<ColdZenithHeaders>()?.exact(&block)?)
     }
 
     fn collect_transactions_in_block(
-        &self,
+        env: &DatabaseEnv,
         block: BlockNumber,
     ) -> Result<Vec<RecoveredTx>, MdbxColdError> {
-        let tx = self.env.tx()?;
+        let tx = env.tx()?;
         tx.traverse_dual::<ColdTransactions>()?
             .iter_k2(&block)?
             .zip(tx.traverse_dual::<ColdTxSenders>()?.iter_k2(&block)?)
@@ -393,8 +471,11 @@ impl MdbxColdBackend {
             .collect()
     }
 
-    fn count_transactions_in_block(&self, block: BlockNumber) -> Result<u64, MdbxColdError> {
-        let tx = self.env.tx()?;
+    fn count_transactions_in_block(
+        env: &DatabaseEnv,
+        block: BlockNumber,
+    ) -> Result<u64, MdbxColdError> {
+        let tx = env.tx()?;
         let mut count = 0u64;
         for item in tx.traverse_dual::<ColdTransactions>()?.iter_k2(&block)? {
             item?;
@@ -404,10 +485,10 @@ impl MdbxColdBackend {
     }
 
     fn collect_receipts_in_block(
-        &self,
+        env: &DatabaseEnv,
         block: BlockNumber,
     ) -> Result<Vec<ColdReceipt>, MdbxColdError> {
-        let tx = self.env.tx()?;
+        let tx = env.tx()?;
         let Some(sealed) = tx.traverse::<ColdHeaders>()?.exact(&block)? else {
             return Ok(Vec::new());
         };
@@ -421,10 +502,10 @@ impl MdbxColdBackend {
     }
 
     fn collect_signet_events_in_block(
-        &self,
+        env: &DatabaseEnv,
         block: BlockNumber,
     ) -> Result<Vec<DbSignetEvent>, MdbxColdError> {
-        let tx = self.env.tx()?;
+        let tx = env.tx()?;
         tx.traverse_dual::<ColdSignetEvents>()?
             .iter_k2(&block)?
             .map(|item| item.map(|(_, v)| v))
@@ -433,15 +514,25 @@ impl MdbxColdBackend {
     }
 
     fn collect_signet_events_in_range(
-        &self,
+        env: &DatabaseEnv,
         start: BlockNumber,
         end: BlockNumber,
+        deadline: Instant,
+        read_timeout: Duration,
     ) -> Result<Vec<DbSignetEvent>, MdbxColdError> {
-        let tx = self.env.tx()?;
+        let tx = env.tx()?;
         let mut cursor = tx.traverse_dual::<ColdSignetEvents>()?;
         let mut events = Vec::new();
         for block in start..=end {
+            if Instant::now() > deadline {
+                return Err(MdbxColdError::Timeout(read_timeout));
+            }
             for item in cursor.iter_k2(&block)? {
+                // Per-event deadline check so a single block with many
+                // events cannot run past the deadline.
+                if Instant::now() > deadline {
+                    return Err(MdbxColdError::Timeout(read_timeout));
+                }
                 events.push(item?.1);
             }
         }
@@ -449,11 +540,13 @@ impl MdbxColdBackend {
     }
 
     fn collect_zenith_headers_in_range(
-        &self,
+        env: &DatabaseEnv,
         start: BlockNumber,
         end: BlockNumber,
+        deadline: Instant,
+        read_timeout: Duration,
     ) -> Result<Vec<DbZenithHeader>, MdbxColdError> {
-        let tx = self.env.tx()?;
+        let tx = env.tx()?;
         let mut cursor = tx.new_cursor::<ColdZenithHeaders>()?;
         let mut headers = Vec::new();
 
@@ -470,6 +563,9 @@ impl MdbxColdBackend {
         }
 
         while let Some((key, value)) = cursor.read_next()? {
+            if Instant::now() > deadline {
+                return Err(MdbxColdError::Timeout(read_timeout));
+            }
             let block_num = BlockNumber::decode_key(&key)?;
             if block_num > end {
                 break;
@@ -583,11 +679,13 @@ impl MdbxColdBackend {
     }
 
     fn get_logs_inner(
-        &self,
+        env: &DatabaseEnv,
         filter: &Filter,
         max_logs: usize,
+        deadline: Instant,
+        read_timeout: Duration,
     ) -> Result<Vec<signet_cold::RpcLog>, MdbxColdError> {
-        let tx = self.env.tx()?;
+        let tx = env.tx()?;
         let mut results = Vec::new();
 
         let from = filter.get_from_block().unwrap_or(0);
@@ -606,6 +704,9 @@ impl MdbxColdBackend {
         let mut receipt_cursor = tx.traverse_dual::<ColdReceipts>()?;
 
         for block_num in from..=to {
+            if Instant::now() > deadline {
+                return Err(MdbxColdError::Timeout(read_timeout));
+            }
             let Some(sealed) = header_cursor.exact(&block_num)? else {
                 continue;
             };
@@ -613,6 +714,11 @@ impl MdbxColdBackend {
             let block_timestamp = sealed.timestamp;
 
             for item in receipt_cursor.iter_k2(&block_num)? {
+                // Per-receipt deadline check so a single block with
+                // thousands of receipts cannot run past the deadline.
+                if Instant::now() > deadline {
+                    return Err(MdbxColdError::Timeout(read_timeout));
+                }
                 let (tx_idx, ir) = item?;
                 let tx_hash = ir.tx_hash;
                 let first_log_index = ir.first_log_index;
@@ -643,76 +749,128 @@ impl MdbxColdBackend {
 
 impl ColdStorageRead for MdbxColdBackend {
     async fn get_header(&self, spec: HeaderSpecifier) -> ColdResult<Option<SealedHeader>> {
-        Ok(self.get_header_inner(spec)?)
+        let env = self.env.clone();
+        tokio::task::spawn_blocking(move || Self::get_header_inner(&env, spec))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?
+            .map_err(ColdStorageError::from)
     }
 
     async fn get_headers(
         &self,
         specs: Vec<HeaderSpecifier>,
     ) -> ColdResult<Vec<Option<SealedHeader>>> {
-        Ok(self.get_headers_inner(specs)?)
+        let env = self.env.clone();
+        let read_timeout = self.read_timeout;
+        tokio::task::spawn_blocking(move || {
+            let deadline = Instant::now() + read_timeout;
+            Self::get_headers_inner(&env, specs, deadline, read_timeout)
+        })
+        .await
+        .map_err(|_| ColdStorageError::TaskTerminated)?
+        .map_err(ColdStorageError::from)
     }
 
     async fn get_transaction(
         &self,
         spec: TransactionSpecifier,
     ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
-        Ok(self.get_transaction_inner(spec)?)
+        let env = self.env.clone();
+        tokio::task::spawn_blocking(move || Self::get_transaction_inner(&env, spec))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?
+            .map_err(ColdStorageError::from)
     }
 
     async fn get_transactions_in_block(&self, block: BlockNumber) -> ColdResult<Vec<RecoveredTx>> {
-        Ok(self.collect_transactions_in_block(block)?)
+        let env = self.env.clone();
+        tokio::task::spawn_blocking(move || Self::collect_transactions_in_block(&env, block))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?
+            .map_err(ColdStorageError::from)
     }
 
     async fn get_transaction_count(&self, block: BlockNumber) -> ColdResult<u64> {
-        Ok(self.count_transactions_in_block(block)?)
+        let env = self.env.clone();
+        tokio::task::spawn_blocking(move || Self::count_transactions_in_block(&env, block))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?
+            .map_err(ColdStorageError::from)
     }
 
     async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<ColdReceipt>> {
-        Ok(self.get_receipt_inner(spec)?)
+        let env = self.env.clone();
+        tokio::task::spawn_blocking(move || Self::get_receipt_inner(&env, spec))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?
+            .map_err(ColdStorageError::from)
     }
 
     async fn get_receipts_in_block(&self, block: BlockNumber) -> ColdResult<Vec<ColdReceipt>> {
-        Ok(self.collect_receipts_in_block(block)?)
+        let env = self.env.clone();
+        tokio::task::spawn_blocking(move || Self::collect_receipts_in_block(&env, block))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?
+            .map_err(ColdStorageError::from)
     }
 
     async fn get_signet_events(
         &self,
         spec: SignetEventsSpecifier,
     ) -> ColdResult<Vec<DbSignetEvent>> {
-        let events = match spec {
-            SignetEventsSpecifier::Block(block) => self.collect_signet_events_in_block(block)?,
-            SignetEventsSpecifier::BlockRange { start, end } => {
-                self.collect_signet_events_in_range(start, end)?
+        let env = self.env.clone();
+        let read_timeout = self.read_timeout;
+        tokio::task::spawn_blocking(move || {
+            let deadline = Instant::now() + read_timeout;
+            match spec {
+                SignetEventsSpecifier::Block(block) => {
+                    Self::collect_signet_events_in_block(&env, block)
+                }
+                SignetEventsSpecifier::BlockRange { start, end } => {
+                    Self::collect_signet_events_in_range(&env, start, end, deadline, read_timeout)
+                }
             }
-        };
-        Ok(events)
+        })
+        .await
+        .map_err(|_| ColdStorageError::TaskTerminated)?
+        .map_err(ColdStorageError::from)
     }
 
     async fn get_zenith_header(
         &self,
         spec: ZenithHeaderSpecifier,
     ) -> ColdResult<Option<DbZenithHeader>> {
+        let env = self.env.clone();
         let block = match spec {
             ZenithHeaderSpecifier::Number(n) => n,
             ZenithHeaderSpecifier::Range { start, .. } => start,
         };
-        Ok(self.get_zenith_header_by_number(block)?)
+        tokio::task::spawn_blocking(move || Self::get_zenith_header_by_number(&env, block))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?
+            .map_err(ColdStorageError::from)
     }
 
     async fn get_zenith_headers(
         &self,
         spec: ZenithHeaderSpecifier,
     ) -> ColdResult<Vec<DbZenithHeader>> {
-        let headers = match spec {
-            ZenithHeaderSpecifier::Number(n) => {
-                self.get_zenith_header_by_number(n)?.into_iter().collect()
+        let env = self.env.clone();
+        let read_timeout = self.read_timeout;
+        tokio::task::spawn_blocking(move || {
+            let deadline = Instant::now() + read_timeout;
+            match spec {
+                ZenithHeaderSpecifier::Number(n) => {
+                    Ok(Self::get_zenith_header_by_number(&env, n)?.into_iter().collect())
+                }
+                ZenithHeaderSpecifier::Range { start, end } => {
+                    Self::collect_zenith_headers_in_range(&env, start, end, deadline, read_timeout)
+                }
             }
-            ZenithHeaderSpecifier::Range { start, end } => {
-                self.collect_zenith_headers_in_range(start, end)?
-            }
-        };
-        Ok(headers)
+        })
+        .await
+        .map_err(|_| ColdStorageError::TaskTerminated)?
+        .map_err(ColdStorageError::from)
     }
 
     async fn get_logs(
@@ -720,13 +878,22 @@ impl ColdStorageRead for MdbxColdBackend {
         filter: &Filter,
         max_logs: usize,
     ) -> ColdResult<Vec<signet_cold::RpcLog>> {
-        Ok(self.get_logs_inner(filter, max_logs)?)
+        let env = self.env.clone();
+        let read_timeout = self.read_timeout;
+        let filter = filter.clone();
+        tokio::task::spawn_blocking(move || {
+            let deadline = Instant::now() + read_timeout;
+            Self::get_logs_inner(&env, &filter, max_logs, deadline, read_timeout)
+        })
+        .await
+        .map_err(|_| ColdStorageError::TaskTerminated)?
+        .map_err(ColdStorageError::from)
     }
 
     async fn produce_log_stream(&self, filter: &Filter, params: signet_cold::StreamParams) {
         let env = self.env.clone();
         // ENG-2036: clone required to move into spawn_blocking. Eliminating
-        // this would require changing the ColdStorage trait to pass owned
+        // this would require changing the ColdStorageBackend trait to pass owned
         // Filter, which is a cross-crate API change.
         let filter = filter.clone();
         let std_deadline = params.deadline.into_std();
@@ -745,35 +912,83 @@ impl ColdStorageRead for MdbxColdBackend {
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
-        let tx = self.env.tx().map_err(MdbxColdError::from)?;
-        let mut cursor = tx.new_cursor::<ColdHeaders>().map_err(MdbxColdError::from)?;
-        let latest = cursor
-            .last()
-            .map_err(MdbxColdError::from)?
-            .map(|(key, _)| BlockNumber::decode_key(&key))
-            .transpose()
-            .map_err(MdbxColdError::from)?;
-        Ok(latest)
+        let env = self.env.clone();
+        tokio::task::spawn_blocking(move || -> Result<Option<BlockNumber>, MdbxColdError> {
+            let tx = env.tx()?;
+            let mut cursor = tx.new_cursor::<ColdHeaders>()?;
+            cursor
+                .last()?
+                .map(|(key, _)| BlockNumber::decode_key(&key))
+                .transpose()
+                .map_err(MdbxColdError::from)
+        })
+        .await
+        .map_err(|_| ColdStorageError::TaskTerminated)?
+        .map_err(ColdStorageError::from)
+    }
+}
+
+/// Log an advisory warning if a successful write exceeded the threshold.
+///
+/// Only logs on success: a failed write that overran the threshold already
+/// surfaces a `Backend` error to the caller, and a noisy overrun WARN would
+/// poison SLO alerting built on this signal.
+fn warn_on_overrun(op: &'static str, elapsed: Duration, threshold: Duration, is_ok: bool) {
+    if is_ok && elapsed > threshold {
+        tracing::warn!(
+            op,
+            elapsed_ms = elapsed.as_millis() as u64,
+            threshold_ms = threshold.as_millis() as u64,
+            "mdbx write exceeded advisory write timeout",
+        );
     }
 }
 
 impl ColdStorageWrite for MdbxColdBackend {
-    async fn append_block(&mut self, data: BlockData) -> ColdResult<()> {
-        Ok(self.append_block_inner(data)?)
+    async fn append_block(&self, data: BlockData) -> ColdResult<()> {
+        let threshold = self.write_timeout;
+        let this = self.clone();
+        let start = Instant::now();
+        let result = tokio::task::spawn_blocking(move || this.append_block_inner(data))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?;
+        warn_on_overrun("append_block", start.elapsed(), threshold, result.is_ok());
+        Ok(result?)
     }
 
-    async fn append_blocks(&mut self, data: Vec<BlockData>) -> ColdResult<()> {
-        Ok(self.append_blocks_inner(data)?)
+    async fn append_blocks(&self, data: Vec<BlockData>) -> ColdResult<()> {
+        let threshold = self.write_timeout;
+        let this = self.clone();
+        let start = Instant::now();
+        let result = tokio::task::spawn_blocking(move || this.append_blocks_inner(data))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?;
+        warn_on_overrun("append_blocks", start.elapsed(), threshold, result.is_ok());
+        Ok(result?)
     }
 
-    async fn truncate_above(&mut self, block: BlockNumber) -> ColdResult<()> {
-        Ok(self.truncate_above_inner(block)?)
+    async fn truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
+        let threshold = self.write_timeout;
+        let this = self.clone();
+        let start = Instant::now();
+        let result = tokio::task::spawn_blocking(move || this.truncate_above_inner(block))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?;
+        warn_on_overrun("truncate_above", start.elapsed(), threshold, result.is_ok());
+        Ok(result?)
     }
 }
 
-impl ColdStorage for MdbxColdBackend {
-    async fn drain_above(&mut self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
-        Ok(self.drain_above_inner(block)?)
+impl ColdStorageBackend for MdbxColdBackend {
+    async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
+        let threshold = self.write_timeout;
+        let this = self.clone();
+        let start = Instant::now();
+        let result = tokio::task::spawn_blocking(move || this.drain_above_inner(block))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?;
+        warn_on_overrun("drain_above", start.elapsed(), threshold, result.is_ok());
+        Ok(result?)
     }
 }
 
@@ -783,10 +998,27 @@ mod tests {
     use signet_cold::conformance::conformance;
     use tempfile::tempdir;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mdbx_backend_conformance() {
         let dir = tempdir().unwrap();
         let backend = MdbxColdBackend::open_rw(dir.path()).unwrap();
         conformance(backend).await.unwrap();
+    }
+
+    /// Regression: writes must not rely on `tokio::task::block_in_place`,
+    /// which panics on a single-threaded runtime.
+    #[tokio::test(flavor = "current_thread")]
+    async fn writes_work_on_current_thread_runtime() {
+        use signet_cold::{ColdStorageRead, ColdStorageWrite, conformance::make_test_block};
+
+        let dir = tempdir().unwrap();
+        let backend = MdbxColdBackend::open_rw(dir.path()).unwrap();
+
+        backend.append_block(make_test_block(0)).await.unwrap();
+        backend.append_blocks(vec![make_test_block(1), make_test_block(2)]).await.unwrap();
+        backend.truncate_above(1).await.unwrap();
+
+        let latest = backend.get_latest_block().await.unwrap();
+        assert_eq!(latest, Some(1));
     }
 }

@@ -20,12 +20,17 @@ pub enum MdbxColdError {
     /// Too many logs matched the filter.
     #[error("too many logs: limit is {0}")]
     TooManyLogs(usize),
+
+    /// An MDBX read exceeded its configured deadline.
+    #[error("mdbx read timed out after {0:?}")]
+    Timeout(std::time::Duration),
 }
 
 impl From<MdbxColdError> for signet_cold::ColdStorageError {
     fn from(error: MdbxColdError) -> Self {
         match error {
             MdbxColdError::TooManyLogs(limit) => Self::TooManyLogs { limit },
+            MdbxColdError::Timeout(duration) => Self::DeadlineExceeded(duration),
             other => Self::Backend(Box::new(other)),
         }
     }

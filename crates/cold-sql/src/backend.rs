@@ -36,7 +36,7 @@ use alloy::{
     },
 };
 use signet_cold::{
-    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, ColdStorageRead,
+    BlockData, ColdReceipt, ColdResult, ColdStorageBackend, ColdStorageError, ColdStorageRead,
     ColdStorageWrite, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
@@ -50,7 +50,12 @@ use signet_zenith::{
     Zenith,
 };
 use sqlx::{AnyPool, Row};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
+
+/// Default statement timeout for read transactions (matches MDBX).
+pub(crate) const DEFAULT_READ_TIMEOUT: Duration = Duration::from_millis(500);
+/// Default statement timeout for write transactions (matches MDBX).
+pub(crate) const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// SQL-based cold storage backend.
 ///
@@ -75,6 +80,8 @@ use std::collections::BTreeMap;
 pub struct SqlColdBackend {
     pool: AnyPool,
     is_postgres: bool,
+    read_timeout: Duration,
+    write_timeout: Duration,
 }
 
 /// Returns `true` if the URL refers to an in-memory SQLite database.
@@ -130,7 +137,85 @@ impl SqlColdBackend {
         sqlx::raw_sql(include_str!("../migrations/002_add_topic_indexes.sql"))
             .execute(&pool)
             .await?;
-        Ok(Self { pool, is_postgres })
+        Ok(Self {
+            pool,
+            is_postgres,
+            read_timeout: DEFAULT_READ_TIMEOUT,
+            write_timeout: DEFAULT_WRITE_TIMEOUT,
+        })
+    }
+
+    /// Override the per-transaction read timeout (default 500 ms).
+    ///
+    /// On Postgres this sets `statement_timeout` on every transaction
+    /// opened by a read method. On SQLite the value is stored but
+    /// not enforced — SQLite has no equivalent mechanism.
+    #[must_use]
+    pub const fn with_read_timeout(mut self, d: Duration) -> Self {
+        self.read_timeout = d;
+        self
+    }
+
+    /// Override the per-transaction write timeout (default 2 s).
+    ///
+    /// On Postgres this sets `statement_timeout` on every transaction
+    /// opened by a write method. On SQLite the value is stored but
+    /// not enforced — SQLite has no equivalent mechanism.
+    #[must_use]
+    pub const fn with_write_timeout(mut self, d: Duration) -> Self {
+        self.write_timeout = d;
+        self
+    }
+
+    /// Open a transaction for a read operation.
+    ///
+    /// On Postgres, issues `SET LOCAL statement_timeout = <ms>` scoped
+    /// to the transaction. On SQLite the timeout is advisory (there is
+    /// no equivalent mechanism).
+    async fn begin_read(&self) -> Result<sqlx::Transaction<'_, sqlx::Any>, SqlColdError> {
+        let tx = self.pool.begin().await?;
+        self.apply_statement_timeout(tx, self.read_timeout).await
+    }
+
+    /// Open a transaction for a write operation.
+    ///
+    /// Same semantics as [`begin_read`](Self::begin_read) but uses
+    /// `write_timeout` for the `SET LOCAL`.
+    async fn begin_write(&self) -> Result<sqlx::Transaction<'_, sqlx::Any>, SqlColdError> {
+        let tx = self.pool.begin().await?;
+        self.apply_statement_timeout(tx, self.write_timeout).await
+    }
+
+    /// Run `SELECT pg_sleep($1)` inside a `begin_read` transaction.
+    ///
+    /// Intended only for verifying the `statement_timeout` behaviour in
+    /// integration tests. Returns whatever error the server produces if
+    /// the sleep trips the configured read timeout.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn debug_pg_sleep(&self, d: Duration) -> Result<(), SqlColdError> {
+        let secs = d.as_secs_f64();
+        let mut tx = self.begin_read().await?;
+        sqlx::query(&format!("SELECT pg_sleep({secs})")).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Apply `SET LOCAL statement_timeout` on Postgres; no-op on SQLite.
+    ///
+    /// `SET` does not accept bind parameters in Postgres the same way
+    /// `SELECT` does, so the value is inline-formatted. This is SAFE
+    /// because `ms` is derived from an internal `Duration` field, never
+    /// from user input.
+    async fn apply_statement_timeout<'a>(
+        &self,
+        mut tx: sqlx::Transaction<'a, sqlx::Any>,
+        d: Duration,
+    ) -> Result<sqlx::Transaction<'a, sqlx::Any>, SqlColdError> {
+        if self.is_postgres {
+            let ms = i64::try_from(d.as_millis()).unwrap_or(i64::MAX);
+            sqlx::query(&format!("SET LOCAL statement_timeout = {ms}")).execute(&mut *tx).await?;
+        }
+        Ok(tx)
     }
 
     /// Connect to a database URL with explicit pool options.
@@ -170,10 +255,12 @@ impl SqlColdBackend {
         match spec {
             HeaderSpecifier::Number(n) => Ok(Some(n)),
             HeaderSpecifier::Hash(hash) => {
+                let mut tx = self.begin_read().await?;
                 let row = sqlx::query("SELECT block_number FROM headers WHERE block_hash = $1")
                     .bind(hash)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(&mut *tx)
                     .await?;
+                tx.commit().await?;
                 Ok(row.map(|r| from_i64(r.get::<i64, _>(COL_BLOCK_NUMBER))))
             }
         }
@@ -188,10 +275,12 @@ impl SqlColdBackend {
         block_num: BlockNumber,
     ) -> Result<Option<SealedHeader>, SqlColdError> {
         let bn = to_i64(block_num);
+        let mut tx = self.begin_read().await?;
         let row = sqlx::query("SELECT * FROM headers WHERE block_number = $1")
             .bind(bn)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await?;
+        tx.commit().await?;
 
         row.map(|r| header_from_row(&r).map(|h| h.seal_slow())).transpose()
     }
@@ -201,7 +290,7 @@ impl SqlColdBackend {
     // ========================================================================
 
     async fn insert_block(&self, data: BlockData) -> Result<(), SqlColdError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         write_block_to_tx(&mut tx, data).await?;
         tx.commit().await?;
         Ok(())
@@ -240,10 +329,20 @@ impl SqlColdBackend {
         // Open a REPEATABLE READ transaction so all per-block queries see a
         // consistent snapshot. This makes reorg detection unnecessary — if a
         // reorg lands mid-stream the transaction still reads the old data.
+        // Isolation level must be the first statement in the transaction,
+        // so we bypass `begin_read`'s `SET LOCAL statement_timeout` here
+        // and issue both settings ourselves in the correct order.
         let mut tx = try_stream!(sender, self.pool.begin().await);
         try_stream!(
             sender,
             sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ").execute(&mut *tx).await
+        );
+        let read_ms = i64::try_from(self.read_timeout.as_millis()).unwrap_or(i64::MAX);
+        try_stream!(
+            sender,
+            sqlx::query(&format!("SET LOCAL statement_timeout = {read_ms}"))
+                .execute(&mut *tx)
+                .await
         );
 
         // Build the parameterised query once. $1 is the block number
@@ -1016,7 +1115,7 @@ fn build_log_filter_clause(filter: &Filter, start_idx: u32) -> (String, Vec<&[u8
 }
 
 // ============================================================================
-// ColdStorage implementation
+// ColdStorageBackend implementation
 // ============================================================================
 
 impl ColdStorageRead for SqlColdBackend {
@@ -1043,6 +1142,7 @@ impl ColdStorageRead for SqlColdBackend {
         &self,
         spec: TransactionSpecifier,
     ) -> ColdResult<Option<Confirmed<RecoveredTx>>> {
+        let mut tx = self.begin_read().await.map_err(ColdStorageError::from)?;
         let row = match spec {
             TransactionSpecifier::Hash(hash) => sqlx::query(
                 "SELECT t.*, h.block_hash
@@ -1051,7 +1151,7 @@ impl ColdStorageRead for SqlColdBackend {
                      WHERE t.tx_hash = $1",
             )
             .bind(hash)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(SqlColdError::from)?,
             TransactionSpecifier::BlockAndIndex { block, index } => sqlx::query(
@@ -1062,7 +1162,7 @@ impl ColdStorageRead for SqlColdBackend {
             )
             .bind(to_i64(block))
             .bind(to_i64(index))
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(SqlColdError::from)?,
             TransactionSpecifier::BlockHashAndIndex { block_hash, index } => sqlx::query(
@@ -1073,10 +1173,11 @@ impl ColdStorageRead for SqlColdBackend {
             )
             .bind(block_hash)
             .bind(to_i64(index))
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(SqlColdError::from)?,
         };
+        tx.commit().await.map_err(SqlColdError::from)?;
 
         let Some(r) = row else {
             return Ok(None);
@@ -1092,28 +1193,33 @@ impl ColdStorageRead for SqlColdBackend {
 
     async fn get_transactions_in_block(&self, block: BlockNumber) -> ColdResult<Vec<RecoveredTx>> {
         let bn = to_i64(block);
+        let mut tx = self.begin_read().await.map_err(ColdStorageError::from)?;
         let rows =
             sqlx::query("SELECT * FROM transactions WHERE block_number = $1 ORDER BY tx_index")
                 .bind(bn)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *tx)
                 .await
                 .map_err(SqlColdError::from)?;
+        tx.commit().await.map_err(SqlColdError::from)?;
 
         rows.iter().map(|r| recovered_tx_from_row(r).map_err(ColdStorageError::from)).collect()
     }
 
     async fn get_transaction_count(&self, block: BlockNumber) -> ColdResult<u64> {
         let bn = to_i64(block);
+        let mut tx = self.begin_read().await.map_err(ColdStorageError::from)?;
         let row = sqlx::query("SELECT COUNT(*) as cnt FROM transactions WHERE block_number = $1")
             .bind(bn)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await
             .map_err(SqlColdError::from)?;
+        tx.commit().await.map_err(SqlColdError::from)?;
 
         Ok(from_i64(row.get::<i64, _>(COL_CNT)))
     }
 
     async fn get_receipt(&self, spec: ReceiptSpecifier) -> ColdResult<Option<ColdReceipt>> {
+        let mut tx = self.begin_read().await.map_err(ColdStorageError::from)?;
         // Resolve to (block, index)
         let (block, index) = match spec {
             ReceiptSpecifier::TxHash(hash) => {
@@ -1121,7 +1227,7 @@ impl ColdStorageRead for SqlColdBackend {
                     "SELECT block_number, tx_index FROM transactions WHERE tx_hash = $1",
                 )
                 .bind(hash)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *tx)
                 .await
                 .map_err(SqlColdError::from)?;
                 let Some(r) = row else { return Ok(None) };
@@ -1157,7 +1263,7 @@ impl ColdStorageRead for SqlColdBackend {
         )
         .bind(to_i64(block))
         .bind(to_i64(index))
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(SqlColdError::from)?;
 
@@ -1183,9 +1289,10 @@ impl ColdStorageRead for SqlColdBackend {
         )
         .bind(to_i64(block))
         .bind(to_i64(index))
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(SqlColdError::from)?;
+        tx.commit().await.map_err(SqlColdError::from)?;
 
         let logs = log_rows.iter().map(log_from_row).collect();
         let built = build_receipt(tx_type, success, cumulative_gas_used, logs)
@@ -1212,6 +1319,7 @@ impl ColdStorageRead for SqlColdBackend {
         };
 
         let bn = to_i64(block);
+        let mut tx = self.begin_read().await.map_err(ColdStorageError::from)?;
 
         // Fetch receipts joined with tx_hash and from_address
         let receipt_rows = sqlx::query(
@@ -1225,16 +1333,17 @@ impl ColdStorageRead for SqlColdBackend {
              ORDER BY r.tx_index",
         )
         .bind(bn)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(SqlColdError::from)?;
 
         let all_log_rows =
             sqlx::query("SELECT * FROM logs WHERE block_number = $1 ORDER BY tx_index, log_index")
                 .bind(bn)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *tx)
                 .await
                 .map_err(SqlColdError::from)?;
+        tx.commit().await.map_err(SqlColdError::from)?;
 
         // Group logs by tx_index
         let mut logs_by_tx: BTreeMap<i64, Vec<Log>> = BTreeMap::new();
@@ -1271,6 +1380,7 @@ impl ColdStorageRead for SqlColdBackend {
         &self,
         spec: SignetEventsSpecifier,
     ) -> ColdResult<Vec<DbSignetEvent>> {
+        let mut tx = self.begin_read().await.map_err(ColdStorageError::from)?;
         let rows = match spec {
             SignetEventsSpecifier::Block(block) => {
                 let bn = to_i64(block);
@@ -1278,7 +1388,7 @@ impl ColdStorageRead for SqlColdBackend {
                     "SELECT * FROM signet_events WHERE block_number = $1 ORDER BY event_index",
                 )
                 .bind(bn)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *tx)
                 .await
                 .map_err(SqlColdError::from)?
             }
@@ -1291,11 +1401,12 @@ impl ColdStorageRead for SqlColdBackend {
                 )
                 .bind(s)
                 .bind(e)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *tx)
                 .await
                 .map_err(SqlColdError::from)?
             }
         };
+        tx.commit().await.map_err(SqlColdError::from)?;
 
         rows.iter().map(|r| signet_event_from_row(r).map_err(ColdStorageError::from)).collect()
     }
@@ -1309,11 +1420,13 @@ impl ColdStorageRead for SqlColdBackend {
             ZenithHeaderSpecifier::Range { start, .. } => start,
         };
         let bn = to_i64(block);
+        let mut tx = self.begin_read().await.map_err(ColdStorageError::from)?;
         let row = sqlx::query("SELECT * FROM zenith_headers WHERE block_number = $1")
             .bind(bn)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(SqlColdError::from)?;
+        tx.commit().await.map_err(SqlColdError::from)?;
 
         row.map(|r| zenith_header_from_row(&r)).transpose().map_err(ColdStorageError::from)
     }
@@ -1322,12 +1435,13 @@ impl ColdStorageRead for SqlColdBackend {
         &self,
         spec: ZenithHeaderSpecifier,
     ) -> ColdResult<Vec<DbZenithHeader>> {
+        let mut tx = self.begin_read().await.map_err(ColdStorageError::from)?;
         let rows = match spec {
             ZenithHeaderSpecifier::Number(n) => {
                 let bn = to_i64(n);
                 sqlx::query("SELECT * FROM zenith_headers WHERE block_number = $1")
                     .bind(bn)
-                    .fetch_all(&self.pool)
+                    .fetch_all(&mut *tx)
                     .await
                     .map_err(SqlColdError::from)?
             }
@@ -1340,11 +1454,12 @@ impl ColdStorageRead for SqlColdBackend {
                 )
                 .bind(s)
                 .bind(e)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *tx)
                 .await
                 .map_err(SqlColdError::from)?
             }
         };
+        tx.commit().await.map_err(SqlColdError::from)?;
 
         rows.iter().map(|r| zenith_header_from_row(r).map_err(ColdStorageError::from)).collect()
     }
@@ -1386,7 +1501,9 @@ impl ColdStorageRead for SqlColdBackend {
         let limit = max_logs.saturating_add(1).min(i64::MAX as usize);
         query = query.bind(to_i64(limit as u64));
 
-        let rows = query.fetch_all(&self.pool).await.map_err(SqlColdError::from)?;
+        let mut tx = self.begin_read().await.map_err(ColdStorageError::from)?;
+        let rows = query.fetch_all(&mut *tx).await.map_err(SqlColdError::from)?;
+        tx.commit().await.map_err(SqlColdError::from)?;
 
         if rows.len() > max_logs {
             return Err(ColdStorageError::TooManyLogs { limit: max_logs });
@@ -1418,21 +1535,23 @@ impl ColdStorageRead for SqlColdBackend {
     }
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
+        let mut tx = self.begin_read().await.map_err(ColdStorageError::from)?;
         let row = sqlx::query("SELECT MAX(block_number) as max_bn FROM headers")
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await
             .map_err(SqlColdError::from)?;
+        tx.commit().await.map_err(SqlColdError::from)?;
         Ok(row.get::<Option<i64>, _>(COL_MAX_BN).map(from_i64))
     }
 }
 
 impl ColdStorageWrite for SqlColdBackend {
-    async fn append_block(&mut self, data: BlockData) -> ColdResult<()> {
+    async fn append_block(&self, data: BlockData) -> ColdResult<()> {
         self.insert_block(data).await.map_err(ColdStorageError::from)
     }
 
-    async fn append_blocks(&mut self, data: Vec<BlockData>) -> ColdResult<()> {
-        let mut tx = self.pool.begin().await.map_err(SqlColdError::from)?;
+    async fn append_blocks(&self, data: Vec<BlockData>) -> ColdResult<()> {
+        let mut tx = self.begin_write().await.map_err(ColdStorageError::from)?;
         for block_data in data {
             write_block_to_tx(&mut tx, block_data).await.map_err(ColdStorageError::from)?;
         }
@@ -1440,9 +1559,9 @@ impl ColdStorageWrite for SqlColdBackend {
         Ok(())
     }
 
-    async fn truncate_above(&mut self, block: BlockNumber) -> ColdResult<()> {
+    async fn truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
         let bn = to_i64(block);
-        let mut tx = self.pool.begin().await.map_err(SqlColdError::from)?;
+        let mut tx = self.begin_write().await.map_err(ColdStorageError::from)?;
 
         delete_above_in_tx(&mut tx, bn).await.map_err(ColdStorageError::from)?;
 
@@ -1451,10 +1570,10 @@ impl ColdStorageWrite for SqlColdBackend {
     }
 }
 
-impl ColdStorage for SqlColdBackend {
-    async fn drain_above(&mut self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
+impl ColdStorageBackend for SqlColdBackend {
+    async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
         let bn = to_i64(block);
-        let mut tx = self.pool.begin().await.map_err(SqlColdError::from)?;
+        let mut tx = self.begin_write().await.map_err(ColdStorageError::from)?;
 
         // 1. Fetch all headers above block.
         let header_rows =

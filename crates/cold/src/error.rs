@@ -1,5 +1,7 @@
 //! Error types for cold storage operations.
 
+use std::time::Duration;
+
 /// Result type alias for cold storage operations.
 pub type ColdResult<T, E = ColdStorageError> = Result<T, E>;
 
@@ -14,22 +16,6 @@ pub enum ColdStorageError {
     #[error("Not found: {0}")]
     NotFound(String),
 
-    /// The storage task was cancelled.
-    #[error("Task cancelled")]
-    Cancelled,
-
-    /// The cold storage task cannot keep up with incoming requests.
-    ///
-    /// The channel is full, indicating transient backpressure. The cold storage
-    /// task is still running but processing requests slower than they arrive.
-    ///
-    /// Callers may:
-    /// - Accept the gap (hot storage is authoritative) and repair later
-    /// - Retry after a delay with exponential backoff
-    /// - Increase channel capacity at construction time
-    #[error("cold storage backpressure: channel full")]
-    Backpressure,
-
     /// The query matched more logs than the caller-specified `max_logs` limit.
     ///
     /// The query is rejected entirely rather than returning a partial result.
@@ -40,6 +26,14 @@ pub enum ColdStorageError {
         /// The limit that was exceeded.
         limit: usize,
     },
+
+    /// A non-streaming read exceeded its configured deadline.
+    ///
+    /// Backends with native timeout support (iterator reads, pooled
+    /// clients) surface this as a first-class variant so callers can
+    /// match on it without downcasting [`Self::Backend`].
+    #[error("read deadline exceeded after {0:?}")]
+    DeadlineExceeded(Duration),
 
     /// The streaming operation exceeded its deadline.
     ///
@@ -59,13 +53,9 @@ pub enum ColdStorageError {
 
     /// The cold storage task has terminated.
     ///
-    /// The channel is closed because the task has stopped (panic, cancellation,
-    /// or shutdown). This is persistent: all subsequent dispatches will fail
-    /// until the task is restarted.
-    ///
-    /// Hot storage remains consistent and authoritative. Cold storage can be
-    /// replayed from hot storage after task recovery.
-    #[error("cold storage task terminated: channel closed")]
+    /// A concurrency semaphore was closed, indicating shutdown. Reads and
+    /// writes cannot be dispatched until the handle is recreated.
+    #[error("cold storage task terminated: semaphore closed")]
     TaskTerminated,
 }
 
@@ -76,5 +66,19 @@ impl ColdStorageError {
         E: core::error::Error + Send + Sync + 'static,
     {
         Self::Backend(Box::new(error))
+    }
+
+    /// Short, stable label identifying the error variant. Used as a metric
+    /// label.
+    pub(crate) const fn kind(&self) -> &'static str {
+        match self {
+            Self::Backend(_) => "backend",
+            Self::NotFound(_) => "not_found",
+            Self::TooManyLogs { .. } => "too_many_logs",
+            Self::DeadlineExceeded(_) => "deadline",
+            Self::StreamDeadlineExceeded => "stream_deadline",
+            Self::ReorgDetected => "reorg",
+            Self::TaskTerminated => "task_terminated",
+        }
     }
 }

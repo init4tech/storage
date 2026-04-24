@@ -11,25 +11,19 @@
 //!
 //! # Architecture
 //!
-//! The cold storage engine uses a task-based architecture:
+//! The cold storage engine exposes a single handle type:
 //!
-//! - [`ColdStorage`] trait defines the backend interface
-//! - [`ColdStorageTask`] processes requests from channels
-//! - [`ColdStorageHandle`] provides full read/write access
-//! - [`ColdStorageReadHandle`] provides read-only access
+//! - [`ColdStorageBackend`] trait defines the backend interface
+//! - [`ColdStorage`] wraps a shared inner struct in an `Arc` and provides
+//!   read, write, and streaming operations. It is cheap to clone and share.
 //!
-//! # Channel Separation
+//! # Concurrency
 //!
-//! Reads and writes use **separate channels**:
+//! The handle uses semaphores rather than channels to bound in-flight work:
 //!
-//! - **Read channel**: Shared between [`ColdStorageHandle`] and
-//!   [`ColdStorageReadHandle`]. Reads are processed concurrently (up to 64 in
-//!   flight).
-//! - **Write channel**: Exclusive to [`ColdStorageHandle`]. Writes are
-//!   processed sequentially to maintain ordering.
-//!
-//! This design allows read-heavy workloads to proceed without being blocked by
-//! write operations, while ensuring write ordering is preserved.
+//! - **Reads**: gated by an internal semaphore (up to 64 in flight).
+//! - **Writes**: gated by an internal semaphore (serialized: 1 in flight).
+//! - **Streams**: gated by an internal semaphore (up to 8 in flight).
 //!
 //! # Consistency Model
 //!
@@ -38,12 +32,10 @@
 //!
 //! ## When Cold May Lag
 //!
-//! - **Normal operation**: Writes are dispatched asynchronously. Cold may be a
-//!   few blocks behind hot during normal block processing.
-//! - **Backpressure**: If cold storage cannot keep up, the write channel fills.
-//!   Dispatch methods return [`ColdStorageError::Backpressure`].
-//! - **Task termination**: If the cold storage task stops, writes cannot be
-//!   dispatched. Dispatch methods return [`ColdStorageError::TaskTerminated`].
+//! - **Normal operation**: Callers that do not await cold writes may see cold
+//!   storage lag hot by a few blocks during ingest.
+//! - **Task termination**: If the handle's semaphores are closed, reads and
+//!   writes return [`ColdStorageError::TaskTerminated`].
 //!
 //! ## When Cold May Have Stale Data
 //!
@@ -65,16 +57,16 @@
 //!
 //! ```ignore
 //! use tokio_util::sync::CancellationToken;
-//! use signet_cold::{ColdStorageTask, mem::MemColdBackend};
+//! use signet_cold::{ColdStorage, mem::MemColdBackend};
 //!
 //! let cancel = CancellationToken::new();
-//! let handle = ColdStorageTask::spawn(MemColdBackend::new(), cancel);
+//! let handle = ColdStorage::new(MemColdBackend::new(), cancel);
 //!
 //! // Use the handle to interact with cold storage
 //! let header = handle.get_header_by_number(100).await?;
 //!
-//! // Get a read-only handle for query-only components
-//! let reader = handle.reader();
+//! // Clone cheaply to share across tasks
+//! let reader = handle.clone();
 //! let tx = reader.get_tx_by_hash(hash).await?;
 //! ```
 //!
@@ -98,7 +90,7 @@
 //!     ///
 //!     /// * `handle` - The cold storage handle to write through
 //!     /// * `buffer_capacity` - Number of blocks to buffer before flushing
-//!     pub fn new(handle: &ColdStorageHandle, buffer_capacity: usize) -> Self;
+//!     pub fn new(handle: &ColdStorage<B>, buffer_capacity: usize) -> Self;
 //!
 //!     /// Push a block to the write buffer.
 //!     ///
@@ -126,7 +118,7 @@
 //! # Feature Flags
 //!
 //! - **`in-memory`**: Enables the `mem` module, providing an in-memory
-//!   [`ColdStorage`] backend for testing.
+//!   [`ColdStorageBackend`] backend for testing.
 //! - **`test-utils`**: Enables the `conformance` module with backend
 //!   conformance tests. Implies `in-memory`.
 
@@ -142,10 +134,12 @@
 #![deny(unused_must_use, rust_2018_idioms)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod cache;
 mod error;
+mod metrics;
 pub use error::{ColdResult, ColdStorageError};
-mod request;
-pub use request::{AppendBlockRequest, ColdReadRequest, ColdWriteRequest, Responder};
+mod handle;
+pub use handle::ColdStorage;
 mod specifier;
 pub use alloy::rpc::types::{Filter, Log as RpcLog};
 pub use signet_storage_types::{Confirmed, Recovered};
@@ -159,14 +153,10 @@ pub use cold_receipt::ColdReceipt;
 mod stream;
 pub use stream::{StreamParams, produce_log_stream_default};
 mod traits;
-pub use traits::{BlockData, ColdStorage, ColdStorageRead, ColdStorageWrite, LogStream};
+pub use traits::{BlockData, ColdStorageBackend, ColdStorageRead, ColdStorageWrite, LogStream};
 
 pub mod connect;
 pub use connect::ColdConnect;
-
-/// Task module containing the storage task runner and handles.
-pub mod task;
-pub use task::{ColdStorageHandle, ColdStorageReadHandle, ColdStorageTask};
 
 /// Conformance tests for cold storage backends.
 #[cfg(any(test, feature = "test-utils"))]

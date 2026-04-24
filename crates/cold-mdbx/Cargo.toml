@@ -24,6 +24,7 @@ signet-libmdbx.workspace = true
 signet-storage-types.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 signet-hot-mdbx = { workspace = true, features = ["test-utils"] }

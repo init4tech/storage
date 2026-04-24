@@ -3,8 +3,8 @@
 //! The cold storage interface is split into three traits:
 //!
 //! - [`ColdStorageRead`] — read-only access (`&self`, `Clone`)
-//! - [`ColdStorageWrite`] — write access (`&mut self`)
-//! - [`ColdStorage`] — supertrait combining both, with `drain_above`
+//! - [`ColdStorageWrite`] — write access (`&self`)
+//! - [`ColdStorageBackend`] — supertrait combining both, with `drain_above`
 
 use crate::{
     ColdReceipt, ColdResult, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
@@ -244,30 +244,61 @@ pub trait ColdStorageRead: Clone + Send + Sync + 'static {
 ///   transaction by hash) require the implementation to maintain appropriate
 ///   indexes. These indexes must be updated during `append_block` and cleaned
 ///   during `truncate_above`.
-pub trait ColdStorageWrite: Send + 'static {
+pub trait ColdStorageWrite: Send + Sync + 'static {
     /// Append a single block to cold storage.
-    fn append_block(&mut self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send;
+    fn append_block(&self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send;
 
     /// Append multiple blocks to cold storage.
-    fn append_blocks(
-        &mut self,
-        data: Vec<BlockData>,
-    ) -> impl Future<Output = ColdResult<()>> + Send;
+    fn append_blocks(&self, data: Vec<BlockData>) -> impl Future<Output = ColdResult<()>> + Send;
 
     /// Truncate all data above the given block number (exclusive).
     ///
     /// This removes block N+1 and higher from all tables. Used for reorg handling.
-    fn truncate_above(&mut self, block: BlockNumber)
-    -> impl Future<Output = ColdResult<()>> + Send;
+    fn truncate_above(&self, block: BlockNumber) -> impl Future<Output = ColdResult<()>> + Send;
 }
 
 /// Combined read and write cold storage backend trait.
 ///
 /// Combines [`ColdStorageRead`] and [`ColdStorageWrite`] and provides
-/// [`drain_above`](ColdStorage::drain_above), which reads receipts then
+/// [`drain_above`](ColdStorageBackend::drain_above), which reads receipts then
 /// truncates. The default implementation is correct but not atomic;
 /// backends should override with an atomic version when possible.
-pub trait ColdStorage: ColdStorageRead + ColdStorageWrite {
+///
+/// # Timeouts (mandatory)
+///
+/// Every implementation MUST enforce a wall-clock timeout on both read
+/// and write operations. The handle does not apply a dispatcher-side
+/// deadline; the backend is the only place where a stuck call can be
+/// bounded.
+///
+/// - Implementations using a pooled async client (e.g. sqlx) MUST apply
+///   a server-side statement-level timeout at the start of every
+///   transaction.
+/// - Implementations using synchronous, uninterruptible calls (e.g.
+///   MDBX) MUST perform in-body deadline checks between iteration
+///   steps. Single-step point lookups may rely on the backend's native
+///   latency bounds and skip the check.
+/// - Timeouts MUST be configurable per operation class (read, write)
+///   via builder methods on the connector. Defaults SHOULD be 500ms
+///   for reads and 2s for writes unless the backend's latency profile
+///   requires different values.
+/// - Timeout expiry MUST return an error at any callable-abort point
+///   (pre-commit iteration, async cancellation, pooled-client
+///   server-side cancellation) and MUST NOT return stale or partial
+///   results from such an abort.
+/// - For synchronous, uninterruptible commits (e.g. MDBX writes), the
+///   implementation MAY complete an in-flight commit past the
+///   deadline; in that case it MUST log the overrun and the
+///   `write_timeout` acts as an SLO + alerting signal rather than a
+///   hard abort. The commit, if it completes, is authoritative.
+/// - Where abort IS possible, the implementation MUST ensure the
+///   underlying transaction rolls back on timeout so backend state
+///   remains consistent.
+///
+/// Backends that cannot honor this contract (e.g. a toy in-memory stub
+/// used for tests) may document their exemption explicitly in their
+/// own type docs; the trait docs remain the authoritative contract.
+pub trait ColdStorageBackend: ColdStorageRead + ColdStorageWrite {
     /// Read and remove all blocks above the given block number.
     ///
     /// Returns receipts for each block above `block` in ascending order,
@@ -279,7 +310,7 @@ pub trait ColdStorage: ColdStorageRead + ColdStorageWrite {
     /// not atomic. Backends should override with an atomic version
     /// when possible.
     fn drain_above(
-        &mut self,
+        &self,
         block: BlockNumber,
     ) -> impl Future<Output = ColdResult<Vec<Vec<ColdReceipt>>>> + Send {
         async move {

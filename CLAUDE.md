@@ -21,7 +21,7 @@ indexed by block. Uses task-based async pattern with handles.
 
 ## Key Traits
 
-- `ColdStorage`: Backend interface for cold storage
+- `ColdStorageBackend`: Backend interface for cold storage
 - `HotKv`, `HotKvRead`, `HotKvWrite`: Hot storage abstractions
 - `HistoryRead`, `HistoryWrite`: Higher-level table operations
 
