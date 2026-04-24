@@ -30,6 +30,7 @@ impl From<MdbxColdError> for signet_cold::ColdStorageError {
     fn from(error: MdbxColdError) -> Self {
         match error {
             MdbxColdError::TooManyLogs(limit) => Self::TooManyLogs { limit },
+            MdbxColdError::Timeout(duration) => Self::DeadlineExceeded(duration),
             other => Self::Backend(Box::new(other)),
         }
     }

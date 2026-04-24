@@ -1,6 +1,6 @@
 //! Read timeouts must trip when an iterator exceeds the configured budget.
 
-use signet_cold::{ColdStorageRead, SignetEventsSpecifier};
+use signet_cold::{ColdStorageError, ColdStorageRead, SignetEventsSpecifier};
 use signet_cold_mdbx::MdbxColdBackend;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -16,10 +16,9 @@ async fn iterator_read_timeout_trips_on_huge_range() {
         .await;
 
     let err = res.expect_err("should time out");
-    let msg = err.to_string();
     assert!(
-        msg.contains("timed out") || msg.contains("Timeout"),
-        "expected timeout in error: {msg}"
+        matches!(err, ColdStorageError::DeadlineExceeded(_)),
+        "expected DeadlineExceeded, got: {err:?}"
     );
 }
 

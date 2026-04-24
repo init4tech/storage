@@ -147,12 +147,27 @@ fn produce_log_stream_blocking(
         let mut block_count = 0usize;
 
         for result in iter {
+            // Per-receipt deadline check bounds iteration cost across
+            // blocks with many receipts.
+            if std::time::Instant::now() > deadline {
+                let _ = sender.blocking_send(Err(ColdStorageError::StreamDeadlineExceeded));
+                return;
+            }
             let (tx_idx, ir): (u64, IndexedReceipt) = try_stream!(sender, result);
             let tx_hash = ir.tx_hash;
             let first_log_index = ir.first_log_index;
             for (log_idx, log) in ir.receipt.inner.logs.into_iter().enumerate() {
                 if !filter.matches(&log) {
                     continue;
+                }
+                // Per-log deadline check bounds stall time when the
+                // consumer is slow: `blocking_send` parks this thread,
+                // so without this check a single block with thousands
+                // of matching logs can run arbitrarily past the
+                // deadline.
+                if std::time::Instant::now() > deadline {
+                    let _ = sender.blocking_send(Err(ColdStorageError::StreamDeadlineExceeded));
+                    return;
                 }
                 // Enforce the global log limit across all blocks.
                 block_count += 1;
@@ -193,12 +208,35 @@ fn produce_log_stream_blocking(
 /// This backend stores historical blockchain data in an MDBX database.
 /// It implements the [`ColdStorageBackend`] trait for use with the cold storage
 /// task runner.
+///
+/// # Timeout semantics
+///
+/// - **Iterator reads** (`get_logs`, `get_signet_events` range,
+///   `get_zenith_headers` range, `produce_log_stream`) enforce
+///   `read_timeout` via in-body `Instant::now()` checks between
+///   iteration steps. See [`with_read_timeout`](Self::with_read_timeout).
+/// - **Point lookups** (`get_header`, `get_transaction`, `get_receipt`,
+///   `get_zenith_header`, `get_latest_block`, and the per-block
+///   `*_in_block` helpers) do **NOT** enforce a wall-clock deadline.
+///   MDBX point reads are expected to be sub-millisecond on hot pages,
+///   but may block on disk I/O for cold pages or while an adjacent
+///   writer performs a page split. An unbounded stall here ties up one
+///   `spawn_blocking` worker AND one `read_sem` permit on the handle
+///   side — the handle does not wrap these calls in
+///   `tokio::time::timeout`. Callers that need fail-fast behavior on
+///   stuck I/O should apply their own timeout at the call site.
+/// - **Writes** (`append_block`, `append_blocks`, `truncate_above`,
+///   `drain_above`) record elapsed time against `write_timeout` and
+///   emit a [`tracing::warn!`] on overrun, but the commit is
+///   uninterruptible: `write_timeout` is an SLO/alerting signal only,
+///   not a hard abort.
 #[derive(Clone)]
 pub struct MdbxColdBackend {
     /// The MDBX environment.
     env: DatabaseEnv,
-    /// Wall-clock deadline for read operations; checked between per-block
-    /// iterations on iterator reads.
+    /// Wall-clock deadline for iterator read operations; checked between
+    /// per-block (and per-receipt / per-event) iteration steps. Point
+    /// lookups do NOT consult this deadline — see the type-level docs.
     read_timeout: Duration,
     /// Advisory deadline for write operations. Writes that exceed this are
     /// logged via [`tracing::warn!`] but still report success.
@@ -217,8 +255,13 @@ impl MdbxColdBackend {
         Self { env, read_timeout: DEFAULT_READ_TIMEOUT, write_timeout: DEFAULT_WRITE_TIMEOUT }
     }
 
-    /// Set the read deadline. Applied between per-block iterations on
-    /// iterator reads; point lookups do not check this deadline.
+    /// Set the read deadline for iterator reads.
+    ///
+    /// Applied between per-block and per-item iteration steps on iterator
+    /// reads (`get_logs`, range queries, `produce_log_stream`). Point
+    /// lookups (`get_header`, `get_transaction`, etc.) do NOT consult
+    /// this deadline — see the type-level docs on [`MdbxColdBackend`]
+    /// for the exemption rationale and its operational implications.
     #[must_use]
     pub const fn with_read_timeout(mut self, read_timeout: Duration) -> Self {
         self.read_timeout = read_timeout;
@@ -485,6 +528,11 @@ impl MdbxColdBackend {
                 return Err(MdbxColdError::Timeout(read_timeout));
             }
             for item in cursor.iter_k2(&block)? {
+                // Per-event deadline check so a single block with many
+                // events cannot run past the deadline.
+                if Instant::now() > deadline {
+                    return Err(MdbxColdError::Timeout(read_timeout));
+                }
                 events.push(item?.1);
             }
         }
@@ -666,6 +714,11 @@ impl MdbxColdBackend {
             let block_timestamp = sealed.timestamp;
 
             for item in receipt_cursor.iter_k2(&block_num)? {
+                // Per-receipt deadline check so a single block with
+                // thousands of receipts cannot run past the deadline.
+                if Instant::now() > deadline {
+                    return Err(MdbxColdError::Timeout(read_timeout));
+                }
                 let (tx_idx, ir) = item?;
                 let tx_hash = ir.tx_hash;
                 let first_log_index = ir.first_log_index;
@@ -875,49 +928,53 @@ impl ColdStorageRead for MdbxColdBackend {
     }
 }
 
+/// Log an advisory warning if a successful write exceeded the threshold.
+///
+/// Only logs on success: a failed write that overran the threshold already
+/// surfaces a `Backend` error to the caller, and a noisy overrun WARN would
+/// poison SLO alerting built on this signal.
+fn warn_on_overrun(op: &'static str, elapsed: Duration, threshold: Duration, is_ok: bool) {
+    if is_ok && elapsed > threshold {
+        tracing::warn!(
+            op,
+            elapsed_ms = elapsed.as_millis() as u64,
+            threshold_ms = threshold.as_millis() as u64,
+            "mdbx write exceeded advisory write timeout",
+        );
+    }
+}
+
 impl ColdStorageWrite for MdbxColdBackend {
     async fn append_block(&self, data: BlockData) -> ColdResult<()> {
         let threshold = self.write_timeout;
+        let this = self.clone();
         let start = Instant::now();
-        let result = tokio::task::block_in_place(|| self.append_block_inner(data));
-        let elapsed = start.elapsed();
-        if elapsed > threshold {
-            tracing::warn!(
-                elapsed_ms = elapsed.as_millis() as u64,
-                threshold_ms = threshold.as_millis() as u64,
-                "mdbx append_block exceeded advisory write timeout",
-            );
-        }
+        let result = tokio::task::spawn_blocking(move || this.append_block_inner(data))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?;
+        warn_on_overrun("append_block", start.elapsed(), threshold, result.is_ok());
         Ok(result?)
     }
 
     async fn append_blocks(&self, data: Vec<BlockData>) -> ColdResult<()> {
         let threshold = self.write_timeout;
+        let this = self.clone();
         let start = Instant::now();
-        let result = tokio::task::block_in_place(|| self.append_blocks_inner(data));
-        let elapsed = start.elapsed();
-        if elapsed > threshold {
-            tracing::warn!(
-                elapsed_ms = elapsed.as_millis() as u64,
-                threshold_ms = threshold.as_millis() as u64,
-                "mdbx append_blocks exceeded advisory write timeout",
-            );
-        }
+        let result = tokio::task::spawn_blocking(move || this.append_blocks_inner(data))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?;
+        warn_on_overrun("append_blocks", start.elapsed(), threshold, result.is_ok());
         Ok(result?)
     }
 
     async fn truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
         let threshold = self.write_timeout;
+        let this = self.clone();
         let start = Instant::now();
-        let result = tokio::task::block_in_place(|| self.truncate_above_inner(block));
-        let elapsed = start.elapsed();
-        if elapsed > threshold {
-            tracing::warn!(
-                elapsed_ms = elapsed.as_millis() as u64,
-                threshold_ms = threshold.as_millis() as u64,
-                "mdbx truncate_above exceeded advisory write timeout",
-            );
-        }
+        let result = tokio::task::spawn_blocking(move || this.truncate_above_inner(block))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?;
+        warn_on_overrun("truncate_above", start.elapsed(), threshold, result.is_ok());
         Ok(result?)
     }
 }
@@ -925,16 +982,12 @@ impl ColdStorageWrite for MdbxColdBackend {
 impl ColdStorageBackend for MdbxColdBackend {
     async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
         let threshold = self.write_timeout;
+        let this = self.clone();
         let start = Instant::now();
-        let result = tokio::task::block_in_place(|| self.drain_above_inner(block));
-        let elapsed = start.elapsed();
-        if elapsed > threshold {
-            tracing::warn!(
-                elapsed_ms = elapsed.as_millis() as u64,
-                threshold_ms = threshold.as_millis() as u64,
-                "mdbx drain_above exceeded advisory write timeout",
-            );
-        }
+        let result = tokio::task::spawn_blocking(move || this.drain_above_inner(block))
+            .await
+            .map_err(|_| ColdStorageError::TaskTerminated)?;
+        warn_on_overrun("drain_above", start.elapsed(), threshold, result.is_ok());
         Ok(result?)
     }
 }
@@ -950,5 +1003,22 @@ mod tests {
         let dir = tempdir().unwrap();
         let backend = MdbxColdBackend::open_rw(dir.path()).unwrap();
         conformance(backend).await.unwrap();
+    }
+
+    /// Regression: writes must not rely on `tokio::task::block_in_place`,
+    /// which panics on a single-threaded runtime.
+    #[tokio::test(flavor = "current_thread")]
+    async fn writes_work_on_current_thread_runtime() {
+        use signet_cold::{ColdStorageRead, ColdStorageWrite, conformance::make_test_block};
+
+        let dir = tempdir().unwrap();
+        let backend = MdbxColdBackend::open_rw(dir.path()).unwrap();
+
+        backend.append_block(make_test_block(0)).await.unwrap();
+        backend.append_blocks(vec![make_test_block(1), make_test_block(2)]).await.unwrap();
+        backend.truncate_above(1).await.unwrap();
+
+        let latest = backend.get_latest_block().await.unwrap();
+        assert_eq!(latest, Some(1));
     }
 }
