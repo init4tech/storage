@@ -120,8 +120,14 @@ impl SqlConnector {
     /// On Postgres this is applied via `SET LOCAL statement_timeout`
     /// at the start of every read transaction. On SQLite the value is
     /// stored but not enforced.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `d` rounds to 0 ms (Postgres treats `0` as "no
+    /// timeout", which would silently disable the trait contract).
     #[must_use]
-    pub const fn with_read_timeout(mut self, d: Duration) -> Self {
+    pub fn with_read_timeout(mut self, d: Duration) -> Self {
+        assert!(d.as_millis() >= 1, "read_timeout must be >= 1ms (got {d:?})");
         self.read_timeout = d;
         self
     }
@@ -131,8 +137,13 @@ impl SqlConnector {
     /// On Postgres this is applied via `SET LOCAL statement_timeout`
     /// at the start of every write transaction. On SQLite the value is
     /// stored but not enforced.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `d` rounds to 0 ms. See [`with_read_timeout`](Self::with_read_timeout).
     #[must_use]
-    pub const fn with_write_timeout(mut self, d: Duration) -> Self {
+    pub fn with_write_timeout(mut self, d: Duration) -> Self {
+        assert!(d.as_millis() >= 1, "write_timeout must be >= 1ms (got {d:?})");
         self.write_timeout = d;
         self
     }

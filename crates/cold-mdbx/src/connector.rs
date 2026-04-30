@@ -76,16 +76,26 @@ impl MdbxConnector {
 
     /// Set the read deadline applied to the cold backend produced by
     /// [`ColdConnect::connect`]. See [`MdbxColdBackend::with_read_timeout`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `read_timeout` is zero.
     #[must_use]
-    pub const fn with_read_timeout(mut self, read_timeout: Duration) -> Self {
+    pub fn with_read_timeout(mut self, read_timeout: Duration) -> Self {
+        assert!(!read_timeout.is_zero(), "read_timeout must be non-zero");
         self.read_timeout = read_timeout;
         self
     }
 
     /// Set the advisory write deadline applied to the cold backend produced
     /// by [`ColdConnect::connect`]. See [`MdbxColdBackend::with_write_timeout`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `write_timeout` is zero.
     #[must_use]
-    pub const fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
+    pub fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
+        assert!(!write_timeout.is_zero(), "write_timeout must be non-zero");
         self.write_timeout = write_timeout;
         self
     }
