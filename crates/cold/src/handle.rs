@@ -39,6 +39,46 @@ use tracing::Instrument;
 /// Default maximum deadline for streaming operations.
 const DEFAULT_MAX_STREAM_DEADLINE: Duration = Duration::from_secs(60);
 
+/// Default fallback for the stream-setup `get_latest_block` deadline
+/// when the backend does not advertise a [`read_timeout`]. Picked to
+/// match the SQL/MDBX defaults so behaviour is predictable.
+///
+/// [`read_timeout`]: crate::ColdStorageBackend::read_timeout
+const DEFAULT_STREAM_SETUP_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Emit an advisory WARN if a successful write exceeded its end-to-end
+/// SLO target. Only fires on `Ok`: a failed write already surfaces an
+/// error to the caller, and a noisy overrun WARN on top would poison
+/// alerting built on this signal.
+fn warn_on_write_overrun(
+    op: &'static str,
+    elapsed: Duration,
+    threshold: Option<Duration>,
+    is_ok: bool,
+) {
+    let Some(threshold) = threshold else { return };
+    if is_ok && elapsed > threshold {
+        tracing::warn!(
+            op,
+            elapsed_ms = elapsed.as_millis() as u64,
+            threshold_ms = threshold.as_millis() as u64,
+            "cold write exceeded end-to-end write timeout (queue + drain + commit)",
+        );
+    }
+}
+
+/// Log a `JoinError` from a tracked spawn before mapping to
+/// [`ColdStorageError::TaskTerminated`]. A panic inside the spawned body
+/// is otherwise indistinguishable from graceful shutdown for the
+/// caller, which is a poor on-call signal.
+fn log_join_error(op: &'static str, e: &tokio::task::JoinError) {
+    if e.is_panic() {
+        tracing::error!(op, error = %e, "cold storage spawned task panicked");
+    } else if e.is_cancelled() {
+        tracing::debug!(op, "cold storage spawned task cancelled");
+    }
+}
+
 /// Maximum concurrent read operations.
 const MAX_CONCURRENT_READERS: usize = 64;
 
@@ -170,7 +210,10 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
                 .in_current_span(),
             )
             .await
-            .map_err(|_| ColdStorageError::TaskTerminated)?
+            .map_err(|e| {
+                log_join_error(op, &e);
+                ColdStorageError::TaskTerminated
+            })?
     }
 
     /// Spawn a write task under the `write_sem` permit, holding a full drain
@@ -189,7 +232,14 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         F: FnOnce(Arc<Inner<B>>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ColdResult<T>> + Send,
     {
-        let wait = Instant::now();
+        // End-to-end SLO start: capture before permit acquisition so the
+        // measurement covers `write_sem` queueing and the read drain in
+        // addition to the backend commit. This is the failure shape the
+        // PR targets — a slow drain followed by a fast commit must surface
+        // as an SLO violation, not as a sub-threshold backend timing.
+        let e2e_start = Instant::now();
+        let threshold = self.inner.backend.write_timeout();
+
         let write_permit = self
             .inner
             .write_sem
@@ -197,7 +247,7 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
             .acquire_owned()
             .await
             .map_err(|_| ColdStorageError::TaskTerminated)?;
-        metrics::record_permit_wait("write", wait.elapsed());
+        metrics::record_permit_wait("write", e2e_start.elapsed());
 
         let drain_wait = Instant::now();
         let drain = self
@@ -223,12 +273,16 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
                     if let Err(ref e) = result {
                         metrics::record_op_error(op, e.kind());
                     }
+                    warn_on_write_overrun(op, e2e_start.elapsed(), threshold, result.is_ok());
                     result
                 }
                 .in_current_span(),
             )
             .await
-            .map_err(|_| ColdStorageError::TaskTerminated)?
+            .map_err(|e| {
+                log_join_error(op, &e);
+                ColdStorageError::TaskTerminated
+            })?
     }
 
     // ==========================================================================
@@ -518,15 +572,28 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
         // bypass `read_sem` and the drain barrier: a stream asking for
         // "latest" should observe latest at setup time even alongside an
         // in-flight write.
+        //
+        // Wrap the setup read in a wall-clock timeout so a stuck backend
+        // (cold MDBX page, saturated PG pool) cannot stall N concurrent
+        // setup callers indefinitely. The future drops on timeout but the
+        // backend work continues — same trade-off the rest of the design
+        // accepts.
         let to = match filter.get_to_block() {
             Some(to) => to,
-            None => match self.inner.backend.get_latest_block().await? {
-                Some(latest) => latest,
-                None => {
-                    let (_tx, rx) = mpsc::channel(1);
-                    return Ok(ReceiverStream::new(rx));
+            None => {
+                let setup_to =
+                    self.inner.backend.read_timeout().unwrap_or(DEFAULT_STREAM_SETUP_TIMEOUT);
+                let latest = tokio::time::timeout(setup_to, self.inner.backend.get_latest_block())
+                    .await
+                    .map_err(|_| ColdStorageError::DeadlineExceeded(setup_to))??;
+                match latest {
+                    Some(latest) => latest,
+                    None => {
+                        let (_tx, rx) = mpsc::channel(1);
+                        return Ok(ReceiverStream::new(rx));
+                    }
                 }
-            },
+            }
         };
 
         let wait = Instant::now();

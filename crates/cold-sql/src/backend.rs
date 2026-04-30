@@ -150,8 +150,15 @@ impl SqlColdBackend {
     /// On Postgres this sets `statement_timeout` on every transaction
     /// opened by a read method. On SQLite the value is stored but
     /// not enforced — SQLite has no equivalent mechanism.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `d` rounds to 0 ms. Postgres interprets
+    /// `statement_timeout = 0` as "no timeout", which would silently
+    /// disable the trait-level mandatory-timeout contract.
     #[must_use]
-    pub const fn with_read_timeout(mut self, d: Duration) -> Self {
+    pub fn with_read_timeout(mut self, d: Duration) -> Self {
+        assert!(d.as_millis() >= 1, "read_timeout must be >= 1ms (got {d:?})");
         self.read_timeout = d;
         self
     }
@@ -161,8 +168,13 @@ impl SqlColdBackend {
     /// On Postgres this sets `statement_timeout` on every transaction
     /// opened by a write method. On SQLite the value is stored but
     /// not enforced — SQLite has no equivalent mechanism.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `d` rounds to 0 ms. See [`with_read_timeout`](Self::with_read_timeout).
     #[must_use]
-    pub const fn with_write_timeout(mut self, d: Duration) -> Self {
+    pub fn with_write_timeout(mut self, d: Duration) -> Self {
+        assert!(d.as_millis() >= 1, "write_timeout must be >= 1ms (got {d:?})");
         self.write_timeout = d;
         self
     }
@@ -1571,6 +1583,14 @@ impl ColdStorageWrite for SqlColdBackend {
 }
 
 impl ColdStorageBackend for SqlColdBackend {
+    fn read_timeout(&self) -> Option<Duration> {
+        Some(self.read_timeout)
+    }
+
+    fn write_timeout(&self) -> Option<Duration> {
+        Some(self.write_timeout)
+    }
+
     async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
         let bn = to_i64(block);
         let mut tx = self.begin_write().await.map_err(ColdStorageError::from)?;

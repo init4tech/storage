@@ -181,6 +181,22 @@ impl ColdStorageWrite for EitherCold {
 
 #[allow(clippy::manual_async_fn)]
 impl ColdStorageBackend for EitherCold {
+    fn read_timeout(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Mdbx(backend) => backend.read_timeout(),
+            #[cfg(any(feature = "postgres", feature = "sqlite"))]
+            Self::Sql(backend) => backend.read_timeout(),
+        }
+    }
+
+    fn write_timeout(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Mdbx(backend) => backend.write_timeout(),
+            #[cfg(any(feature = "postgres", feature = "sqlite"))]
+            Self::Sql(backend) => backend.write_timeout(),
+        }
+    }
+
     fn drain_above(
         &self,
         block: BlockNumber,

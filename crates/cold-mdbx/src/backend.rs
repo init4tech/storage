@@ -125,7 +125,7 @@ fn produce_log_stream_blocking(
     for block_num in from..=to {
         // Check the deadline before starting each block so we
         // don't begin reading after the caller's timeout.
-        if std::time::Instant::now() > deadline {
+        if Instant::now() > deadline {
             let _ = sender.blocking_send(Err(ColdStorageError::StreamDeadlineExceeded));
             return;
         }
@@ -149,7 +149,7 @@ fn produce_log_stream_blocking(
         for result in iter {
             // Per-receipt deadline check bounds iteration cost across
             // blocks with many receipts.
-            if std::time::Instant::now() > deadline {
+            if Instant::now() > deadline {
                 let _ = sender.blocking_send(Err(ColdStorageError::StreamDeadlineExceeded));
                 return;
             }
@@ -165,7 +165,7 @@ fn produce_log_stream_blocking(
                 // so without this check a single block with thousands
                 // of matching logs can run arbitrarily past the
                 // deadline.
-                if std::time::Instant::now() > deadline {
+                if Instant::now() > deadline {
                     let _ = sender.blocking_send(Err(ColdStorageError::StreamDeadlineExceeded));
                     return;
                 }
@@ -226,10 +226,11 @@ fn produce_log_stream_blocking(
 ///   `tokio::time::timeout`. Callers that need fail-fast behavior on
 ///   stuck I/O should apply their own timeout at the call site.
 /// - **Writes** (`append_block`, `append_blocks`, `truncate_above`,
-///   `drain_above`) record elapsed time against `write_timeout` and
-///   emit a [`tracing::warn!`] on overrun, but the commit is
-///   uninterruptible: `write_timeout` is an SLO/alerting signal only,
-///   not a hard abort.
+///   `drain_above`) are uninterruptible MDBX commits. The handle
+///   measures end-to-end latency (including `write_sem` wait and the
+///   read drain) against `write_timeout` and emits a `tracing::warn!`
+///   on overrun via the `ColdStorageBackend::write_timeout` accessor;
+///   `write_timeout` is an SLO/alerting signal only, not a hard abort.
 #[derive(Clone)]
 pub struct MdbxColdBackend {
     /// The MDBX environment.
@@ -239,7 +240,7 @@ pub struct MdbxColdBackend {
     /// lookups do NOT consult this deadline — see the type-level docs.
     read_timeout: Duration,
     /// Advisory deadline for write operations. Writes that exceed this are
-    /// logged via [`tracing::warn!`] but still report success.
+    /// logged via `tracing::warn!` but still report success.
     write_timeout: Duration,
 }
 
@@ -262,17 +263,30 @@ impl MdbxColdBackend {
     /// lookups (`get_header`, `get_transaction`, etc.) do NOT consult
     /// this deadline — see the type-level docs on [`MdbxColdBackend`]
     /// for the exemption rationale and its operational implications.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `read_timeout` is zero — a zero deadline is a
+    /// configuration mistake, not a "disable" signal, and the trait
+    /// contract requires a real bound.
     #[must_use]
-    pub const fn with_read_timeout(mut self, read_timeout: Duration) -> Self {
+    pub fn with_read_timeout(mut self, read_timeout: Duration) -> Self {
+        assert!(!read_timeout.is_zero(), "read_timeout must be non-zero");
         self.read_timeout = read_timeout;
         self
     }
 
     /// Set the advisory write deadline. Writes exceeding this threshold
-    /// emit a [`tracing::warn!`] but still report success to the caller;
+    /// emit a `tracing::warn!` but still report success to the caller;
     /// MDBX commits are uninterruptible.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `write_timeout` is zero. See
+    /// [`with_read_timeout`](Self::with_read_timeout).
     #[must_use]
-    pub const fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
+    pub fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
+        assert!(!write_timeout.is_zero(), "write_timeout must be non-zero");
         self.write_timeout = write_timeout;
         self
     }
@@ -726,6 +740,13 @@ impl MdbxColdBackend {
                     if !filter.matches(&log) {
                         continue;
                     }
+                    // Per-log deadline check: a single receipt with
+                    // thousands of matching logs would otherwise run
+                    // unchecked past the deadline. Mirrors the
+                    // streaming path in `produce_log_stream_blocking`.
+                    if Instant::now() > deadline {
+                        return Err(MdbxColdError::Timeout(read_timeout));
+                    }
                     if results.len() >= max_logs {
                         return Err(MdbxColdError::TooManyLogs(max_logs));
                     }
@@ -928,67 +949,47 @@ impl ColdStorageRead for MdbxColdBackend {
     }
 }
 
-/// Log an advisory warning if a successful write exceeded the threshold.
-///
-/// Only logs on success: a failed write that overran the threshold already
-/// surfaces a `Backend` error to the caller, and a noisy overrun WARN would
-/// poison SLO alerting built on this signal.
-fn warn_on_overrun(op: &'static str, elapsed: Duration, threshold: Duration, is_ok: bool) {
-    if is_ok && elapsed > threshold {
-        tracing::warn!(
-            op,
-            elapsed_ms = elapsed.as_millis() as u64,
-            threshold_ms = threshold.as_millis() as u64,
-            "mdbx write exceeded advisory write timeout",
-        );
-    }
-}
-
 impl ColdStorageWrite for MdbxColdBackend {
     async fn append_block(&self, data: BlockData) -> ColdResult<()> {
-        let threshold = self.write_timeout;
         let this = self.clone();
-        let start = Instant::now();
-        let result = tokio::task::spawn_blocking(move || this.append_block_inner(data))
+        tokio::task::spawn_blocking(move || this.append_block_inner(data))
             .await
-            .map_err(|_| ColdStorageError::TaskTerminated)?;
-        warn_on_overrun("append_block", start.elapsed(), threshold, result.is_ok());
-        Ok(result?)
+            .map_err(|_| ColdStorageError::TaskTerminated)?
+            .map_err(ColdStorageError::from)
     }
 
     async fn append_blocks(&self, data: Vec<BlockData>) -> ColdResult<()> {
-        let threshold = self.write_timeout;
         let this = self.clone();
-        let start = Instant::now();
-        let result = tokio::task::spawn_blocking(move || this.append_blocks_inner(data))
+        tokio::task::spawn_blocking(move || this.append_blocks_inner(data))
             .await
-            .map_err(|_| ColdStorageError::TaskTerminated)?;
-        warn_on_overrun("append_blocks", start.elapsed(), threshold, result.is_ok());
-        Ok(result?)
+            .map_err(|_| ColdStorageError::TaskTerminated)?
+            .map_err(ColdStorageError::from)
     }
 
     async fn truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
-        let threshold = self.write_timeout;
         let this = self.clone();
-        let start = Instant::now();
-        let result = tokio::task::spawn_blocking(move || this.truncate_above_inner(block))
+        tokio::task::spawn_blocking(move || this.truncate_above_inner(block))
             .await
-            .map_err(|_| ColdStorageError::TaskTerminated)?;
-        warn_on_overrun("truncate_above", start.elapsed(), threshold, result.is_ok());
-        Ok(result?)
+            .map_err(|_| ColdStorageError::TaskTerminated)?
+            .map_err(ColdStorageError::from)
     }
 }
 
 impl ColdStorageBackend for MdbxColdBackend {
+    fn read_timeout(&self) -> Option<Duration> {
+        Some(self.read_timeout)
+    }
+
+    fn write_timeout(&self) -> Option<Duration> {
+        Some(self.write_timeout)
+    }
+
     async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
-        let threshold = self.write_timeout;
         let this = self.clone();
-        let start = Instant::now();
-        let result = tokio::task::spawn_blocking(move || this.drain_above_inner(block))
+        tokio::task::spawn_blocking(move || this.drain_above_inner(block))
             .await
-            .map_err(|_| ColdStorageError::TaskTerminated)?;
-        warn_on_overrun("drain_above", start.elapsed(), threshold, result.is_ok());
-        Ok(result?)
+            .map_err(|_| ColdStorageError::TaskTerminated)?
+            .map_err(ColdStorageError::from)
     }
 }
 

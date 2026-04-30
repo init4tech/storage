@@ -14,7 +14,7 @@ use alloy::primitives::BlockNumber;
 use signet_storage_types::{
     DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, RecoveredTx, SealedHeader,
 };
-use std::future::Future;
+use std::{future::Future, time::Duration};
 use tokio_stream::wrappers::ReceiverStream;
 
 /// A stream of log results backed by a bounded channel.
@@ -225,9 +225,11 @@ pub trait ColdStorageRead: Clone + Send + Sync + 'static {
 
 /// Write-only cold storage backend trait.
 ///
-/// All methods take `&mut self` and return `Send` futures. The write
-/// backend is exclusively owned by the task runner — no synchronization
-/// is needed.
+/// All methods take `&self` and return `Send` futures. The handle wraps
+/// the backend in an `Arc` and shares it across spawned tasks, so write
+/// implementations are responsible for any internal synchronization
+/// they need (e.g. the MDBX backend serializes writes via a single
+/// `spawn_blocking` worker behind the handle's `write_sem`).
 ///
 /// # Implementation Guide
 ///
@@ -299,6 +301,27 @@ pub trait ColdStorageWrite: Send + Sync + 'static {
 /// used for tests) may document their exemption explicitly in their
 /// own type docs; the trait docs remain the authoritative contract.
 pub trait ColdStorageBackend: ColdStorageRead + ColdStorageWrite {
+    /// Configured read deadline, if any.
+    ///
+    /// The handle reads this to scope end-to-end SLO measurements and
+    /// to bound out-of-band setup reads (e.g. resolving "to = latest"
+    /// for a log stream). `None` signals an exempt backend (test
+    /// stubs); the trait contract still requires real backends to
+    /// enforce the deadline internally — this accessor only exposes
+    /// the value to the handle.
+    fn read_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Configured write deadline, if any.
+    ///
+    /// The handle reads this to measure end-to-end write latency
+    /// (queue + drain + commit) against the SLO target. See
+    /// [`read_timeout`](Self::read_timeout) for `None` semantics.
+    fn write_timeout(&self) -> Option<Duration> {
+        None
+    }
+
     /// Read and remove all blocks above the given block number.
     ///
     /// Returns receipts for each block above `block` in ascending order,
