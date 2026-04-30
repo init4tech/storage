@@ -197,10 +197,18 @@ impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B> {
     /// # Errors
     ///
     /// - [`Hot`]: Hot storage read or unwind failed.
-    /// - [`Cold`]: Hot storage unwound but cold drain failed.
+    ///
+    /// Cold storage failures are silently swallowed: any error from
+    /// [`ColdStorage::drain_above`] (`TaskTerminated`, `Backend`,
+    /// `DeadlineExceeded`, …) collapses to "no receipts above" and the
+    /// returned [`DrainedBlock`]s carry empty receipt vecs. Operators
+    /// cannot distinguish a real cold failure from "cold has not
+    /// caught up" through this method. See `ENG-2210` for the
+    /// follow-up to either propagate non-`TaskTerminated` errors or
+    /// remove `unified.rs::drain_above` outright.
     ///
     /// [`Hot`]: crate::StorageError::Hot
-    /// [`Cold`]: crate::StorageError::Cold
+    /// [`ColdStorage::drain_above`]: signet_cold::ColdStorage::drain_above
     pub async fn drain_above(&self, block: BlockNumber) -> StorageResult<Vec<DrainedBlock>> {
         // 1–2. Read headers and unwind hot storage synchronously.
         let headers = self.unwind_hot_above(block)?;
@@ -208,7 +216,8 @@ impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B> {
             return Ok(Vec::new());
         }
 
-        // 3. Atomically drain cold (best-effort — failure = normal cold lag)
+        // 3. Drain cold (errors silently swallowed — see method docs
+        //    and ENG-2210 for the propagation follow-up).
         let cold_receipts = self.cold.drain_above(block).await.unwrap_or_default();
 
         // 4. Assemble drained blocks (zip headers with receipts, default empty).
