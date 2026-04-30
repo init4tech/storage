@@ -9,7 +9,7 @@ use signet_cold::{
     StreamParams, TransactionSpecifier, ZenithHeaderSpecifier, mem::MemColdBackend,
 };
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 
 /// Backend that parks all reads on a semaphore gate.
@@ -21,6 +21,7 @@ pub struct GatedBackend {
     inner: MemColdBackend,
     gate: Arc<Semaphore>,
     stream_gate: Arc<Semaphore>,
+    read_timeout: Option<Duration>,
 }
 
 impl GatedBackend {
@@ -31,7 +32,17 @@ impl GatedBackend {
             gate: Arc::new(Semaphore::new(0)),
             // Streams are ungated by default: effectively unbounded permits.
             stream_gate: Arc::new(Semaphore::new(usize::MAX >> 4)),
+            read_timeout: None,
         }
+    }
+
+    /// Advertise a `read_timeout` to the handle. Used to drive
+    /// `stream_logs` setup-timeout tests against a parked
+    /// `get_latest_block`.
+    #[allow(dead_code)]
+    pub const fn with_read_timeout(mut self, d: Duration) -> Self {
+        self.read_timeout = Some(d);
+        self
     }
 
     /// Build a backend whose read gate is effectively open.
@@ -168,6 +179,10 @@ impl ColdStorageWrite for GatedBackend {
 }
 
 impl ColdStorageBackend for GatedBackend {
+    fn read_timeout(&self) -> Option<Duration> {
+        self.read_timeout
+    }
+
     async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
         self.inner.drain_above(block).await
     }
