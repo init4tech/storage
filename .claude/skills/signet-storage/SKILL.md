@@ -178,8 +178,9 @@ ColdStorageReadHandle          -- Read-only handle
 - **`HistoryError<E>`** -- `NonContiguousBlock`, `ParentHashMismatch`,
   `DbNotEmpty`, `EmptyRange`, `NoBlocks`, `HeightOutOfRange`, `Db(E)`,
   `IntList`.
-- **`ColdStorageError`** -- `Backend(E)`, `NotFound`, `Cancelled`,
-  `Backpressure`, `TaskTerminated`.
+- **`ColdStorageError`** -- `Backend(E)`, `NotFound`, `TooManyLogs`,
+  `DeadlineExceeded`, `StreamDeadlineExceeded`, `ReorgDetected`,
+  `TaskTerminated`.
 - **`StorageError`** -- `Hot(HistoryError<HotKvError>)` |
   `Cold(ColdStorageError)`.
 

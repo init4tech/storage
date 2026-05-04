@@ -11,7 +11,7 @@ handling.
 The cold storage engine uses a task-based architecture with separate channels
 for reads and writes:
 
-- `ColdStorage` trait defines the backend interface
+- `ColdStorageBackend` trait defines the backend interface
 - `ColdStorageTask` processes requests from channels
 - `ColdStorageHandle` provides full read/write access
 - `ColdStorageReadHandle` provides read-only access
@@ -45,8 +45,9 @@ always authoritative.
 
 - **Normal operation**: Writes are dispatched asynchronously. Cold may be a few
   blocks behind hot.
-- **Backpressure**: If cold cannot keep up, dispatch returns
-  `ColdStorageError::Backpressure`.
+- **Deadline exceeded**: Reads that overrun their configured timeout return
+  `ColdStorageError::DeadlineExceeded`; streams return
+  `ColdStorageError::StreamDeadlineExceeded`.
 - **Task failure**: If the task stops, dispatch returns
   `ColdStorageError::TaskTerminated`.
 

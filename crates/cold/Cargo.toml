@@ -18,6 +18,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 alloy.workspace = true
 lru.workspace = true
+metrics.workspace = true
+parking_lot.workspace = true
 signet-storage-types.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

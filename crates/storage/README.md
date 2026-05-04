@@ -60,8 +60,10 @@ if let Some(first_missing) = storage.cold_lag().await? {
   hot storage and can be recovered via `replay_to_cold`.
 
 Cold dispatch errors indicate either:
-- `Backpressure`: Channel full, task alive. Transient.
-- `TaskTerminated`: Task stopped. Requires restart.
+- `DeadlineExceeded` / `StreamDeadlineExceeded`: Read overran its configured
+  timeout. Retryable with a larger deadline or narrower filter.
+- `TaskTerminated`: Handle's semaphores were closed (shutdown). Requires
+  recreating the handle.
 
 ## Re-exports
 

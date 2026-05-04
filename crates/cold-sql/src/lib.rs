@@ -1,6 +1,6 @@
 //! SQL backend for cold storage.
 //!
-//! This crate provides SQL-based implementations of the [`ColdStorage`] trait
+//! This crate provides SQL-based implementations of the [`ColdStorageBackend`] trait
 //! for storing historical blockchain data in relational databases. All data is
 //! stored in fully decomposed SQL columns for rich queryability.
 //!
@@ -18,7 +18,7 @@
 //! - **`test-utils`**: Enables both backends and propagates
 //!   `signet-cold/test-utils` for conformance testing.
 //!
-//! [`ColdStorage`]: signet_cold::ColdStorage
+//! [`ColdStorageBackend`]: signet_cold::ColdStorageBackend
 
 #![warn(
     missing_copy_implementations,

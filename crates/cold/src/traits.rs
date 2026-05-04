@@ -3,8 +3,8 @@
 //! The cold storage interface is split into three traits:
 //!
 //! - [`ColdStorageRead`] — read-only access (`&self`, `Clone`)
-//! - [`ColdStorageWrite`] — write access (`&mut self`)
-//! - [`ColdStorage`] — supertrait combining both, with `drain_above`
+//! - [`ColdStorageWrite`] — write access (`&self`)
+//! - [`ColdStorageBackend`] — supertrait combining both, with `drain_above`
 
 use crate::{
     ColdReceipt, ColdResult, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
@@ -14,7 +14,7 @@ use alloy::primitives::BlockNumber;
 use signet_storage_types::{
     DbSignetEvent, DbZenithHeader, ExecutedBlock, Receipt, RecoveredTx, SealedHeader,
 };
-use std::future::Future;
+use std::{future::Future, time::Duration};
 use tokio_stream::wrappers::ReceiverStream;
 
 /// A stream of log results backed by a bounded channel.
@@ -225,9 +225,11 @@ pub trait ColdStorageRead: Clone + Send + Sync + 'static {
 
 /// Write-only cold storage backend trait.
 ///
-/// All methods take `&mut self` and return `Send` futures. The write
-/// backend is exclusively owned by the task runner — no synchronization
-/// is needed.
+/// All methods take `&self` and return `Send` futures. The handle wraps
+/// the backend in an `Arc` and shares it across spawned tasks, so write
+/// implementations are responsible for any internal synchronization
+/// they need (e.g. the MDBX backend serializes writes via a single
+/// `spawn_blocking` worker behind the handle's `write_sem`).
 ///
 /// # Implementation Guide
 ///
@@ -244,30 +246,82 @@ pub trait ColdStorageRead: Clone + Send + Sync + 'static {
 ///   transaction by hash) require the implementation to maintain appropriate
 ///   indexes. These indexes must be updated during `append_block` and cleaned
 ///   during `truncate_above`.
-pub trait ColdStorageWrite: Send + 'static {
+pub trait ColdStorageWrite: Send + Sync + 'static {
     /// Append a single block to cold storage.
-    fn append_block(&mut self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send;
+    fn append_block(&self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send;
 
     /// Append multiple blocks to cold storage.
-    fn append_blocks(
-        &mut self,
-        data: Vec<BlockData>,
-    ) -> impl Future<Output = ColdResult<()>> + Send;
+    fn append_blocks(&self, data: Vec<BlockData>) -> impl Future<Output = ColdResult<()>> + Send;
 
     /// Truncate all data above the given block number (exclusive).
     ///
     /// This removes block N+1 and higher from all tables. Used for reorg handling.
-    fn truncate_above(&mut self, block: BlockNumber)
-    -> impl Future<Output = ColdResult<()>> + Send;
+    fn truncate_above(&self, block: BlockNumber) -> impl Future<Output = ColdResult<()>> + Send;
 }
 
 /// Combined read and write cold storage backend trait.
 ///
 /// Combines [`ColdStorageRead`] and [`ColdStorageWrite`] and provides
-/// [`drain_above`](ColdStorage::drain_above), which reads receipts then
+/// [`drain_above`](ColdStorageBackend::drain_above), which reads receipts then
 /// truncates. The default implementation is correct but not atomic;
 /// backends should override with an atomic version when possible.
-pub trait ColdStorage: ColdStorageRead + ColdStorageWrite {
+///
+/// # Timeouts (mandatory)
+///
+/// Every implementation MUST enforce a wall-clock timeout on both read
+/// and write operations. The handle does not apply a dispatcher-side
+/// deadline; the backend is the only place where a stuck call can be
+/// bounded.
+///
+/// - Implementations using a pooled async client (e.g. sqlx) MUST apply
+///   a server-side statement-level timeout at the start of every
+///   transaction.
+/// - Implementations using synchronous, uninterruptible calls (e.g.
+///   MDBX) MUST perform in-body deadline checks between iteration
+///   steps. Single-step point lookups may rely on the backend's native
+///   latency bounds and skip the check.
+/// - Timeouts MUST be configurable per operation class (read, write)
+///   via builder methods on the connector. Defaults SHOULD be 500ms
+///   for reads and 2s for writes unless the backend's latency profile
+///   requires different values.
+/// - Timeout expiry MUST return an error at any callable-abort point
+///   (pre-commit iteration, async cancellation, pooled-client
+///   server-side cancellation) and MUST NOT return stale or partial
+///   results from such an abort.
+/// - For synchronous, uninterruptible commits (e.g. MDBX writes), the
+///   implementation MAY complete an in-flight commit past the
+///   deadline; in that case it MUST log the overrun and the
+///   `write_timeout` acts as an SLO + alerting signal rather than a
+///   hard abort. The commit, if it completes, is authoritative.
+/// - Where abort IS possible, the implementation MUST ensure the
+///   underlying transaction rolls back on timeout so backend state
+///   remains consistent.
+///
+/// Backends that cannot honor this contract (e.g. a toy in-memory stub
+/// used for tests) may document their exemption explicitly in their
+/// own type docs; the trait docs remain the authoritative contract.
+pub trait ColdStorageBackend: ColdStorageRead + ColdStorageWrite {
+    /// Configured read deadline, if any.
+    ///
+    /// The handle reads this to scope end-to-end SLO measurements and
+    /// to bound out-of-band setup reads (e.g. resolving "to = latest"
+    /// for a log stream). `None` signals an exempt backend (test
+    /// stubs); the trait contract still requires real backends to
+    /// enforce the deadline internally — this accessor only exposes
+    /// the value to the handle.
+    fn read_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Configured write deadline, if any.
+    ///
+    /// The handle reads this to measure end-to-end write latency
+    /// (queue + drain + commit) against the SLO target. See
+    /// [`read_timeout`](Self::read_timeout) for `None` semantics.
+    fn write_timeout(&self) -> Option<Duration> {
+        None
+    }
+
     /// Read and remove all blocks above the given block number.
     ///
     /// Returns receipts for each block above `block` in ascending order,
@@ -279,7 +333,7 @@ pub trait ColdStorage: ColdStorageRead + ColdStorageWrite {
     /// not atomic. Backends should override with an atomic version
     /// when possible.
     fn drain_above(
-        &mut self,
+        &self,
         block: BlockNumber,
     ) -> impl Future<Output = ColdResult<Vec<Vec<ColdReceipt>>>> + Send {
         async move {

@@ -4,7 +4,7 @@
 //! It is primarily intended for testing and development.
 
 use crate::{
-    BlockData, ColdReceipt, ColdResult, ColdStorage, ColdStorageError, ColdStorageRead,
+    BlockData, ColdReceipt, ColdResult, ColdStorageBackend, ColdStorageError, ColdStorageRead,
     ColdStorageWrite, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog,
     SignetEventsSpecifier, TransactionSpecifier, ZenithHeaderSpecifier,
 };
@@ -47,6 +47,18 @@ struct MemColdBackendInner {
 ///
 /// This backend is thread-safe and suitable for concurrent access.
 /// All operations are protected by an async read-write lock.
+///
+/// # Timeout exemption
+///
+/// [`MemColdBackend`] does NOT honor the "Timeouts (mandatory)" clause of
+/// [`ColdStorageBackend`]'s trait contract. All operations are pure
+/// in-memory `BTreeMap`/`HashMap` work with no blocking I/O, so a
+/// wall-clock deadline has no meaningful effect. This is a deliberate
+/// exemption: the backend is intended for tests and development only, and
+/// MUST NOT be used as the basis for SLO measurement or production
+/// deployment.
+///
+/// [`ColdStorageBackend`]: crate::ColdStorageBackend
 #[derive(Clone)]
 pub struct MemColdBackend {
     inner: Arc<RwLock<MemColdBackendInner>>,
@@ -278,7 +290,7 @@ impl ColdStorageRead for MemColdBackend {
 }
 
 impl ColdStorageWrite for MemColdBackend {
-    async fn append_block(&mut self, data: BlockData) -> ColdResult<()> {
+    async fn append_block(&self, data: BlockData) -> ColdResult<()> {
         let mut inner = self.inner.write().await;
 
         let block = data.block_number();
@@ -326,22 +338,22 @@ impl ColdStorageWrite for MemColdBackend {
         Ok(())
     }
 
-    async fn append_blocks(&mut self, data: Vec<BlockData>) -> ColdResult<()> {
+    async fn append_blocks(&self, data: Vec<BlockData>) -> ColdResult<()> {
         for block_data in data {
             self.append_block(block_data).await?;
         }
         Ok(())
     }
 
-    async fn truncate_above(&mut self, block: BlockNumber) -> ColdResult<()> {
+    async fn truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
         let mut inner = self.inner.write().await;
         inner.truncate_above(block);
         Ok(())
     }
 }
 
-impl ColdStorage for MemColdBackend {
-    async fn drain_above(&mut self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
+impl ColdStorageBackend for MemColdBackend {
+    async fn drain_above(&self, block: BlockNumber) -> ColdResult<Vec<Vec<ColdReceipt>>> {
         let mut inner = self.inner.write().await;
 
         // Collect receipts for blocks above `block` in ascending order
@@ -381,5 +393,13 @@ mod test {
     async fn mem_backend_conformance() {
         let backend = MemColdBackend::new();
         conformance(backend).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_trait_takes_self_shared_ref() {
+        // Compile-fence: proves ColdStorageWrite can be called on &self.
+        let backend = MemColdBackend::new();
+        let r: &MemColdBackend = &backend;
+        let _ = r.truncate_above(0).await;
     }
 }

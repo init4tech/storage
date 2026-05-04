@@ -1,6 +1,6 @@
 //! Connection traits for cold storage backends.
 
-use crate::ColdStorage;
+use crate::ColdStorageBackend;
 
 /// Connector trait for cold storage backends.
 ///
@@ -8,7 +8,7 @@ use crate::ColdStorage;
 /// different backends to implement their own initialization logic.
 pub trait ColdConnect {
     /// The cold storage type produced by this connector.
-    type Cold: ColdStorage;
+    type Cold: ColdStorageBackend;
 
     /// The error type returned by connection attempts.
     type Error: std::error::Error + Send + Sync + 'static;

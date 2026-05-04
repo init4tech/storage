@@ -1,6 +1,9 @@
 //! SQL cold storage connector.
 
-use crate::{SqlColdBackend, SqlColdError};
+use crate::{
+    SqlColdBackend, SqlColdError,
+    backend::{DEFAULT_READ_TIMEOUT, DEFAULT_WRITE_TIMEOUT},
+};
 use signet_cold::ColdConnect;
 use sqlx::pool::PoolOptions;
 use std::time::Duration;
@@ -48,6 +51,8 @@ pub enum SqlConnectorError {
 pub struct SqlConnector {
     url: String,
     pool_opts: PoolOptions<sqlx::Any>,
+    read_timeout: Duration,
+    write_timeout: Duration,
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -56,7 +61,12 @@ impl SqlConnector {
     ///
     /// The database type is detected from the URL prefix.
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into(), pool_opts: PoolOptions::new() }
+        Self {
+            url: url.into(),
+            pool_opts: PoolOptions::new(),
+            read_timeout: DEFAULT_READ_TIMEOUT,
+            write_timeout: DEFAULT_WRITE_TIMEOUT,
+        }
     }
 
     /// Get a reference to the connection URL.
@@ -105,6 +115,39 @@ impl SqlConnector {
         self
     }
 
+    /// Set the per-transaction read timeout (default 500 ms).
+    ///
+    /// On Postgres this is applied via `SET LOCAL statement_timeout`
+    /// at the start of every read transaction. On SQLite the value is
+    /// stored but not enforced.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `d` rounds to 0 ms (Postgres treats `0` as "no
+    /// timeout", which would silently disable the trait contract).
+    #[must_use]
+    pub fn with_read_timeout(mut self, d: Duration) -> Self {
+        assert!(d.as_millis() >= 1, "read_timeout must be >= 1ms (got {d:?})");
+        self.read_timeout = d;
+        self
+    }
+
+    /// Set the per-transaction write timeout (default 2 s).
+    ///
+    /// On Postgres this is applied via `SET LOCAL statement_timeout`
+    /// at the start of every write transaction. On SQLite the value is
+    /// stored but not enforced.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `d` rounds to 0 ms. See [`with_read_timeout`](Self::with_read_timeout).
+    #[must_use]
+    pub fn with_write_timeout(mut self, d: Duration) -> Self {
+        assert!(d.as_millis() >= 1, "write_timeout must be >= 1ms (got {d:?})");
+        self.write_timeout = d;
+        self
+    }
+
     /// Create a connector from environment variables.
     ///
     /// Reads the SQL URL from the specified environment variable.
@@ -131,6 +174,11 @@ impl ColdConnect for SqlConnector {
     fn connect(&self) -> impl std::future::Future<Output = Result<Self::Cold, Self::Error>> + Send {
         let url = self.url.clone();
         let pool_opts = self.pool_opts.clone();
-        async move { SqlColdBackend::connect_with(&url, pool_opts).await }
+        let read_timeout = self.read_timeout;
+        let write_timeout = self.write_timeout;
+        async move {
+            let backend = SqlColdBackend::connect_with(&url, pool_opts).await?;
+            Ok(backend.with_read_timeout(read_timeout).with_write_timeout(write_timeout))
+        }
     }
 }
