@@ -116,8 +116,8 @@ impl IntegerList {
             .map_err(|_| IntegerListError::FailedToDeserialize)
     }
 
-    /// Returns an iterator over the integers in the list.
-    pub fn iter(&self) -> roaring::treemap::Iter<'_> {
+    /// Returns an iterator over the integers in the list, in ascending order.
+    pub fn iter(&self) -> impl Iterator<Item = u64> + Clone + '_ {
         self.0.iter()
     }
 
