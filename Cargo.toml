@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.7.2"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.92"
 authors = ["init4"]
@@ -46,9 +46,9 @@ signet-storage-types = { version = "0.7.2", path = "./crates/types" }
 # External, in-house
 signet-libmdbx = { version = "0.8.0" }
 
-signet-evm = "0.16.0-rc.11"
-signet-types = "0.16.0-rc.11"
-signet-zenith = "0.16.0-rc.11"
+signet-evm = "0.17.0"
+signet-types = "0.17.0"
+signet-zenith = "0.17.0"
 
 # trevm
 trevm = { version = "0.34.0", features = ["full_env_cfg"] }
