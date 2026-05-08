@@ -28,9 +28,11 @@ mod sharded;
 pub use sharded::ShardedKey;
 pub use signet_evm::{Account, EthereumHardfork, genesis_header};
 pub use signet_types::{
-    ConfirmationMeta, Confirmed, Receipt, TxLocation,
-    primitives::{SealedHeader, TransactionSigned},
+    ConfirmationMeta, Confirmed, Receipt, TxLocation, primitives::TransactionSigned,
 };
+
+/// A sealed header with a cached hash.
+pub type SealedHeader = alloy::consensus::Sealed<alloy::consensus::Header>;
 
 /// A recovered transaction type.
 pub type RecoveredTx = Recovered<TransactionSigned>;
