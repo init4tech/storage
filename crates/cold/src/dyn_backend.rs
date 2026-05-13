@@ -20,12 +20,13 @@
 //! [`ColdStorageWrite`]: crate::ColdStorageWrite
 
 use crate::{
-    BlockData, ColdReceipt, ColdResult, Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier,
-    RpcLog, SignetEventsSpecifier, StreamParams, TransactionSpecifier, ZenithHeaderSpecifier,
+    BlockData, ColdReceipt, ColdResult, ColdStorageBackend, ColdStorageRead, ColdStorageWrite,
+    Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog, SignetEventsSpecifier,
+    StreamParams, TransactionSpecifier, ZenithHeaderSpecifier,
 };
 use alloy::primitives::BlockNumber;
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{future::Future, pin::Pin, time::Duration};
 
 /// Object-safe mirror of [`ColdStorageBackend`]. Auto-implemented by a
 /// blanket impl over every `B: ColdStorageBackend`; do not implement
@@ -144,13 +145,137 @@ pub trait DynColdStorageBackend: Send + Sync + 'static {
     fn dyn_write_timeout(&self) -> Option<Duration>;
 }
 
-// Sanity check: ensure the trait is object-safe. The line below fails
-// to compile if any method violates object-safety.
+impl<B: ColdStorageBackend> DynColdStorageBackend for B {
+    fn dyn_get_header<'a>(
+        &'a self,
+        spec: HeaderSpecifier,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<Option<SealedHeader>>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageRead>::get_header(self, spec))
+    }
+
+    fn dyn_get_headers<'a>(
+        &'a self,
+        specs: Vec<HeaderSpecifier>,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<Vec<Option<SealedHeader>>>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageRead>::get_headers(self, specs))
+    }
+
+    fn dyn_get_transaction<'a>(
+        &'a self,
+        spec: TransactionSpecifier,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<Option<Confirmed<RecoveredTx>>>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageRead>::get_transaction(self, spec))
+    }
+
+    fn dyn_get_transactions_in_block<'a>(
+        &'a self,
+        block: BlockNumber,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<Vec<RecoveredTx>>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageRead>::get_transactions_in_block(self, block))
+    }
+
+    fn dyn_get_transaction_count<'a>(
+        &'a self,
+        block: BlockNumber,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<u64>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageRead>::get_transaction_count(self, block))
+    }
+
+    fn dyn_get_receipt<'a>(
+        &'a self,
+        spec: ReceiptSpecifier,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<Option<ColdReceipt>>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageRead>::get_receipt(self, spec))
+    }
+
+    fn dyn_get_receipts_in_block<'a>(
+        &'a self,
+        block: BlockNumber,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<Vec<ColdReceipt>>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageRead>::get_receipts_in_block(self, block))
+    }
+
+    fn dyn_get_signet_events<'a>(
+        &'a self,
+        spec: SignetEventsSpecifier,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<Vec<DbSignetEvent>>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageRead>::get_signet_events(self, spec))
+    }
+
+    fn dyn_get_zenith_header<'a>(
+        &'a self,
+        spec: ZenithHeaderSpecifier,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<Option<DbZenithHeader>>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageRead>::get_zenith_header(self, spec))
+    }
+
+    fn dyn_get_zenith_headers<'a>(
+        &'a self,
+        spec: ZenithHeaderSpecifier,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<Vec<DbZenithHeader>>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageRead>::get_zenith_headers(self, spec))
+    }
+
+    fn dyn_get_latest_block<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<Option<BlockNumber>>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageRead>::get_latest_block(self))
+    }
+
+    fn dyn_get_logs<'a>(
+        &'a self,
+        filter: &'a Filter,
+        max_logs: usize,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<Vec<RpcLog>>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageRead>::get_logs(self, filter, max_logs))
+    }
+
+    fn dyn_produce_log_stream<'a>(
+        &'a self,
+        filter: &'a Filter,
+        params: StreamParams,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(<B as ColdStorageRead>::produce_log_stream(self, filter, params))
+    }
+
+    fn dyn_append_block<'a>(
+        &'a self,
+        data: BlockData,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<()>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageWrite>::append_block(self, data))
+    }
+
+    fn dyn_append_blocks<'a>(
+        &'a self,
+        data: Vec<BlockData>,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<()>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageWrite>::append_blocks(self, data))
+    }
+
+    fn dyn_truncate_above<'a>(
+        &'a self,
+        block: BlockNumber,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<()>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageWrite>::truncate_above(self, block))
+    }
+
+    fn dyn_drain_above<'a>(
+        &'a self,
+        block: BlockNumber,
+    ) -> Pin<Box<dyn Future<Output = ColdResult<Vec<Vec<ColdReceipt>>>> + Send + 'a>> {
+        Box::pin(<B as ColdStorageBackend>::drain_above(self, block))
+    }
+
+    fn dyn_read_timeout(&self) -> Option<Duration> {
+        <B as ColdStorageBackend>::read_timeout(self)
+    }
+
+    fn dyn_write_timeout(&self) -> Option<Duration> {
+        <B as ColdStorageBackend>::write_timeout(self)
+    }
+}
+
+// Compile-time check that the trait is object-safe.
 const _: fn() = || {
     fn _assert_object_safe(_: &dyn DynColdStorageBackend) {}
-};
-
-// Suppress unused-import warnings until later tasks consume Arc.
-const _: fn() = || {
-    let _: Option<Arc<dyn DynColdStorageBackend>> = None;
 };
