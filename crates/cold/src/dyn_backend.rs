@@ -17,7 +17,7 @@
 //! # Filter Cloning on the Erased Path
 //!
 //! The [`ColdStorageRead`] impl for `Arc<dyn DynColdStorageBackend>`
-//! clones the [`Filter`](crate::Filter) inside `get_logs` and
+//! clones the [`Filter`] inside `get_logs` and
 //! `produce_log_stream`. The dyn methods unify `&self` and `&Filter`
 //! into a single lifetime, which cannot be expressed by the
 //! independent-lifetime trait signatures without an owned bridge. The
