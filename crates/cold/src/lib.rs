@@ -135,28 +135,35 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod cache;
+
+mod cold_receipt;
+pub use cold_receipt::ColdReceipt;
+
+pub mod connect;
+pub use connect::ColdConnect;
+
 mod error;
-mod metrics;
 pub use error::{ColdResult, ColdStorageError};
+
 mod handle;
 pub use handle::ColdStorage;
+
+mod metrics;
+
 mod specifier;
+
+mod stream;
+pub use stream::{StreamParams, produce_log_stream_default};
+
+mod traits;
+pub use traits::{BlockData, ColdStorageBackend, ColdStorageRead, ColdStorageWrite, LogStream};
+
 pub use alloy::rpc::types::{Filter, Log as RpcLog};
 pub use signet_storage_types::{Confirmed, Recovered};
 pub use specifier::{
     HeaderSpecifier, ReceiptSpecifier, SignetEventsSpecifier, TransactionSpecifier,
     ZenithHeaderSpecifier,
 };
-
-mod cold_receipt;
-pub use cold_receipt::ColdReceipt;
-mod stream;
-pub use stream::{StreamParams, produce_log_stream_default};
-mod traits;
-pub use traits::{BlockData, ColdStorageBackend, ColdStorageRead, ColdStorageWrite, LogStream};
-
-pub mod connect;
-pub use connect::ColdConnect;
 
 /// Conformance tests for cold storage backends.
 #[cfg(any(test, feature = "test-utils"))]
