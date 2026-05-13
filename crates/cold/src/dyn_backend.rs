@@ -23,6 +23,20 @@
 //! independent-lifetime trait signatures without an owned bridge. The
 //! concrete `ColdStorage<B>` path is unaffected.
 //!
+//! # Maintainer Note: Recursion Hazard for Borrowed Arguments
+//!
+//! Any method on the `Arc<dyn DynColdStorageBackend>` impls that
+//! cannot use the direct `(**self).dyn_<name>(...)` form (because a
+//! borrowed argument forces it through a `self.clone()` + `async move`
+//! bridge) MUST dispatch via qualified path on the inner trait object,
+//! e.g. `DynColdStorageBackend::dyn_<name>(this.as_ref(), ...)`.
+//!
+//! Writing `this.dyn_<name>(...)` on a cloned `Arc<dyn ...>` resolves
+//! to the blanket impl (`Arc<dyn ...>: ColdStorageBackend` ⇒
+//! `Arc<dyn ...>: DynColdStorageBackend`), which calls back into the
+//! strong-trait impl and recurses infinitely. See `get_logs` and
+//! `produce_log_stream` for the canonical pattern.
+//!
 //! [`ColdStorage`]: crate::ColdStorage
 //! [`ColdStorageBackend`]: crate::ColdStorageBackend
 //! [`ColdStorageRead`]: crate::ColdStorageRead
@@ -371,7 +385,10 @@ impl ColdStorageRead for Arc<dyn DynColdStorageBackend> {
     ) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send {
         let this = self.clone();
         let filter = filter.clone();
-        async move { this.dyn_get_logs(&filter, max_logs).await }
+        // Call dyn_get_logs via the inner trait object directly (not through
+        // the Arc's blanket DynColdStorageBackend impl), which would re-enter
+        // ColdStorageRead::get_logs on Arc<dyn ...> and recurse infinitely.
+        async move { DynColdStorageBackend::dyn_get_logs(this.as_ref(), &filter, max_logs).await }
     }
 
     fn produce_log_stream(
@@ -381,7 +398,12 @@ impl ColdStorageRead for Arc<dyn DynColdStorageBackend> {
     ) -> impl Future<Output = ()> + Send {
         let this = self.clone();
         let filter = filter.clone();
-        async move { this.dyn_produce_log_stream(&filter, params).await }
+        // Same recursion hazard as `get_logs` above — call through
+        // `as_ref()` + qualified path so dispatch lands on the inner
+        // trait object's vtable, not the Arc's blanket impl.
+        async move {
+            DynColdStorageBackend::dyn_produce_log_stream(this.as_ref(), &filter, params).await
+        }
     }
 }
 
