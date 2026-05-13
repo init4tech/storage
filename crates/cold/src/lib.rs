@@ -155,6 +155,9 @@ mod specifier;
 mod stream;
 pub use stream::{StreamParams, produce_log_stream_default};
 
+mod dyn_backend;
+pub use dyn_backend::DynColdStorageBackend;
+
 mod traits;
 pub use traits::{BlockData, ColdStorageBackend, ColdStorageRead, ColdStorageWrite, LogStream};
 
