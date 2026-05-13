@@ -14,6 +14,15 @@
 //! and downstream signatures. Backends should implement
 //! [`ColdStorageBackend`] — the blanket impl handles this trait.
 //!
+//! # Filter Cloning on the Erased Path
+//!
+//! The [`ColdStorageRead`] impl for `Arc<dyn DynColdStorageBackend>`
+//! clones the [`Filter`](crate::Filter) inside `get_logs` and
+//! `produce_log_stream`. The dyn methods unify `&self` and `&Filter`
+//! into a single lifetime, which cannot be expressed by the
+//! independent-lifetime trait signatures without an owned bridge. The
+//! concrete `ColdStorage<B>` path is unaffected.
+//!
 //! [`ColdStorage`]: crate::ColdStorage
 //! [`ColdStorageBackend`]: crate::ColdStorageBackend
 //! [`ColdStorageRead`]: crate::ColdStorageRead
@@ -26,7 +35,7 @@ use crate::{
 };
 use alloy::primitives::BlockNumber;
 use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
-use std::{future::Future, pin::Pin, time::Duration};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 /// Object-safe mirror of [`ColdStorageBackend`]. Auto-implemented by a
 /// blanket impl over every `B: ColdStorageBackend`; do not implement
@@ -278,4 +287,138 @@ impl<B: ColdStorageBackend> DynColdStorageBackend for B {
 // Compile-time check that the trait is object-safe.
 const _: fn() = || {
     fn _assert_object_safe(_: &dyn DynColdStorageBackend) {}
+};
+
+impl ColdStorageRead for Arc<dyn DynColdStorageBackend> {
+    fn get_header(
+        &self,
+        spec: HeaderSpecifier,
+    ) -> impl Future<Output = ColdResult<Option<SealedHeader>>> + Send {
+        (**self).dyn_get_header(spec)
+    }
+
+    fn get_headers(
+        &self,
+        specs: Vec<HeaderSpecifier>,
+    ) -> impl Future<Output = ColdResult<Vec<Option<SealedHeader>>>> + Send {
+        (**self).dyn_get_headers(specs)
+    }
+
+    fn get_transaction(
+        &self,
+        spec: TransactionSpecifier,
+    ) -> impl Future<Output = ColdResult<Option<Confirmed<RecoveredTx>>>> + Send {
+        (**self).dyn_get_transaction(spec)
+    }
+
+    fn get_transactions_in_block(
+        &self,
+        block: BlockNumber,
+    ) -> impl Future<Output = ColdResult<Vec<RecoveredTx>>> + Send {
+        (**self).dyn_get_transactions_in_block(block)
+    }
+
+    fn get_transaction_count(
+        &self,
+        block: BlockNumber,
+    ) -> impl Future<Output = ColdResult<u64>> + Send {
+        (**self).dyn_get_transaction_count(block)
+    }
+
+    fn get_receipt(
+        &self,
+        spec: ReceiptSpecifier,
+    ) -> impl Future<Output = ColdResult<Option<ColdReceipt>>> + Send {
+        (**self).dyn_get_receipt(spec)
+    }
+
+    fn get_receipts_in_block(
+        &self,
+        block: BlockNumber,
+    ) -> impl Future<Output = ColdResult<Vec<ColdReceipt>>> + Send {
+        (**self).dyn_get_receipts_in_block(block)
+    }
+
+    fn get_signet_events(
+        &self,
+        spec: SignetEventsSpecifier,
+    ) -> impl Future<Output = ColdResult<Vec<DbSignetEvent>>> + Send {
+        (**self).dyn_get_signet_events(spec)
+    }
+
+    fn get_zenith_header(
+        &self,
+        spec: ZenithHeaderSpecifier,
+    ) -> impl Future<Output = ColdResult<Option<DbZenithHeader>>> + Send {
+        (**self).dyn_get_zenith_header(spec)
+    }
+
+    fn get_zenith_headers(
+        &self,
+        spec: ZenithHeaderSpecifier,
+    ) -> impl Future<Output = ColdResult<Vec<DbZenithHeader>>> + Send {
+        (**self).dyn_get_zenith_headers(spec)
+    }
+
+    fn get_latest_block(&self) -> impl Future<Output = ColdResult<Option<BlockNumber>>> + Send {
+        (**self).dyn_get_latest_block()
+    }
+
+    fn get_logs(
+        &self,
+        filter: &Filter,
+        max_logs: usize,
+    ) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send {
+        let this = self.clone();
+        let filter = filter.clone();
+        async move { this.dyn_get_logs(&filter, max_logs).await }
+    }
+
+    fn produce_log_stream(
+        &self,
+        filter: &Filter,
+        params: StreamParams,
+    ) -> impl Future<Output = ()> + Send {
+        let this = self.clone();
+        let filter = filter.clone();
+        async move { this.dyn_produce_log_stream(&filter, params).await }
+    }
+}
+
+impl ColdStorageWrite for Arc<dyn DynColdStorageBackend> {
+    fn append_block(&self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send {
+        (**self).dyn_append_block(data)
+    }
+
+    fn append_blocks(&self, data: Vec<BlockData>) -> impl Future<Output = ColdResult<()>> + Send {
+        (**self).dyn_append_blocks(data)
+    }
+
+    fn truncate_above(&self, block: BlockNumber) -> impl Future<Output = ColdResult<()>> + Send {
+        (**self).dyn_truncate_above(block)
+    }
+}
+
+impl ColdStorageBackend for Arc<dyn DynColdStorageBackend> {
+    fn read_timeout(&self) -> Option<Duration> {
+        (**self).dyn_read_timeout()
+    }
+
+    fn write_timeout(&self) -> Option<Duration> {
+        (**self).dyn_write_timeout()
+    }
+
+    fn drain_above(
+        &self,
+        block: BlockNumber,
+    ) -> impl Future<Output = ColdResult<Vec<Vec<ColdReceipt>>>> + Send {
+        (**self).dyn_drain_above(block)
+    }
+}
+
+// Compile-time check that `Arc<dyn DynColdStorageBackend>` satisfies the
+// bound `ColdStorage` will require.
+const _: fn() = || {
+    const fn _assert_bound<B: ColdStorageBackend>() {}
+    _assert_bound::<Arc<dyn DynColdStorageBackend>>();
 };
