@@ -111,7 +111,7 @@ pub(crate) struct Inner<B> {
 /// `ColdStorage<B>` is cheap to [`Clone`] — it is just an `Arc` around the
 /// shared inner state. All operations dispatch through semaphore-gated
 /// [`TaskTracker`]-spawned tasks.
-pub struct ColdStorage<B: ColdStorageBackend> {
+pub struct ColdStorage<B: ColdStorageBackend = Arc<dyn crate::DynColdStorageBackend>> {
     inner: Arc<Inner<B>>,
 }
 
@@ -690,5 +690,21 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
             result
         })
         .await
+    }
+}
+
+impl ColdStorage<Arc<dyn crate::DynColdStorageBackend>> {
+    /// Construct a type-erased cold storage handle.
+    ///
+    /// Wraps `backend` in `Arc<dyn DynColdStorageBackend>` so the
+    /// resulting handle has no `B` type parameter to propagate
+    /// through downstream signatures. Equivalent to
+    /// `ColdStorage::new(Arc::new(backend) as Arc<dyn _>, cancel)`.
+    ///
+    /// Choose this constructor when you want runtime swappability of
+    /// the backend; use [`new`](Self::new) directly for fully
+    /// monomorphized call sites.
+    pub fn new_erased<B: ColdStorageBackend>(backend: B, cancel: CancellationToken) -> Self {
+        Self::new(Arc::new(backend) as Arc<dyn crate::DynColdStorageBackend>, cancel)
     }
 }
