@@ -99,7 +99,7 @@ impl<H: HotKv> UnifiedStorage<H, signet_cold::ErasedBackend> {
     /// Spawn a unified storage with a type-erased cold backend.
     ///
     /// Erases the concrete cold backend behind
-    /// [`signet_cold::DynColdStorageBackend`], so callers can hold a
+    /// [`signet_cold::ErasedBackend`], so callers can hold a
     /// `UnifiedStorage<H>` without propagating a backend generic.
     pub fn spawn_erased<B: ColdStorageBackend>(
         hot: H,
