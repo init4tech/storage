@@ -5,8 +5,8 @@
 //! a custom backend, call the test functions with your backend instance.
 
 use crate::{
-    BlockData, ColdResult, ColdStorage, ColdStorageBackend, ColdStorageError, Filter,
-    HeaderSpecifier, ReceiptSpecifier, RpcLog, TransactionSpecifier,
+    BlockData, ColdResult, ColdStorage, ColdStorageBackend, ColdStorageError, ErasedBackend,
+    Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog, TransactionSpecifier,
 };
 use alloy::{
     consensus::{
@@ -27,6 +27,32 @@ use tokio_util::sync::CancellationToken;
 pub async fn conformance<B: ColdStorageBackend>(backend: B) -> ColdResult<()> {
     let cancel = CancellationToken::new();
     let handle = ColdStorage::new(backend, cancel.clone());
+    test_empty_storage(&handle).await?;
+    test_append_and_read_header(&handle).await?;
+    test_header_hash_lookup(&handle).await?;
+    test_transaction_lookups(&handle).await?;
+    test_receipt_lookups(&handle).await?;
+    test_truncation(&handle).await?;
+    test_batch_append(&handle).await?;
+    test_confirmation_metadata(&handle).await?;
+    test_cold_receipt_metadata(&handle).await?;
+    test_get_logs(&handle).await?;
+    test_stream_logs(&handle).await?;
+    test_drain_above(&handle).await?;
+    cancel.cancel();
+    Ok(())
+}
+
+/// Run the conformance suite against `backend` after erasing it
+/// through [`crate::DynColdStorageBackend`].
+///
+/// Exercises the same contract as [`conformance`] but routes every
+/// call through [`ErasedBackend`], validating that the erased
+/// dispatch path upholds the trait contract.
+pub async fn conformance_erased<B: ColdStorageBackend>(backend: B) -> ColdResult<()> {
+    let erased = ErasedBackend::new(backend);
+    let cancel = CancellationToken::new();
+    let handle = ColdStorage::new(erased, cancel.clone());
     test_empty_storage(&handle).await?;
     test_append_and_read_header(&handle).await?;
     test_header_hash_lookup(&handle).await?;
