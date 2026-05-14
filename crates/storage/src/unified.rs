@@ -72,10 +72,15 @@ pub struct DrainedBlock {
 /// // Handle reorgs
 /// storage.unwind_above(reorg_block).await?;
 /// ```
-#[derive(Debug)]
 pub struct UnifiedStorage<H: HotKv, B: ColdStorageBackend = signet_cold::ErasedBackend> {
     hot: H,
     cold: ColdStorage<B>,
+}
+
+impl<H: HotKv, B: ColdStorageBackend> std::fmt::Debug for UnifiedStorage<H, B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnifiedStorage").finish_non_exhaustive()
+    }
 }
 
 impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B> {
