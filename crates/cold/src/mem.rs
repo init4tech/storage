@@ -387,12 +387,179 @@ impl ColdStorageBackend for MemColdBackend {
 mod test {
     use super::*;
 
-    use crate::conformance::conformance;
+    use crate::conformance::{conformance, conformance_erased};
 
     #[tokio::test]
     async fn mem_backend_conformance() {
         let backend = MemColdBackend::new();
         conformance(backend).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn erased_conformance() {
+        conformance_erased(MemColdBackend::new()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dyn_drain_above_invokes_backend_override() {
+        use crate::{
+            BlockData, ColdReceipt, ColdResult, ColdStorageBackend, ColdStorageRead,
+            ColdStorageWrite, DynColdStorageBackend, Filter, HeaderSpecifier, ReceiptSpecifier,
+            RpcLog, SignetEventsSpecifier, StreamParams, TransactionSpecifier,
+            ZenithHeaderSpecifier,
+        };
+        use alloy::primitives::BlockNumber;
+        use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHeader};
+        use std::{
+            future::Future,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+        };
+
+        #[derive(Clone)]
+        struct DrainTracker {
+            inner: MemColdBackend,
+            called: Arc<AtomicBool>,
+        }
+
+        impl ColdStorageRead for DrainTracker {
+            fn get_header(
+                &self,
+                spec: HeaderSpecifier,
+            ) -> impl Future<Output = ColdResult<Option<SealedHeader>>> + Send {
+                self.inner.get_header(spec)
+            }
+
+            fn get_headers(
+                &self,
+                specs: Vec<HeaderSpecifier>,
+            ) -> impl Future<Output = ColdResult<Vec<Option<SealedHeader>>>> + Send {
+                self.inner.get_headers(specs)
+            }
+
+            fn get_transaction(
+                &self,
+                spec: TransactionSpecifier,
+            ) -> impl Future<Output = ColdResult<Option<crate::Confirmed<RecoveredTx>>>> + Send
+            {
+                self.inner.get_transaction(spec)
+            }
+
+            fn get_transactions_in_block(
+                &self,
+                block: BlockNumber,
+            ) -> impl Future<Output = ColdResult<Vec<RecoveredTx>>> + Send {
+                self.inner.get_transactions_in_block(block)
+            }
+
+            fn get_transaction_count(
+                &self,
+                block: BlockNumber,
+            ) -> impl Future<Output = ColdResult<u64>> + Send {
+                self.inner.get_transaction_count(block)
+            }
+
+            fn get_receipt(
+                &self,
+                spec: ReceiptSpecifier,
+            ) -> impl Future<Output = ColdResult<Option<ColdReceipt>>> + Send {
+                self.inner.get_receipt(spec)
+            }
+
+            fn get_receipts_in_block(
+                &self,
+                block: BlockNumber,
+            ) -> impl Future<Output = ColdResult<Vec<ColdReceipt>>> + Send {
+                self.inner.get_receipts_in_block(block)
+            }
+
+            fn get_signet_events(
+                &self,
+                spec: SignetEventsSpecifier,
+            ) -> impl Future<Output = ColdResult<Vec<DbSignetEvent>>> + Send {
+                self.inner.get_signet_events(spec)
+            }
+
+            fn get_zenith_header(
+                &self,
+                spec: ZenithHeaderSpecifier,
+            ) -> impl Future<Output = ColdResult<Option<DbZenithHeader>>> + Send {
+                self.inner.get_zenith_header(spec)
+            }
+
+            fn get_zenith_headers(
+                &self,
+                spec: ZenithHeaderSpecifier,
+            ) -> impl Future<Output = ColdResult<Vec<DbZenithHeader>>> + Send {
+                self.inner.get_zenith_headers(spec)
+            }
+
+            fn get_latest_block(
+                &self,
+            ) -> impl Future<Output = ColdResult<Option<BlockNumber>>> + Send {
+                self.inner.get_latest_block()
+            }
+
+            fn get_logs(
+                &self,
+                filter: &Filter,
+                max_logs: usize,
+            ) -> impl Future<Output = ColdResult<Vec<RpcLog>>> + Send {
+                self.inner.get_logs(filter, max_logs)
+            }
+
+            fn produce_log_stream(
+                &self,
+                filter: &Filter,
+                params: StreamParams,
+            ) -> impl Future<Output = ()> + Send {
+                self.inner.produce_log_stream(filter, params)
+            }
+        }
+
+        impl ColdStorageWrite for DrainTracker {
+            fn append_block(&self, data: BlockData) -> impl Future<Output = ColdResult<()>> + Send {
+                self.inner.append_block(data)
+            }
+
+            fn append_blocks(
+                &self,
+                data: Vec<BlockData>,
+            ) -> impl Future<Output = ColdResult<()>> + Send {
+                self.inner.append_blocks(data)
+            }
+
+            fn truncate_above(
+                &self,
+                block: BlockNumber,
+            ) -> impl Future<Output = ColdResult<()>> + Send {
+                self.inner.truncate_above(block)
+            }
+        }
+
+        impl ColdStorageBackend for DrainTracker {
+            fn drain_above(
+                &self,
+                block: BlockNumber,
+            ) -> impl Future<Output = ColdResult<Vec<Vec<ColdReceipt>>>> + Send {
+                let called = self.called.clone();
+                let fut = self.inner.drain_above(block);
+                async move {
+                    called.store(true, Ordering::SeqCst);
+                    fut.await
+                }
+            }
+        }
+
+        let called = Arc::new(AtomicBool::new(false));
+        let backend = DrainTracker { inner: MemColdBackend::new(), called: called.clone() };
+        let erased: Arc<dyn DynColdStorageBackend> = Arc::new(backend);
+
+        let _ = erased.dyn_drain_above(0).await.unwrap();
+
+        assert!(called.load(Ordering::SeqCst), "overridden drain_above must run through erasure");
     }
 
     #[tokio::test]

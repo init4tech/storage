@@ -14,9 +14,10 @@
 //!   participate in the drain barrier.
 
 use crate::{
-    BlockData, ColdReceipt, ColdResult, ColdStorageBackend, ColdStorageError, Confirmed, Filter,
-    HeaderSpecifier, LogStream, ReceiptSpecifier, RpcLog, SignetEventsSpecifier, StreamParams,
-    TransactionSpecifier, ZenithHeaderSpecifier, cache::ColdCache, metrics,
+    BlockData, ColdReceipt, ColdResult, ColdStorageBackend, ColdStorageError, Confirmed,
+    ErasedBackend, Filter, HeaderSpecifier, LogStream, ReceiptSpecifier, RpcLog,
+    SignetEventsSpecifier, StreamParams, TransactionSpecifier, ZenithHeaderSpecifier,
+    cache::ColdCache, metrics,
 };
 use alloy::primitives::{B256, BlockNumber};
 use parking_lot::Mutex;
@@ -111,7 +112,7 @@ pub(crate) struct Inner<B> {
 /// `ColdStorage<B>` is cheap to [`Clone`] — it is just an `Arc` around the
 /// shared inner state. All operations dispatch through semaphore-gated
 /// [`TaskTracker`]-spawned tasks.
-pub struct ColdStorage<B: ColdStorageBackend> {
+pub struct ColdStorage<B: ColdStorageBackend = ErasedBackend> {
     inner: Arc<Inner<B>>,
 }
 
@@ -690,5 +691,21 @@ impl<B: ColdStorageBackend> ColdStorage<B> {
             result
         })
         .await
+    }
+}
+
+impl ColdStorage<ErasedBackend> {
+    /// Construct a type-erased cold storage handle.
+    ///
+    /// Wraps `backend` in [`ErasedBackend`] so the resulting handle
+    /// has no `B` type parameter to propagate through downstream
+    /// signatures. Equivalent to
+    /// `ColdStorage::new(ErasedBackend::new(backend), cancel)`.
+    ///
+    /// Choose this constructor when you want runtime swappability of
+    /// the backend; use [`new`](Self::new) directly for fully
+    /// monomorphized call sites.
+    pub fn new_erased<B: ColdStorageBackend>(backend: B, cancel: CancellationToken) -> Self {
+        Self::new(ErasedBackend::new(backend), cancel)
     }
 }
