@@ -73,7 +73,10 @@ pub struct DrainedBlock {
 /// storage.unwind_above(reorg_block).await?;
 /// ```
 #[derive(Debug)]
-pub struct UnifiedStorage<H: HotKv, B: ColdStorageBackend> {
+pub struct UnifiedStorage<
+    H: HotKv,
+    B: ColdStorageBackend = std::sync::Arc<dyn signet_cold::DynColdStorageBackend>,
+> {
     hot: H,
     cold: ColdStorage<B>,
 }
@@ -93,7 +96,25 @@ impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B> {
         let cold = ColdStorage::new(cold_backend, cancel_token);
         Self::new(hot, cold)
     }
+}
 
+impl<H: HotKv> UnifiedStorage<H, std::sync::Arc<dyn signet_cold::DynColdStorageBackend>> {
+    /// Spawn a unified storage with a type-erased cold backend.
+    ///
+    /// Erases the concrete cold backend behind
+    /// [`signet_cold::DynColdStorageBackend`], so callers can hold a
+    /// `UnifiedStorage<H>` without propagating a backend generic.
+    pub fn spawn_erased<B: ColdStorageBackend>(
+        hot: H,
+        cold_backend: B,
+        cancel_token: CancellationToken,
+    ) -> Self {
+        let cold = ColdStorage::new_erased(cold_backend, cancel_token);
+        Self::new(hot, cold)
+    }
+}
+
+impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B> {
     /// Get a reference to the hot storage backend.
     pub const fn hot(&self) -> &H {
         &self.hot
