@@ -5,8 +5,8 @@
 //! a custom backend, call the test functions with your backend instance.
 
 use crate::{
-    BlockData, ColdResult, ColdStorage, ColdStorageBackend, ColdStorageError,
-    DynColdStorageBackend, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog, TransactionSpecifier,
+    BlockData, ColdResult, ColdStorage, ColdStorageBackend, ColdStorageError, ErasedBackend,
+    Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog, TransactionSpecifier,
 };
 use alloy::{
     consensus::{
@@ -17,7 +17,7 @@ use alloy::{
     },
 };
 use signet_storage_types::{Receipt, RecoveredTx, TransactionSigned};
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -44,13 +44,13 @@ pub async fn conformance<B: ColdStorageBackend>(backend: B) -> ColdResult<()> {
 }
 
 /// Run the conformance suite against `backend` after erasing it
-/// through [`DynColdStorageBackend`].
+/// through [`crate::DynColdStorageBackend`].
 ///
 /// Exercises the same contract as [`conformance`] but routes every
-/// call through `Arc<dyn DynColdStorageBackend>`, validating that
-/// the erased dispatch path upholds the trait contract.
+/// call through [`ErasedBackend`], validating that the erased
+/// dispatch path upholds the trait contract.
 pub async fn conformance_erased<B: ColdStorageBackend>(backend: B) -> ColdResult<()> {
-    let erased: Arc<dyn DynColdStorageBackend> = Arc::new(backend);
+    let erased = ErasedBackend::new(backend);
     let cancel = CancellationToken::new();
     let handle = ColdStorage::new(erased, cancel.clone());
     test_empty_storage(&handle).await?;

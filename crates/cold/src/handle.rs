@@ -700,12 +700,12 @@ impl ColdStorage<ErasedBackend> {
     /// Wraps `backend` in [`ErasedBackend`] so the resulting handle
     /// has no `B` type parameter to propagate through downstream
     /// signatures. Equivalent to
-    /// `ColdStorage::new(Arc::new(backend) as ErasedBackend, cancel)`.
+    /// `ColdStorage::new(ErasedBackend::new(backend), cancel)`.
     ///
     /// Choose this constructor when you want runtime swappability of
     /// the backend; use [`new`](Self::new) directly for fully
     /// monomorphized call sites.
     pub fn new_erased<B: ColdStorageBackend>(backend: B, cancel: CancellationToken) -> Self {
-        Self::new(Arc::new(backend) as ErasedBackend, cancel)
+        Self::new(ErasedBackend::new(backend), cancel)
     }
 }
