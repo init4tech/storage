@@ -73,10 +73,7 @@ pub struct DrainedBlock {
 /// storage.unwind_above(reorg_block).await?;
 /// ```
 #[derive(Debug)]
-pub struct UnifiedStorage<
-    H: HotKv,
-    B: ColdStorageBackend = std::sync::Arc<dyn signet_cold::DynColdStorageBackend>,
-> {
+pub struct UnifiedStorage<H: HotKv, B: ColdStorageBackend = signet_cold::ErasedBackend> {
     hot: H,
     cold: ColdStorage<B>,
 }
@@ -98,7 +95,7 @@ impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B> {
     }
 }
 
-impl<H: HotKv> UnifiedStorage<H, std::sync::Arc<dyn signet_cold::DynColdStorageBackend>> {
+impl<H: HotKv> UnifiedStorage<H, signet_cold::ErasedBackend> {
     /// Spawn a unified storage with a type-erased cold backend.
     ///
     /// Erases the concrete cold backend behind
