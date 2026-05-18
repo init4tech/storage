@@ -46,9 +46,9 @@ signet-storage-types = { version = "0.9.0", path = "./crates/types" }
 # External, in-house
 signet-libmdbx = { version = "0.8.0" }
 
-signet-evm = { git = "https://github.com/init4tech/signet-sdk", rev = "8a85a4636bccf971226a9c80c311832ce33e998c" }
-signet-types = { git = "https://github.com/init4tech/signet-sdk", rev = "8a85a4636bccf971226a9c80c311832ce33e998c" }
-signet-zenith = { git = "https://github.com/init4tech/signet-sdk", rev = "8a85a4636bccf971226a9c80c311832ce33e998c" }
+signet-evm = { git = "https://github.com/init4tech/signet-sdk", rev = "3489c6b" }
+signet-types = { git = "https://github.com/init4tech/signet-sdk", rev = "3489c6b" }
+signet-zenith = { git = "https://github.com/init4tech/signet-sdk", rev = "3489c6b" }
 
 # trevm
 trevm = { version = "0.34.0", features = ["full_env_cfg"] }
