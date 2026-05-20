@@ -13,8 +13,23 @@ pub struct ShardedKey<T> {
 }
 
 impl ShardedKey<()> {
-    /// Number of indices in one shard.
+    /// Soft cap on the number of indices in one shard.
+    ///
+    /// This is a sanity ceiling used alongside [`Self::MAX_SHARD_BYTES`];
+    /// shard splitting is driven by encoded size, not by this count.
     pub const SHARD_COUNT: usize = 2000;
+
+    /// Maximum encoded byte size of a single shard's [`BlockNumberList`].
+    ///
+    /// [`BlockNumberList`]: crate::BlockNumberList
+    ///
+    /// The MDBX `DUPSORT` value limit is ~1980 bytes on 4 KB pages
+    /// (Linux production). Each stored dup value is `key2 || encoded list`,
+    /// so this budget reserves headroom for `ShardedKey<U256>` (40 bytes),
+    /// the 2-byte length prefix on `BlockNumberList`, and per-node overhead
+    /// inside MDBX. Exceeding this triggers `MDBX_BAD_VALSIZE` at write time
+    /// (ENG-2287).
+    pub const MAX_SHARD_BYTES: usize = 1500;
 }
 
 impl<T> ShardedKey<T> {

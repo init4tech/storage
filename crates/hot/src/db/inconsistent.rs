@@ -521,13 +521,23 @@ impl<T> UnsafeHistoryWrite for T where T: UnsafeDbWrite + HotKvWrite {}
 /// This helper handles the common pattern of:
 /// 1. Appending new block numbers to an existing shard
 /// 2. Deleting the old shard if it exists
-/// 3. Splitting into multiple shards if the result exceeds the shard size
+/// 3. Splitting into multiple shards if the encoded result exceeds the
+///    backend's per-value size budget
 ///
 /// # Arguments
 /// - `existing`: The current last shard (key, list) if any
 /// - `indices`: New block numbers to append
 /// - `delete_old`: Called to delete the old shard key before writing new ones
 /// - `write_shard`: Called for each resulting shard (highest_block, list)
+///
+/// # Splitting strategy
+///
+/// Splitting is driven by the encoded byte size of the [`BlockNumberList`],
+/// not by the index count. This is required because the history tables are
+/// stored DUPSORT in MDBX, which caps each dup value at ~1980 bytes on
+/// 4 KB pages. A count-based threshold cannot guarantee fitting under that
+/// cap because roaring's serialised size depends on the value distribution,
+/// not just the count. See [`ShardedKey::MAX_SHARD_BYTES`] (ENG-2287).
 fn append_to_sharded_history<K, E, D, W>(
     existing: Option<(K, BlockNumberList)>,
     indices: impl IntoIterator<Item = u64>,
@@ -550,29 +560,62 @@ where
         delete_old(key).map_err(HistoryError::Db)?;
     }
 
-    // Fast path: all indices fit in one shard
-    if last_shard.len() <= ShardedKey::SHARD_COUNT as u64 {
+    // Fast path: encoded list fits under the per-shard byte budget.
+    if last_shard.serialized_size() <= ShardedKey::MAX_SHARD_BYTES {
         return write_shard(u64::MAX, &last_shard).map_err(HistoryError::Db);
     }
 
-    // Slow path: rechunk into multiple shards
-    // Reuse a single buffer to avoid allocating a new Vec per chunk
-    let mut chunk_buf = Vec::with_capacity(ShardedKey::SHARD_COUNT);
-    let mut iter = last_shard.iter().peekable();
-
-    while iter.peek().is_some() {
-        chunk_buf.clear();
-        chunk_buf.extend(iter.by_ref().take(ShardedKey::SHARD_COUNT));
-
-        let highest = if iter.peek().is_some() {
-            *chunk_buf.last().expect("chunk_buf is non-empty")
-        } else {
-            // Insert last list with `u64::MAX`
-            u64::MAX
-        };
-
-        let shard = BlockNumberList::new_pre_sorted(chunk_buf.iter().copied());
+    // Slow path: re-chunk into multiple shards whose encoded sizes each
+    // fit under the budget.
+    let all: Vec<u64> = last_shard.iter().collect();
+    let mut start = 0;
+    while start < all.len() {
+        let take = max_prefix_fitting(&all[start..]);
+        // A single value is always far smaller than MAX_SHARD_BYTES, so we
+        // can always make forward progress.
+        debug_assert!(take > 0, "no prefix fits in MAX_SHARD_BYTES");
+        let end = start + take;
+        let highest = if end == all.len() { u64::MAX } else { all[end - 1] };
+        let shard = BlockNumberList::new_pre_sorted(all[start..end].iter().copied());
         write_shard(highest, &shard).map_err(HistoryError::Db)?;
+        start = end;
     }
     Ok(())
+}
+
+/// Binary-search the largest prefix length `n` of `indices` whose encoded
+/// `BlockNumberList` fits in [`ShardedKey::MAX_SHARD_BYTES`].
+///
+/// Returns 0 only if `indices` is empty.
+fn max_prefix_fitting(indices: &[u64]) -> usize {
+    if indices.is_empty() {
+        return 0;
+    }
+    // Optimistic check: the entire slice may fit. Skips the binary search
+    // in the common case where the caller passes a small remainder.
+    if encoded_size_of(indices) <= ShardedKey::MAX_SHARD_BYTES {
+        return indices.len();
+    }
+    let mut lo = 1usize;
+    let mut hi = indices.len();
+    let mut best = 1usize;
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        if encoded_size_of(&indices[..mid]) <= ShardedKey::MAX_SHARD_BYTES {
+            best = mid;
+            lo = mid + 1;
+        } else {
+            if mid == 1 {
+                // Even a single index doesn't fit — shouldn't happen but
+                // bail out to avoid an infinite loop.
+                break;
+            }
+            hi = mid - 1;
+        }
+    }
+    best
+}
+
+fn encoded_size_of(indices: &[u64]) -> usize {
+    BlockNumberList::new_pre_sorted(indices.iter().copied()).serialized_size()
 }

@@ -27,6 +27,7 @@ pub fn conformance<T: HotKv>(hot_kv: &T) {
     test_bytecode_roundtrip(hot_kv);
     test_account_history(hot_kv);
     test_storage_history(hot_kv);
+    test_history_shard_fits_in_dupsort_limit(hot_kv);
     test_account_changes(hot_kv);
     test_storage_changes(hot_kv);
     test_missing_reads(hot_kv);

@@ -2,7 +2,7 @@
 
 use crate::{
     db::{HistoryRead, UnsafeDbWrite, UnsafeHistoryWrite},
-    model::{HotKv, HotKvWrite},
+    model::{HotKv, HotKvRead, HotKvWrite},
     tables,
 };
 use alloy::primitives::{U256, address};
@@ -453,4 +453,55 @@ pub fn test_delete_and_rewrite_dual<T: HotKv>(hot_kv: &T) {
         assert!(hist.is_some(), "new entry should exist");
         assert_eq!(hist.unwrap().iter().collect::<Vec<_>>(), vec![100, 200, 300]);
     }
+}
+
+/// Regression: account history must split into MDBX-fittable shards when an
+/// account is touched on many sparse blocks.
+///
+/// Why: AccountsHistory is DUPSORT, so each stored dup value
+/// (`key2 || encoded BlockNumberList`) is capped at MDBX's DUPSORT value
+/// limit (~1980 bytes on 4 KB pages). A roaring serialisation of 2000
+/// indices spread across many 16-bit containers exceeds 20 KB. The history
+/// pipeline must split shards by encoded size, not by index count, so any
+/// pattern of `update_history_indices_inconsistent` survives. ENG-2287.
+pub fn test_history_shard_fits_in_dupsort_limit<T: HotKv>(hot_kv: &T) {
+    let addr = address!("0xcccccccccccccccccccccccccccccccccccccccc");
+
+    // Sparse pattern: 2000 block-numbers spread far apart so each lives in
+    // its own roaring 16-bit container — the worst-case for serialised size
+    // (per-container header dominates). Write a change-set per block, then
+    // ask the history pipeline to index the full range in one call.
+    let blocks: Vec<u64> =
+        (0..ShardedKey::SHARD_COUNT as u64).map(|i| i.saturating_mul(100_000) + 1).collect();
+
+    {
+        let writer = hot_kv.writer().unwrap();
+        let acc = Account::default();
+        for &b in &blocks {
+            writer.write_account_prestate(b, addr, &acc).unwrap();
+        }
+        writer.commit().unwrap();
+    }
+
+    {
+        let writer = hot_kv.writer().unwrap();
+        let first = *blocks.first().unwrap();
+        let last = *blocks.last().unwrap();
+        writer.update_history_indices_inconsistent(first..=last).unwrap();
+        writer.commit().unwrap();
+    }
+
+    // Walk every shard for this address; the union must equal `blocks`.
+    let reader = hot_kv.reader().unwrap();
+    let mut cursor = reader.traverse_dual::<tables::AccountsHistory>().unwrap();
+    let mut seen = Vec::new();
+    let mut entry = cursor.last_of_k1(&addr).unwrap();
+    while let Some((a, _shard_key, list)) = entry {
+        assert_eq!(a, addr);
+        let list: BlockNumberList = list;
+        seen.extend(list.iter());
+        entry = cursor.previous_k2().unwrap();
+    }
+    seen.sort_unstable();
+    assert_eq!(seen, blocks, "all touched blocks must be reachable across shards");
 }
