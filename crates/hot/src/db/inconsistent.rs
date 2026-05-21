@@ -537,7 +537,8 @@ impl<T> UnsafeHistoryWrite for T where T: UnsafeDbWrite + HotKvWrite {}
 /// stored DUPSORT in MDBX, which caps each dup value at ~1980 bytes on
 /// 4 KB pages. A count-based threshold cannot guarantee fitting under that
 /// cap because roaring's serialised size depends on the value distribution,
-/// not just the count. See [`ShardedKey::MAX_SHARD_BYTES`] (ENG-2287).
+/// not just the count. See [`BlockNumberList::MAX_ENCODED_BYTES`] and
+/// [`BlockNumberList::SAFE_INDICES_PER_SHARD`] (ENG-2287).
 fn append_to_sharded_history<K, E, D, W>(
     existing: Option<(K, BlockNumberList)>,
     indices: impl IntoIterator<Item = u64>,
@@ -560,62 +561,66 @@ where
         delete_old(key).map_err(HistoryError::Db)?;
     }
 
-    // Fast path: encoded list fits under the per-shard byte budget.
-    if last_shard.serialized_size() <= ShardedKey::MAX_SHARD_BYTES {
+    // Fast path: small lists provably fit under the byte budget regardless
+    // of distribution, so skip the size check entirely.
+    if last_shard.len() <= BlockNumberList::SAFE_INDICES_PER_SHARD as u64
+        || last_shard.serialized_size() <= BlockNumberList::MAX_ENCODED_BYTES
+    {
         return write_shard(u64::MAX, &last_shard).map_err(HistoryError::Db);
     }
 
-    // Slow path: re-chunk into multiple shards whose encoded sizes each
-    // fit under the budget.
+    // Slow path: re-chunk by walking indices through a working
+    // BlockNumberList, emitting whenever the next push would overflow the
+    // byte budget. Exact, single-pass, no probing.
     let all: Vec<u64> = last_shard.iter().collect();
-    let mut start = 0;
-    while start < all.len() {
-        let take = max_prefix_fitting(&all[start..]);
-        // A single value is always far smaller than MAX_SHARD_BYTES, so we
-        // can always make forward progress.
-        debug_assert!(take > 0, "no prefix fits in MAX_SHARD_BYTES");
-        let end = start + take;
-        let highest = if end == all.len() { u64::MAX } else { all[end - 1] };
-        let shard = BlockNumberList::new_pre_sorted(all[start..end].iter().copied());
-        write_shard(highest, &shard).map_err(HistoryError::Db)?;
-        start = end;
-    }
-    Ok(())
+    chunk_by_encoded_size(&all, |highest, shard| write_shard(highest, shard))
+        .map_err(HistoryError::Db)
 }
 
-/// Binary-search the largest prefix length `n` of `indices` whose encoded
-/// `BlockNumberList` fits in [`ShardedKey::MAX_SHARD_BYTES`].
+/// Split a pre-sorted slice of indices into shards whose encoded
+/// `BlockNumberList`s each fit in [`BlockNumberList::MAX_ENCODED_BYTES`].
 ///
-/// Returns 0 only if `indices` is empty.
-fn max_prefix_fitting(indices: &[u64]) -> usize {
-    if indices.is_empty() {
-        return 0;
-    }
-    // Optimistic check: the entire slice may fit. Skips the binary search
-    // in the common case where the caller passes a small remainder.
-    if encoded_size_of(indices) <= ShardedKey::MAX_SHARD_BYTES {
-        return indices.len();
-    }
-    let mut lo = 1usize;
-    let mut hi = indices.len();
-    let mut best = 1usize;
-    while lo <= hi {
-        let mid = (lo + hi) / 2;
-        if encoded_size_of(&indices[..mid]) <= ShardedKey::MAX_SHARD_BYTES {
-            best = mid;
-            lo = mid + 1;
-        } else {
-            if mid == 1 {
-                // Even a single index doesn't fit — shouldn't happen but
-                // bail out to avoid an infinite loop.
-                break;
+/// The last shard is emitted with `highest = u64::MAX` to mark it as the
+/// open shard; earlier shards are emitted with the last index they
+/// contain. The slice must be non-empty.
+fn chunk_by_encoded_size<E, W>(all: &[u64], mut write_shard: W) -> Result<(), E>
+where
+    W: FnMut(u64, &BlockNumberList) -> Result<(), E>,
+{
+    debug_assert!(!all.is_empty(), "chunk_by_encoded_size called with empty slice");
+
+    let mut shard = BlockNumberList::default();
+    let mut shard_start = 0usize;
+
+    for (i, &idx) in all.iter().enumerate() {
+        // Pre-sorted, strictly ascending input: push cannot fail.
+        shard.push(idx).expect("indices are pre-sorted and strictly ascending");
+
+        if shard.serialized_size() > BlockNumberList::MAX_ENCODED_BYTES {
+            if i == shard_start {
+                // Pathological: a single index already overflows the
+                // budget. The smallest possible shard is one element, so
+                // emit it anyway — there's no useful smaller chunk to fall
+                // back to. (Not reachable for `u64`: one index encodes to
+                // 30 bytes, well under MAX_ENCODED_BYTES.)
+                write_shard(idx, &shard)?;
+                shard = BlockNumberList::default();
+                shard_start = i + 1;
+            } else {
+                // Roll back the overflowing index: emit the prefix without
+                // it, then start a new shard containing just that index.
+                let prefix = BlockNumberList::new_pre_sorted(all[shard_start..i].iter().copied());
+                write_shard(all[i - 1], &prefix)?;
+                shard = BlockNumberList::default();
+                shard.push(idx).expect("indices are pre-sorted and strictly ascending");
+                shard_start = i;
             }
-            hi = mid - 1;
         }
     }
-    best
-}
 
-fn encoded_size_of(indices: &[u64]) -> usize {
-    BlockNumberList::new_pre_sorted(indices.iter().copied()).serialized_size()
+    // Emit the final (open) shard.
+    if !shard.is_empty() {
+        write_shard(u64::MAX, &shard)?;
+    }
+    Ok(())
 }

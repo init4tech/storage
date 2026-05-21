@@ -460,19 +460,21 @@ pub fn test_delete_and_rewrite_dual<T: HotKv>(hot_kv: &T) {
 ///
 /// Why: AccountsHistory is DUPSORT, so each stored dup value
 /// (`key2 || encoded BlockNumberList`) is capped at MDBX's DUPSORT value
-/// limit (~1980 bytes on 4 KB pages). A roaring serialisation of 2000
-/// indices spread across many 16-bit containers exceeds 20 KB. The history
-/// pipeline must split shards by encoded size, not by index count, so any
-/// pattern of `update_history_indices_inconsistent` survives. ENG-2287.
+/// limit (~1980 bytes on 4 KB pages). A roaring serialisation of a few
+/// thousand sparse indices vastly exceeds that. The history pipeline must
+/// split shards by encoded size, not by index count, so any pattern of
+/// `update_history_indices_inconsistent` survives. ENG-2287.
 pub fn test_history_shard_fits_in_dupsort_limit<T: HotKv>(hot_kv: &T) {
     let addr = address!("0xcccccccccccccccccccccccccccccccccccccccc");
 
-    // Sparse pattern: 2000 block-numbers spread far apart so each lives in
-    // its own roaring 16-bit container — the worst-case for serialised size
-    // (per-container header dominates). Write a change-set per block, then
-    // ask the history pipeline to index the full range in one call.
-    let blocks: Vec<u64> =
-        (0..ShardedKey::SHARD_COUNT as u64).map(|i| i.saturating_mul(100_000) + 1).collect();
+    // Sparse pattern: block numbers spread far apart so each lives in its
+    // own roaring 16-bit container — the worst case for serialised size
+    // (per-container header dominates) within a single bitmap. We pick a
+    // count well above SAFE_INDICES_PER_SHARD so the splitter must emit
+    // multiple shards. Write a change-set per block, then ask the history
+    // pipeline to index the full range in one call.
+    let n = (BlockNumberList::SAFE_INDICES_PER_SHARD * 30) as u64;
+    let blocks: Vec<u64> = (0..n).map(|i| i.saturating_mul(100_000) + 1).collect();
 
     {
         let writer = hot_kv.writer().unwrap();
