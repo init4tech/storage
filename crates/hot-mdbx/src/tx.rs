@@ -142,6 +142,28 @@ impl<K: TransactionKind + WriteMarker> Tx<K> {
 
         Ok(())
     }
+
+    /// Removes a table from the environment as if it had never been created:
+    /// drops the named sub-database and erases its FSI metadata entry. Used
+    /// by tests to simulate a database written by an older binary that
+    /// pre-dates the table. Does not invalidate the in-memory `FsiCache`;
+    /// callers must reopen the parent `DatabaseEnv` after commit.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure no [`Cursor`] or other references to `table`
+    /// exist for the lifetime of this transaction. See
+    /// [`signet_libmdbx::tx::Tx::drop_db`].
+    #[cfg(test)]
+    pub(crate) unsafe fn forget_table(&self, table: &'static str) -> Result<(), MdbxError> {
+        let metadata = self.inner.open_db(None)?;
+        self.inner
+            .del(metadata, fsi_name_to_key(table).as_slice(), None)
+            .map_err(MdbxError::Mdbx)?;
+        let db = self.inner.open_db(Some(table))?;
+        // SAFETY: forwarded from this function's safety contract.
+        unsafe { self.inner.drop_db(db) }.map_err(MdbxError::Mdbx)
+    }
 }
 
 fn fsi_name_to_key(name: &'static str) -> B256 {
@@ -288,22 +310,14 @@ macro_rules! impl_hot_kv_write {
                 dual_key: Option<usize>,
                 fixed_val: Option<usize>,
             ) -> Result<(), Self::Error> {
+                let fsi = FixedSizeInfo::from_create_args(dual_key, fixed_val);
+
                 let mut flags = signet_libmdbx::DatabaseFlags::default();
-
-                let mut fsi = FixedSizeInfo::None;
-
-                if let Some(key2_size) = dual_key {
+                if fsi.is_dupsort() {
                     flags.set(signet_libmdbx::DatabaseFlags::DUP_SORT, true);
-                    if let Some(value_size) = fixed_val {
-                        flags.set(signet_libmdbx::DatabaseFlags::DUP_FIXED, true);
-                        fsi = FixedSizeInfo::DupFixed {
-                            key2_size,
-                            total_size: key2_size + value_size,
-                        };
-                    } else {
-                        // DUPSORT without DUP_FIXED - variable value size
-                        fsi = FixedSizeInfo::DupSort { key2_size };
-                    }
+                }
+                if fsi.is_dup_fixed() {
+                    flags.set(signet_libmdbx::DatabaseFlags::DUP_FIXED, true);
                 }
 
                 self.inner.create_db(Some(table), flags)?;

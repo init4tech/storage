@@ -29,6 +29,7 @@ pub fn conformance<T: HotKv>(hot_kv: &T) {
     test_storage_history(hot_kv);
     test_account_changes(hot_kv);
     test_storage_changes(hot_kv);
+    test_journal_hash_roundtrip(hot_kv);
     test_missing_reads(hot_kv);
     test_cursor_iter_k2(hot_kv);
     test_cursor_iter_k2_single(hot_kv);

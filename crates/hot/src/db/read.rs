@@ -44,6 +44,12 @@ pub trait HotDbRead: HotKvRead + super::sealed::Sealed {
         };
         self.get_header(number)
     }
+
+    /// Read the keccak256 of the wire-encoded `Journal::V1` bytes for a
+    /// block, if one was recorded.
+    fn get_journal_hash(&self, number: u64) -> Result<Option<B256>, Self::Error> {
+        self.get::<tables::JournalHashes>(&number)
+    }
 }
 
 impl<T> HotDbRead for T where T: HotKvRead {}

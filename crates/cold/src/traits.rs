@@ -71,13 +71,20 @@ impl BlockData {
 
 impl From<ExecutedBlock> for BlockData {
     fn from(block: ExecutedBlock) -> Self {
-        Self::new(
-            block.header,
-            block.transactions,
-            block.receipts,
-            block.signet_events,
-            block.zenith_header,
-        )
+        // Destructure so adding a new `ExecutedBlock` field is a compile
+        // error here until the author decides whether it belongs in cold.
+        // `bundle` and `journal_hash` are hot-only: they live in
+        // `PlainAccountState`/`PlainStorageState` and `JournalHashes`.
+        let ExecutedBlock {
+            header,
+            transactions,
+            receipts,
+            signet_events,
+            zenith_header,
+            bundle: _,
+            journal_hash: _,
+        } = block;
+        Self::new(header, transactions, receipts, signet_events, zenith_header)
     }
 }
 

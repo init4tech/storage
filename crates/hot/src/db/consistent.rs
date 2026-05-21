@@ -148,8 +148,22 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
     /// - Headers and header number mappings
     /// - Account and storage change sets
     /// - Account and storage history indices
+    /// - Journal hashes
     fn unwind_above(&self, block: BlockNumber) -> Result<(), HistoryError<Self::Error>> {
-        let first_block = block + 1;
+        // Nothing can sit above `u64::MAX`; bail out before any of the
+        // `block + 1` arithmetic below has a chance to overflow.
+        let Some(first_block) = block.checked_add(1) else {
+            return Ok(());
+        };
+
+        // Clean journal hashes independently of the Headers table. Direct
+        // callers of `put_journal_hash` are not forced to pair writes with a
+        // header, so the upper bound here is `u64::MAX` rather than
+        // `last_block_number()`. The range delete is a no-op when the table
+        // has no entries above `block`.
+        self.traverse_mut::<tables::JournalHashes>()?
+            .delete_range_inclusive(first_block..=u64::MAX)?;
+
         let Some(last_block) = self.last_block_number()? else {
             return Ok(());
         };
@@ -345,3 +359,78 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
 }
 
 impl<T> HistoryWrite for T where T: UnsafeDbWrite + UnsafeHistoryWrite {}
+
+#[cfg(test)]
+mod tests {
+    use super::HistoryWrite;
+    use crate::{
+        db::{HistoryRead, HotDbRead, UnsafeDbWrite, UnsafeHistoryWrite},
+        mem::MemKv,
+        model::HotKv,
+    };
+    use alloy::{
+        consensus::{Header, Sealable},
+        primitives::{Address, B256, U256},
+    };
+    use signet_storage_types::Account;
+
+    /// Regression: `unwind_above(u64::MAX)` must be a no-op rather than
+    /// overflowing `block + 1` and wiping data in `JournalHashes`,
+    /// `Headers`/`HeaderNumbers`, and the change-set tables (which the
+    /// wrapped `first_block = 0` would have caused to be range-deleted).
+    #[test]
+    fn unwind_above_u64_max_is_noop() {
+        let store = MemKv::new();
+        let hash = B256::with_last_byte(0x42);
+        let header = Header { number: 7, ..Default::default() }.seal_slow();
+        let header_hash = header.hash();
+        let address = Address::with_last_byte(0xab);
+        let account = Account { nonce: 1, balance: U256::from(99), bytecode_hash: None };
+
+        let writer = store.writer().unwrap();
+        writer.put_header(&header).unwrap();
+        writer.write_account_prestate(7, address, &account).unwrap();
+        writer.put_journal_hash(7, &hash).unwrap();
+        writer.commit().unwrap();
+
+        let writer = store.writer().unwrap();
+        writer.unwind_above(u64::MAX).unwrap();
+        writer.commit().unwrap();
+
+        let reader = store.reader().unwrap();
+        assert_eq!(reader.get_journal_hash(7).unwrap(), Some(hash));
+        assert_eq!(reader.get_header(7).unwrap().expect("header survives").number, 7);
+        assert_eq!(reader.get_header_number(&header_hash).unwrap(), Some(7));
+        assert_eq!(reader.get_account_change(7, &address).unwrap(), Some(account));
+    }
+
+    /// Boundary: `unwind_above(u64::MAX - 1)` must delete every table's
+    /// entry at `u64::MAX`. Exercises the inclusive upper bound of the range
+    /// delete on `JournalHashes`, `Headers`/`HeaderNumbers`, and the change
+    /// sets at the extreme.
+    #[test]
+    fn unwind_above_below_u64_max_deletes_max_entry() {
+        let store = MemKv::new();
+        let hash = B256::with_last_byte(0xab);
+        let header = Header { number: u64::MAX, ..Default::default() }.seal_slow();
+        let header_hash = header.hash();
+        let address = Address::with_last_byte(0xcd);
+        let account = Account { nonce: 3, balance: U256::from(7), bytecode_hash: None };
+
+        let writer = store.writer().unwrap();
+        writer.put_header(&header).unwrap();
+        writer.write_account_prestate(u64::MAX, address, &account).unwrap();
+        writer.put_journal_hash(u64::MAX, &hash).unwrap();
+        writer.commit().unwrap();
+
+        let writer = store.writer().unwrap();
+        writer.unwind_above(u64::MAX - 1).unwrap();
+        writer.commit().unwrap();
+
+        let reader = store.reader().unwrap();
+        assert!(reader.get_journal_hash(u64::MAX).unwrap().is_none());
+        assert!(reader.get_header(u64::MAX).unwrap().is_none());
+        assert!(reader.get_header_number(&header_hash).unwrap().is_none());
+        assert!(reader.get_account_change(u64::MAX, &address).unwrap().is_none());
+    }
+}

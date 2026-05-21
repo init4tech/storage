@@ -102,6 +102,11 @@ pub trait UnsafeDbWrite: HotKvWrite + super::sealed::Sealed {
         self.queue_delete::<tables::HeaderNumbers>(hash)
     }
 
+    /// Write the keccak256 of the wire-encoded `Journal::V1` bytes for a block.
+    fn put_journal_hash(&self, number: u64, hash: &B256) -> Result<(), Self::Error> {
+        self.queue_put::<tables::JournalHashes>(&number, hash)
+    }
+
     /// Commit the write transaction.
     fn commit(self) -> Result<(), Self::Error>
     where

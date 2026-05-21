@@ -46,3 +46,8 @@ table! {
     /// Records storage states before transactions, keyed by (address, block number). This table is used to rollback storage states. As such, appends and unwinds are always full replacements, never merges.
     StorageChangeSets<(u64, Address) => U256 => U256> is 32, FullReplacements
 }
+
+table! {
+    /// Records the keccak256 of the wire-encoded `Journal::V1` bytes emitted for each rollup block, keyed by block number. Opt-in per block: callers that do not produce a journal simply do not write an entry.
+    JournalHashes<BlockNumber => B256>
+}

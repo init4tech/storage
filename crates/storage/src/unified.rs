@@ -9,6 +9,7 @@ use alloy::primitives::BlockNumber;
 use signet_cold::{BlockData, ColdReceipt, ColdStorage, ColdStorageBackend, ColdStorageError};
 use signet_hot::{
     HistoryRead, HistoryWrite, HotKv,
+    db::UnsafeDbWrite,
     model::{HotKvReadError, HotKvWrite, RevmRead},
 };
 use signet_storage_types::{ExecutedBlock, SealedHeader};
@@ -195,6 +196,14 @@ impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B> {
         writer
             .append_blocks(blocks.iter().map(|b| (&b.header, &b.bundle)))
             .map_err(|e| e.map_db(|e| e.into_hot_kv_error()))?;
+        // Persist journal hashes alongside headers in the same transaction.
+        // Blocks without a journal (e.g. block-only nodes) skip the write.
+        blocks
+            .iter()
+            .filter_map(|block| block.journal_hash.as_ref().map(|hash| (block.header.number, hash)))
+            .try_for_each(|(height, hash)| {
+                writer.put_journal_hash(height, hash).map_err(|e| e.into_hot_kv_error())
+            })?;
         writer.raw_commit().map_err(|e| e.into_hot_kv_error())?;
 
         Ok(())
