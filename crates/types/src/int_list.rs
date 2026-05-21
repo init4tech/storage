@@ -132,6 +132,12 @@ impl IntegerList {
         self.0.try_push(value).map_err(|_| IntegerListError::IntegerTooSmall)
     }
 
+    /// Removes a single value from the list. Returns `true` if it was
+    /// present.
+    pub fn remove(&mut self, value: u64) -> bool {
+        self.0.remove(value)
+    }
+
     /// Clears the list.
     pub fn clear(&mut self) {
         self.0.clear();

@@ -550,9 +550,8 @@ where
     D: FnMut(K) -> Result<(), E>,
     W: FnMut(u64, &BlockNumberList) -> Result<(), E>,
 {
-    let (old_key, last_shard) =
+    let (old_key, mut last_shard) =
         existing.map_or_else(|| (None, BlockNumberList::default()), |(k, list)| (Some(k), list));
-    let mut last_shard = last_shard;
 
     last_shard.append(indices).map_err(HistoryError::IntList)?;
 
@@ -569,56 +568,57 @@ where
         return write_shard(u64::MAX, &last_shard).map_err(HistoryError::Db);
     }
 
-    // Slow path: re-chunk by walking indices through a working
-    // BlockNumberList, emitting whenever the next push would overflow the
-    // byte budget. Exact, single-pass, no probing.
-    let all: Vec<u64> = last_shard.iter().collect();
-    chunk_by_encoded_size(&all, |highest, shard| write_shard(highest, shard))
+    // Slow path: walk indices through a working BlockNumberList, emitting
+    // whenever the next push would overflow the byte budget. Exact,
+    // single-pass, no probing.
+    chunk_by_encoded_size(last_shard.iter(), |highest, shard| write_shard(highest, shard))
         .map_err(HistoryError::Db)
 }
 
-/// Split a pre-sorted slice of indices into shards whose encoded
+/// Split a pre-sorted iterator of indices into shards whose encoded
 /// `BlockNumberList`s each fit in [`BlockNumberList::MAX_ENCODED_BYTES`].
 ///
 /// The last shard is emitted with `highest = u64::MAX` to mark it as the
 /// open shard; earlier shards are emitted with the last index they
-/// contain. The slice must be non-empty.
-fn chunk_by_encoded_size<E, W>(all: &[u64], mut write_shard: W) -> Result<(), E>
+/// contain.
+fn chunk_by_encoded_size<E, W>(
+    indices: impl IntoIterator<Item = u64>,
+    mut write_shard: W,
+) -> Result<(), E>
 where
     W: FnMut(u64, &BlockNumberList) -> Result<(), E>,
 {
-    debug_assert!(!all.is_empty(), "chunk_by_encoded_size called with empty slice");
-
     let mut shard = BlockNumberList::default();
-    let mut shard_start = 0usize;
+    let mut prev_in_shard: Option<u64> = None;
 
-    for (i, &idx) in all.iter().enumerate() {
-        // Pre-sorted, strictly ascending input: push cannot fail.
+    for idx in indices {
         shard.push(idx).expect("indices are pre-sorted and strictly ascending");
 
         if shard.serialized_size() > BlockNumberList::MAX_ENCODED_BYTES {
-            if i == shard_start {
-                // Pathological: a single index already overflows the
-                // budget. The smallest possible shard is one element, so
-                // emit it anyway — there's no useful smaller chunk to fall
-                // back to. (Not reachable for `u64`: one index encodes to
-                // 30 bytes, well under MAX_ENCODED_BYTES.)
-                write_shard(idx, &shard)?;
-                shard = BlockNumberList::default();
-                shard_start = i + 1;
-            } else {
-                // Roll back the overflowing index: emit the prefix without
-                // it, then start a new shard containing just that index.
-                let prefix = BlockNumberList::new_pre_sorted(all[shard_start..i].iter().copied());
-                write_shard(all[i - 1], &prefix)?;
-                shard = BlockNumberList::default();
-                shard.push(idx).expect("indices are pre-sorted and strictly ascending");
-                shard_start = i;
+            match prev_in_shard {
+                Some(highest) => {
+                    // Roll back the overflowing index, emit the prefix,
+                    // then restart the shard with just `idx`.
+                    shard.remove(idx);
+                    write_shard(highest, &shard)?;
+                    shard.clear();
+                    shard.push(idx).expect("indices are pre-sorted and strictly ascending");
+                    prev_in_shard = Some(idx);
+                }
+                None => {
+                    // A single index already overflows the budget. The
+                    // smallest possible shard is one element, so emit it
+                    // as-is. (Unreachable for u64: 30 encoded bytes.)
+                    write_shard(idx, &shard)?;
+                    shard.clear();
+                    prev_in_shard = None;
+                }
             }
+        } else {
+            prev_in_shard = Some(idx);
         }
     }
 
-    // Emit the final (open) shard.
     if !shard.is_empty() {
         write_shard(u64::MAX, &shard)?;
     }

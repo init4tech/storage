@@ -469,11 +469,11 @@ pub fn test_history_shard_fits_in_dupsort_limit<T: HotKv>(hot_kv: &T) {
 
     // Sparse pattern: block numbers spread far apart so each lives in its
     // own roaring 16-bit container — the worst case for serialised size
-    // (per-container header dominates) within a single bitmap. We pick a
-    // count well above SAFE_INDICES_PER_SHARD so the splitter must emit
-    // multiple shards. Write a change-set per block, then ask the history
-    // pipeline to index the full range in one call.
-    let n = (BlockNumberList::SAFE_INDICES_PER_SHARD * 30) as u64;
+    // (per-container header dominates) within a single bitmap. The count
+    // forces several full-sized shards plus one open shard, so the
+    // splitter has to emit, restart, and emit again multiple times.
+    const SHARDS_TO_FORCE: usize = 30;
+    let n = (BlockNumberList::SAFE_INDICES_PER_SHARD * SHARDS_TO_FORCE) as u64;
     let blocks: Vec<u64> = (0..n).map(|i| i.saturating_mul(100_000) + 1).collect();
 
     {
