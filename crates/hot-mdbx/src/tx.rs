@@ -26,6 +26,11 @@ pub struct Tx<K: TransactionKind> {
     fsi_cache: FsiCache,
 }
 
+/// Per-shard byte budget for sharded history tables. Derived from MDBX's
+/// DUPSORT value cap (~1980 B on 4 KB pages) minus key2 and per-node
+/// overhead, with comfortable headroom for roaring encoding variability.
+pub(crate) const MAX_SHARD_BYTES: usize = 1500;
+
 impl<K: TransactionKind> std::fmt::Debug for Tx<K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tx").field("fsi_cache", &self.fsi_cache).finish_non_exhaustive()
@@ -390,3 +395,215 @@ macro_rules! impl_hot_kv_write {
 
 impl_hot_kv_write!(RwSync);
 impl_hot_kv_write!(Rw);
+
+macro_rules! impl_history_write {
+    ($ty:ty) => {
+        impl signet_hot::db::HistoryWrite for Tx<$ty> {
+            fn append_account_history(
+                &self,
+                addr: &alloy::primitives::Address,
+                new_blocks: &signet_storage_types::BlockNumberList,
+            ) -> Result<(), signet_hot::db::HistoryError<Self::Error>> {
+                use signet_hot::{db::HistoryError, model::HotKvWrite, tables};
+                use signet_storage_types::merge_and_split;
+
+                let existing_tail = self
+                    .get_dual::<tables::AccountsHistory>(addr, &u64::MAX)
+                    .map_err(HistoryError::Db)?
+                    .unwrap_or_default();
+
+                if !existing_tail.is_empty() {
+                    self.queue_delete_dual::<tables::AccountsHistory>(addr, &u64::MAX)
+                        .map_err(HistoryError::Db)?;
+                }
+
+                let (first, second) =
+                    merge_and_split(existing_tail, new_blocks.clone(), MAX_SHARD_BYTES);
+
+                match second {
+                    None => self
+                        .queue_put_dual::<tables::AccountsHistory>(addr, &u64::MAX, &first)
+                        .map_err(HistoryError::Db),
+                    Some(tail) => {
+                        let seal_key = first.max().expect("first non-empty after split");
+                        self.queue_put_dual::<tables::AccountsHistory>(addr, &seal_key, &first)
+                            .map_err(HistoryError::Db)?;
+                        self.queue_put_dual::<tables::AccountsHistory>(addr, &u64::MAX, &tail)
+                            .map_err(HistoryError::Db)
+                    }
+                }
+            }
+
+            fn append_storage_history(
+                &self,
+                addr: &alloy::primitives::Address,
+                slot: &alloy::primitives::U256,
+                new_blocks: &signet_storage_types::BlockNumberList,
+            ) -> Result<(), signet_hot::db::HistoryError<Self::Error>> {
+                use signet_hot::{db::HistoryError, model::HotKvWrite, tables};
+                use signet_storage_types::{ShardedKey, merge_and_split};
+
+                let tail_key = ShardedKey::new(*slot, u64::MAX);
+                let existing_tail = self
+                    .get_dual::<tables::StorageHistory>(addr, &tail_key)
+                    .map_err(HistoryError::Db)?
+                    .unwrap_or_default();
+
+                if !existing_tail.is_empty() {
+                    self.queue_delete_dual::<tables::StorageHistory>(addr, &tail_key)
+                        .map_err(HistoryError::Db)?;
+                }
+
+                let (first, second) =
+                    merge_and_split(existing_tail, new_blocks.clone(), MAX_SHARD_BYTES);
+
+                match second {
+                    None => self
+                        .queue_put_dual::<tables::StorageHistory>(addr, &tail_key, &first)
+                        .map_err(HistoryError::Db),
+                    Some(tail) => {
+                        let seal_block = first.max().expect("first non-empty after split");
+                        let seal_key = ShardedKey::new(*slot, seal_block);
+                        self.queue_put_dual::<tables::StorageHistory>(addr, &seal_key, &first)
+                            .map_err(HistoryError::Db)?;
+                        self.queue_put_dual::<tables::StorageHistory>(addr, &tail_key, &tail)
+                            .map_err(HistoryError::Db)
+                    }
+                }
+            }
+
+            fn truncate_account_history_above(
+                &self,
+                addr: &alloy::primitives::Address,
+                above: u64,
+            ) -> Result<(), signet_hot::db::HistoryError<Self::Error>> {
+                use signet_hot::{
+                    db::HistoryError,
+                    model::{HotKvRead, HotKvWrite},
+                    tables,
+                };
+                use signet_storage_types::BlockNumberList;
+
+                let mut cursor =
+                    self.traverse_dual::<tables::AccountsHistory>().map_err(HistoryError::Db)?;
+
+                let Some((_, mut key2, mut list)) =
+                    cursor.last_of_k1(addr).map_err(HistoryError::Db)?
+                else {
+                    return Ok(());
+                };
+
+                let mut deleted_above = false;
+
+                loop {
+                    let max_in_shard = list.max().unwrap_or(0);
+
+                    if max_in_shard <= above {
+                        if deleted_above && key2 != u64::MAX {
+                            self.queue_delete_dual::<tables::AccountsHistory>(addr, &key2)
+                                .map_err(HistoryError::Db)?;
+                            self.queue_put_dual::<tables::AccountsHistory>(addr, &u64::MAX, &list)
+                                .map_err(HistoryError::Db)?;
+                        }
+                        return Ok(());
+                    }
+
+                    self.queue_delete_dual::<tables::AccountsHistory>(addr, &key2)
+                        .map_err(HistoryError::Db)?;
+
+                    let kept =
+                        BlockNumberList::new_pre_sorted(list.iter().take_while(|&b| b <= above));
+                    if !kept.is_empty() {
+                        self.queue_put_dual::<tables::AccountsHistory>(addr, &u64::MAX, &kept)
+                            .map_err(HistoryError::Db)?;
+                        return Ok(());
+                    }
+
+                    deleted_above = true;
+                    let Some((_, prev_key2, prev_list)) =
+                        cursor.previous_k2().map_err(HistoryError::Db)?
+                    else {
+                        return Ok(());
+                    };
+                    key2 = prev_key2;
+                    list = prev_list;
+                }
+            }
+
+            fn truncate_storage_history_above(
+                &self,
+                addr: &alloy::primitives::Address,
+                slot: &alloy::primitives::U256,
+                above: u64,
+            ) -> Result<(), signet_hot::db::HistoryError<Self::Error>> {
+                use signet_hot::{
+                    db::HistoryError,
+                    model::{HotKvRead, HotKvWrite},
+                    tables,
+                };
+                use signet_storage_types::{BlockNumberList, ShardedKey};
+
+                let mut cursor =
+                    self.traverse_dual::<tables::StorageHistory>().map_err(HistoryError::Db)?;
+
+                let tail_key = ShardedKey::new(*slot, u64::MAX);
+
+                // Walk backwards from the largest dup for this addr until we
+                // find one matching this slot. The cursor may start on a
+                // different slot for the same addr.
+                let mut cur_entry = cursor.last_of_k1(addr).map_err(HistoryError::Db)?;
+                loop {
+                    match cur_entry {
+                        None => return Ok(()),
+                        Some((_, ref sk, _)) if sk.key == *slot => break,
+                        Some(_) => {
+                            cur_entry = cursor.previous_k2().map_err(HistoryError::Db)?;
+                        }
+                    }
+                }
+                let (_, mut sk, mut list) = cur_entry.expect("matched above");
+
+                let mut deleted_above = false;
+
+                loop {
+                    let max_in_shard = list.max().unwrap_or(0);
+
+                    if max_in_shard <= above {
+                        if deleted_above && sk != tail_key {
+                            self.queue_delete_dual::<tables::StorageHistory>(addr, &sk)
+                                .map_err(HistoryError::Db)?;
+                            self.queue_put_dual::<tables::StorageHistory>(addr, &tail_key, &list)
+                                .map_err(HistoryError::Db)?;
+                        }
+                        return Ok(());
+                    }
+
+                    self.queue_delete_dual::<tables::StorageHistory>(addr, &sk)
+                        .map_err(HistoryError::Db)?;
+
+                    let kept =
+                        BlockNumberList::new_pre_sorted(list.iter().take_while(|&b| b <= above));
+                    if !kept.is_empty() {
+                        self.queue_put_dual::<tables::StorageHistory>(addr, &tail_key, &kept)
+                            .map_err(HistoryError::Db)?;
+                        return Ok(());
+                    }
+
+                    deleted_above = true;
+                    let prev = cursor.previous_k2().map_err(HistoryError::Db)?;
+                    match prev {
+                        None => return Ok(()),
+                        Some((_, ref prev_sk, _)) if prev_sk.key != *slot => return Ok(()),
+                        Some((_, prev_sk, prev_list)) => {
+                            sk = prev_sk;
+                            list = prev_list;
+                        }
+                    }
+                }
+            }
+        }
+    };
+}
+
+impl_history_write!(RwSync);
+impl_history_write!(Rw);
