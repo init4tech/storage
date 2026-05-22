@@ -203,6 +203,10 @@ pub fn merge_and_split(
     additions: IntegerList,
     max_bytes: usize,
 ) -> (IntegerList, Option<IntegerList>) {
+    debug_assert!(
+        additions.serialized_size() <= max_bytes,
+        "additions exceed a single shard's budget",
+    );
     let mut tail: Option<IntegerList> = None;
 
     for block in additions.iter() {
@@ -303,14 +307,21 @@ mod tests {
 
     #[test]
     fn merge_and_split_split_preserves_strict_ordering() {
-        // Additions are strictly greater than existing; verify post-split second
-        // contains only the newest blocks.
-        let existing = IntegerList::new(0u64..10).unwrap();
-        let additions = IntegerList::new(10u64..30).unwrap();
+        // Sparse blocks (one per distinct 16-bit container) make serialized
+        // size grow proportionally to count, so we can budget-tune to force
+        // a split while keeping additions within budget.
+        let existing_blocks: Vec<u64> = (0..50u64).map(|i| i * 0x1_0000).collect();
+        let addition_blocks: Vec<u64> = (50..70u64).map(|i| i * 0x1_0000).collect();
+        let combined_blocks: Vec<u64> = (0..70u64).map(|i| i * 0x1_0000).collect();
 
+        let existing = IntegerList::new(existing_blocks).unwrap();
+        let additions = IntegerList::new(addition_blocks).unwrap();
+        let combined_size = IntegerList::new(combined_blocks).unwrap().serialized_size();
+        let additions_size = additions.serialized_size();
         let existing_size = existing.serialized_size();
-        let combined = IntegerList::new(0u64..30).unwrap().serialized_size();
-        let budget = existing_size + (combined - existing_size) / 3;
+        // Budget that fits both existing and additions alone, but not combined.
+        let budget = existing_size.max(additions_size) + 16;
+        assert!(combined_size > budget, "test setup broken: combined fits in budget");
 
         let (first, second) = merge_and_split(existing, additions, budget);
         let second = second.expect("split should have occurred");
