@@ -6,6 +6,9 @@ pub use consistent::LegacyConsistentHistoryWrite;
 mod errors;
 pub use errors::{HistoryError, HistoryResult};
 
+pub mod history;
+pub use history::{HistoryRead, HistoryWrite};
+
 mod inconsistent;
 pub use inconsistent::{BundleInit, LegacyUnsafeHistoryWrite, UnsafeDbWrite};
 
