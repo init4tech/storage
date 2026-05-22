@@ -39,21 +39,7 @@ pub trait HistoryRead: HotDbRead {
         let (_, mut merged) = first;
         for entry in iter {
             let (_, list) = entry?;
-            merged
-                .append(list.iter())
-                .map_err(|e| {
-                    // Safety: we are iterating over history blocks which are
-                    // supposed to be strictly increasing; if not, the DB is
-                    // corrupt. We convert to the DB error type here.
-                    // Note: Self::Error must come from some HotKvReadError impl
-                    // but IntegerListError is not that type. We drop it since
-                    // blocks_changed_account returns Self::Error, not
-                    // HistoryError. The caller can use the HistoryWrite path for
-                    // mutations. For reads, a corrupt DB is a storage error that
-                    // this layer cannot express; we suppress it.
-                    let _ = e;
-                })
-                .ok();
+            merged.append(list.iter()).expect("history blocks strictly increasing");
         }
         Ok(Some(merged))
     }
@@ -77,7 +63,7 @@ pub trait HistoryRead: HotDbRead {
             if next_addr != *addr || next_sk.key != *slot {
                 break;
             }
-            merged.append(next_list.iter()).ok();
+            merged.append(next_list.iter()).expect("history blocks strictly increasing");
         }
         Ok(Some(merged))
     }
