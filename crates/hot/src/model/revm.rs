@@ -445,7 +445,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        db::{HistoryWrite, LegacyUnsafeHistoryWrite, UnsafeDbWrite},
+        db::{HistoryWrite, UnsafeDbWrite},
         mem::MemKv,
         model::{HotKv, HotKvRead, HotKvWrite},
         tables::{Bytecodes, PlainAccountState},

@@ -1,7 +1,7 @@
 //! Basic CRUD roundtrip tests for hot storage.
 
 use crate::{
-    db::{HotDbRead, LegacyHistoryRead, LegacyUnsafeHistoryWrite, UnsafeDbWrite},
+    db::{HistoryWrite, HotDbRead, LegacyHistoryRead, LegacyUnsafeHistoryWrite, UnsafeDbWrite},
     model::{HotKv, HotKvRead},
     tables,
 };
@@ -203,7 +203,10 @@ pub fn test_storage_history<T: HotKv>(hot_kv: &T) {
 }
 
 /// Test account change sets via HotHistoryWrite/HotHistoryRead
-pub fn test_account_changes<T: HotKv>(hot_kv: &T) {
+pub fn test_account_changes<T: HotKv>(hot_kv: &T)
+where
+    T::RwTx: HistoryWrite,
+{
     let addr = address!("0x3333333333333333333333333333333333333333");
     let pre_state = Account { nonce: 10, balance: U256::from(5000), bytecode_hash: None };
     let block_number = 100u64;
@@ -229,7 +232,10 @@ pub fn test_account_changes<T: HotKv>(hot_kv: &T) {
 }
 
 /// Test storage change sets via HotHistoryWrite/HotHistoryRead
-pub fn test_storage_changes<T: HotKv>(hot_kv: &T) {
+pub fn test_storage_changes<T: HotKv>(hot_kv: &T)
+where
+    T::RwTx: HistoryWrite,
+{
     let addr = address!("0x4444444444444444444444444444444444444444");
     let slot = U256::from(153);
     let pre_value = U256::from(12345);

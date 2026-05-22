@@ -8,14 +8,7 @@ use alloy::primitives::{Address, B256, BlockNumber, U256};
 use itertools::Itertools;
 use signet_storage_types::{Account, BlockNumberList, SealedHeader, ShardedKey};
 use std::ops::RangeInclusive;
-use trevm::revm::{
-    bytecode::Bytecode,
-    database::{
-        BundleState, OriginalValuesKnown,
-        states::{PlainStateReverts, PlainStorageChangeset, PlainStorageRevert, StateChangeset},
-    },
-    state::AccountInfo,
-};
+use trevm::revm::bytecode::Bytecode;
 
 /// Bundle state initialization type.
 /// Maps address -> (old_account, new_account, storage_changes)
@@ -131,29 +124,6 @@ pub trait LegacyUnsafeHistoryWrite: UnsafeDbWrite + LegacyHistoryRead {
         self.queue_put_dual::<tables::AccountsHistory>(address, &latest_height, touched)
     }
 
-    /// Write an account change (pre-state) for an account at a specific block.
-    fn write_account_prestate(
-        &self,
-        block_number: u64,
-        address: Address,
-        pre_state: &Account,
-    ) -> Result<(), Self::Error> {
-        self.queue_put_dual::<tables::AccountChangeSets>(&block_number, &address, pre_state)
-    }
-
-    /// Append an account prestate entry.
-    ///
-    /// Entries must be appended in sorted order by (block_number, address).
-    /// Within a single block, addresses must be sorted.
-    fn append_account_prestate(
-        &self,
-        block_number: u64,
-        address: Address,
-        pre_state: &Account,
-    ) -> Result<(), Self::Error> {
-        self.queue_append_dual::<tables::AccountChangeSets>(&block_number, &address, pre_state)
-    }
-
     /// Write storage history, by highest block number and touched block
     /// numbers.
     fn write_storage_history(
@@ -165,232 +135,6 @@ pub trait LegacyUnsafeHistoryWrite: UnsafeDbWrite + LegacyHistoryRead {
     ) -> Result<(), Self::Error> {
         let sharded_key = ShardedKey::new(slot, highest_block_number);
         self.queue_put_dual::<tables::StorageHistory>(address, &sharded_key, touched)
-    }
-
-    /// Write a storage change (before state) for an account at a specific block.
-    fn write_storage_prestate(
-        &self,
-        block_number: u64,
-        address: Address,
-        slot: &U256,
-        prestate: &U256,
-    ) -> Result<(), Self::Error> {
-        self.queue_put_dual::<tables::StorageChangeSets>(&(block_number, address), slot, prestate)
-    }
-
-    /// Append a storage prestate entry.
-    ///
-    /// Entries must be appended in sorted order by ((block_number, address), slot).
-    /// Within a single (block, address), slots must be sorted.
-    fn append_storage_prestate(
-        &self,
-        block_number: u64,
-        address: Address,
-        slot: &U256,
-        prestate: &U256,
-    ) -> Result<(), Self::Error> {
-        self.queue_append_dual::<tables::StorageChangeSets>(
-            &(block_number, address),
-            slot,
-            prestate,
-        )
-    }
-
-    /// Write a pre-state for every storage key that exists for an account at a
-    /// specific block.
-    ///
-    /// Note: This uses `write_storage_prestate` (regular put) instead of
-    /// `append_storage_prestate` because the slots may interleave with other
-    /// writes to the same K1 from different code paths.
-    fn write_wipe(&self, block_number: u64, address: &Address) -> Result<(), Self::Error> {
-        let mut cursor = self.traverse_dual::<tables::PlainStorageState>()?;
-
-        for entry in cursor.iter_k2(address)? {
-            let (slot, value) = entry?;
-            self.write_storage_prestate(block_number, *address, &slot, &value)?;
-        }
-        Ok(())
-    }
-
-    /// Write pre-sorted revert data for a single block.
-    ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if `accounts` is not sorted by address or `storage` is not sorted
-    /// by address.
-    fn write_plain_revert_sorted(
-        &self,
-        block_number: u64,
-        accounts: &[&(Address, Option<AccountInfo>)],
-        storage: &[&PlainStorageRevert],
-    ) -> Result<(), Self::Error> {
-        #[cfg(debug_assertions)]
-        {
-            debug_assert!(
-                accounts.windows(2).all(|w| w[0].0 <= w[1].0),
-                "accounts must be sorted by address"
-            );
-            debug_assert!(
-                storage.windows(2).all(|w| w[0].address <= w[1].address),
-                "storage must be sorted by address"
-            );
-        }
-
-        for (address, info) in accounts {
-            let account = info.as_ref().map(Account::from).unwrap_or_default();
-
-            // bytecode_hash is None when code_hash == KECCAK256_EMPTY,
-            // which doesn't need to be stored.
-            if let Some((bytecode, code_hash)) =
-                info.as_ref().and_then(|info| info.code.clone()).zip(account.bytecode_hash)
-            {
-                self.put_bytecode(&code_hash, &bytecode)?;
-            }
-
-            self.append_account_prestate(block_number, *address, &account)?;
-        }
-
-        for entry in storage {
-            if entry.wiped {
-                self.write_wipe(block_number, &entry.address)?;
-                continue;
-            }
-            // Use write (put) instead of append because storage_revert slots
-            // are not guaranteed to be sorted.
-            for (key, old_value) in entry.storage_revert.iter() {
-                self.write_storage_prestate(
-                    block_number,
-                    entry.address,
-                    key,
-                    &old_value.to_previous_value(),
-                )?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Write multiple blocks' plain state revert information.
-    ///
-    /// Sorts accounts and storage in parallel before writing to enable
-    /// efficient append operations.
-    fn write_plain_reverts(
-        &self,
-        first_block_number: u64,
-        PlainStateReverts { accounts, storage }: &PlainStateReverts,
-    ) -> Result<(), Self::Error> {
-        use rayon::prelude::*;
-
-        // Sort accounts and storage in parallel using rayon::join
-        let (sorted_accounts, sorted_storage) = rayon::join(
-            || {
-                accounts
-                    .par_iter()
-                    .map(|block_accounts| {
-                        let mut sorted: Vec<_> = block_accounts.iter().collect();
-                        sorted.sort_by_key(|(addr, _)| *addr);
-                        sorted
-                    })
-                    .collect::<Vec<_>>()
-            },
-            || {
-                storage
-                    .par_iter()
-                    .map(|block_storage| {
-                        let mut sorted: Vec<_> = block_storage.iter().collect();
-                        sorted.sort_by_key(|entry| entry.address);
-                        sorted
-                    })
-                    .collect::<Vec<_>>()
-            },
-        );
-
-        // Write sequentially (DB writes must be ordered)
-        sorted_accounts.iter().zip(sorted_storage.iter()).enumerate().try_for_each(
-            |(idx, (acc, sto))| {
-                self.write_plain_revert_sorted(first_block_number + idx as u64, acc, sto)
-            },
-        )
-    }
-
-    /// Write changed accounts from a [`StateChangeset`].
-    fn write_changed_account(
-        &self,
-        address: &Address,
-        account: &Option<AccountInfo>,
-    ) -> Result<(), Self::Error> {
-        let Some(info) = account.as_ref() else {
-            // Account removal
-            return self.queue_delete::<tables::PlainAccountState>(address);
-        };
-
-        let account = Account::from(info.clone());
-        // bytecode_hash is None when code_hash == KECCAK256_EMPTY,
-        // which doesn't need to be stored.
-        if let Some((bytecode, code_hash)) = info.code.clone().zip(account.bytecode_hash) {
-            self.put_bytecode(&code_hash, &bytecode)?;
-        }
-        self.put_account(address, &account)
-    }
-
-    /// Write changed storage from a [`StateChangeset`].
-    fn write_changed_storage(
-        &self,
-        PlainStorageChangeset { address, wipe_storage, storage }: &PlainStorageChangeset,
-    ) -> Result<(), Self::Error> {
-        if *wipe_storage {
-            return self.clear_k1_for::<tables::PlainStorageState>(address);
-        }
-
-        storage.iter().try_for_each(|(key, value)| self.put_storage(address, key, value))
-    }
-
-    /// Write changed contract bytecode from a [`StateChangeset`].
-    fn write_changed_contracts(
-        &self,
-        code_hash: &B256,
-        bytecode: &Bytecode,
-    ) -> Result<(), Self::Error> {
-        self.put_bytecode(code_hash, bytecode)
-    }
-
-    /// Write a state changeset for a specific block.
-    fn write_state_changes(
-        &self,
-        StateChangeset { accounts, storage, contracts }: &StateChangeset,
-    ) -> Result<(), Self::Error> {
-        contracts.iter().try_for_each(|(code_hash, bytecode)| {
-            self.write_changed_contracts(code_hash, bytecode)
-        })?;
-        accounts
-            .iter()
-            .try_for_each(|(address, account)| self.write_changed_account(address, account))?;
-        storage
-            .iter()
-            .try_for_each(|storage_changeset| self.write_changed_storage(storage_changeset))?;
-        Ok(())
-    }
-
-    /// Get all changed accounts with the list of block numbers in the given
-    /// range.
-    ///
-    /// Iterates over entries starting from the first block in the range,
-    /// collecting changes while the block number remains in range.
-    // TODO: estimate capacity from block range size for better allocation
-    fn changed_accounts_with_range(
-        &self,
-        range: RangeInclusive<BlockNumber>,
-    ) -> Result<AHashMap<Address, Vec<u64>>, Self::Error> {
-        self.traverse_dual::<tables::AccountChangeSets>()?
-            .iter_from(range.start(), &Address::ZERO)?
-            .process_results(|iter| {
-                iter.take_while(|(num, _, _)| range.contains(num))
-                    .map(|(num, addr, _)| (addr, num))
-                    .into_group_map_by(|(addr, _)| *addr)
-                    .into_iter()
-                    .map(|(addr, pairs)| (addr, pairs.into_iter().map(|(_, num)| num).collect()))
-                    .collect()
-            })
     }
 
     /// Append account history indices for multiple accounts.
@@ -408,29 +152,6 @@ pub trait LegacyUnsafeHistoryWrite: UnsafeDbWrite + LegacyHistoryRead {
             )?;
         }
         Ok(())
-    }
-
-    /// Get all changed storages with the list of block numbers in the given
-    /// range.
-    ///
-    /// Iterates over entries starting from the first block in the range,
-    /// collecting changes while the block number remains in range.
-    // TODO: estimate capacity from block range size for better allocation
-    #[allow(clippy::type_complexity)]
-    fn changed_storages_with_range(
-        &self,
-        range: RangeInclusive<BlockNumber>,
-    ) -> Result<AHashMap<(Address, U256), Vec<u64>>, Self::Error> {
-        self.traverse_dual::<tables::StorageChangeSets>()?
-            .iter_from(&(*range.start(), Address::ZERO), &U256::ZERO)?
-            .process_results(|iter| {
-                iter.take_while(|(num_addr, _, _)| range.contains(&num_addr.0))
-                    .map(|(num_addr, slot, _)| ((num_addr.1, slot), num_addr.0))
-                    .into_group_map_by(|(key, _)| *key)
-                    .into_iter()
-                    .map(|(key, pairs)| (key, pairs.into_iter().map(|(_, num)| num).collect()))
-                    .collect()
-            })
     }
 
     /// Append storage history indices for multiple (address, slot) pairs.
@@ -457,60 +178,36 @@ pub trait LegacyUnsafeHistoryWrite: UnsafeDbWrite + LegacyHistoryRead {
         range: RangeInclusive<BlockNumber>,
     ) -> Result<(), HistoryError<Self::Error>> {
         // account history stage
-        {
-            let indices = self.changed_accounts_with_range(range.clone())?;
-            self.append_account_history_index(indices)?;
-        }
+        // TODO: estimate capacity from block range size for better allocation
+        let account_indices: AHashMap<Address, Vec<u64>> = self
+            .traverse_dual::<tables::AccountChangeSets>()?
+            .iter_from(range.start(), &Address::ZERO)?
+            .process_results(|iter| {
+                iter.take_while(|(num, _, _)| range.contains(num))
+                    .map(|(num, addr, _)| (addr, num))
+                    .into_group_map_by(|(addr, _)| *addr)
+                    .into_iter()
+                    .map(|(addr, pairs)| (addr, pairs.into_iter().map(|(_, num)| num).collect()))
+                    .collect()
+            })?;
+        self.append_account_history_index(account_indices)?;
 
         // storage history stage
-        {
-            let indices = self.changed_storages_with_range(range)?;
-            self.append_storage_history_index(indices)?;
-        }
+        // TODO: estimate capacity from block range size for better allocation
+        let storage_indices: AHashMap<(Address, U256), Vec<u64>> = self
+            .traverse_dual::<tables::StorageChangeSets>()?
+            .iter_from(&(*range.start(), Address::ZERO), &U256::ZERO)?
+            .process_results(|iter| {
+                iter.take_while(|(num_addr, _, _)| range.contains(&num_addr.0))
+                    .map(|(num_addr, slot, _)| ((num_addr.1, slot), num_addr.0))
+                    .into_group_map_by(|(key, _)| *key)
+                    .into_iter()
+                    .map(|(key, pairs)| (key, pairs.into_iter().map(|(_, num)| num).collect()))
+                    .collect()
+            })?;
+        self.append_storage_history_index(storage_indices)?;
 
         Ok(())
-    }
-
-    /// Append a block's header and state changes in an inconsistent manner.
-    ///
-    /// This may leave the database in an inconsistent state. Users should
-    /// prefer higher-level abstractions when possible.
-    ///
-    /// 1. It MUST be checked that the header is the child of the current chain
-    ///    tip before calling this method.
-    /// 2. After calling this method, the caller MUST call
-    ///    `update_history_indices`.
-    fn append_block_inconsistent(
-        &self,
-        header: &SealedHeader,
-        state_changes: &BundleState,
-    ) -> Result<(), Self::Error> {
-        self.append_header(header)?;
-        self.put_header_number_inconsistent(&header.hash(), header.number)?;
-
-        let (state_changes, reverts) =
-            state_changes.to_plain_state_and_reverts(OriginalValuesKnown::No);
-
-        self.write_state_changes(&state_changes)?;
-        self.write_plain_reverts(header.number, &reverts)
-    }
-
-    /// Append multiple blocks' headers and state changes in an inconsistent
-    /// manner.
-    ///
-    /// This may leave the database in an inconsistent state. Users should
-    /// prefer higher-level abstractions when possible.
-    /// 1. It MUST be checked that the first header is the child of the current
-    ///    chain tip before calling this method.
-    /// 2. After calling this method, the caller MUST call
-    ///    `update_history_indices`.
-    fn append_blocks_inconsistent<'a>(
-        &self,
-        blocks: impl IntoIterator<Item = (&'a SealedHeader, &'a BundleState)>,
-    ) -> Result<(), Self::Error> {
-        blocks
-            .into_iter()
-            .try_for_each(|(header, state)| self.append_block_inconsistent(header, state))
     }
 }
 

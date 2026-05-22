@@ -1,7 +1,7 @@
 //! Clear/take range operations for single and dual-keyed tables.
 
 use crate::{
-    db::{HotDbRead, LegacyHistoryRead, LegacyUnsafeHistoryWrite, UnsafeDbWrite},
+    db::{HistoryWrite, HotDbRead, LegacyHistoryRead, LegacyUnsafeHistoryWrite, UnsafeDbWrite},
     model::{HotKv, HotKvWrite},
     tables,
 };
@@ -417,7 +417,10 @@ pub fn test_take_range_dual<T: HotKv>(hot_kv: &T) {
 /// 1. Multiple storage slots can be written for an address
 /// 2. `write_changed_storage` with `wipe_storage: true` clears all slots
 /// 3. After wipe, all slots return None
-pub fn test_write_changed_storage_wipe<T: HotKv>(hot_kv: &T) {
+pub fn test_write_changed_storage_wipe<T: HotKv>(hot_kv: &T)
+where
+    T::RwTx: HistoryWrite,
+{
     let addr = address!("0x1111111111111111111111111111111111111111");
 
     // Setup: write multiple storage slots for an address

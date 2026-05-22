@@ -1,7 +1,7 @@
 //! History and change set tests for hot storage.
 
 use crate::{
-    db::{LegacyHistoryRead, LegacyUnsafeHistoryWrite, UnsafeDbWrite},
+    db::{HistoryWrite, LegacyHistoryRead, LegacyUnsafeHistoryWrite, UnsafeDbWrite},
     model::{HotKv, HotKvWrite},
     tables,
 };
@@ -14,7 +14,10 @@ use signet_storage_types::{Account, BlockNumberList, ShardedKey};
 /// 1. Account change sets are correctly indexed into account history
 /// 2. Appending to existing history works correctly
 /// 3. Old shards are deleted when appending
-pub fn test_update_history_indices_account<T: HotKv>(hot_kv: &T) {
+pub fn test_update_history_indices_account<T: HotKv>(hot_kv: &T)
+where
+    T::RwTx: HistoryWrite,
+{
     let addr1 = address!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let addr2 = address!("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 
@@ -109,7 +112,10 @@ pub fn test_update_history_indices_account<T: HotKv>(hot_kv: &T) {
 /// 2. Appending to existing history works correctly
 /// 3. Old shards are deleted when appending
 /// 4. Different slots for the same address are tracked separately
-pub fn test_update_history_indices_storage<T: HotKv>(hot_kv: &T) {
+pub fn test_update_history_indices_storage<T: HotKv>(hot_kv: &T)
+where
+    T::RwTx: HistoryWrite,
+{
     let addr1 = address!("0xcccccccccccccccccccccccccccccccccccccccc");
     let slot1 = U256::from(1);
     let slot2 = U256::from(2);
@@ -205,7 +211,10 @@ pub fn test_update_history_indices_storage<T: HotKv>(hot_kv: &T) {
 ///
 /// This test specifically verifies that when we append new indices to an existing
 /// shard, the old shard is properly deleted so we don't end up with duplicate data.
-pub fn test_history_append_removes_old_entries<T: HotKv>(hot_kv: &T) {
+pub fn test_history_append_removes_old_entries<T: HotKv>(hot_kv: &T)
+where
+    T::RwTx: HistoryWrite,
+{
     let addr = address!("0xdddddddddddddddddddddddddddddddddddddddd");
 
     // Phase 1: Manually write account history
