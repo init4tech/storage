@@ -27,9 +27,9 @@ pub type BundleInit =
 ///
 /// This trait is low-level, and usage may leave the database in an
 /// inconsistent state if not used carefully. Users should prefer
-/// [`HotHistoryWrite`] or higher-level abstractions when possible.
+/// [`HistoryWrite`] or higher-level abstractions when possible.
 ///
-/// [`HotHistoryWrite`]: crate::db::LegacyConsistentHistoryWrite
+/// [`HistoryWrite`]: crate::db::HistoryWrite
 pub trait UnsafeDbWrite: HotKvWrite + super::sealed::Sealed {
     /// Write a block header. This will leave the DB in an inconsistent state
     /// until the corresponding header number is also written. Users should

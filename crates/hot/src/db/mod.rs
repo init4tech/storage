@@ -1,8 +1,5 @@
 //! Primary access traits for hot storage backends.
 
-mod consistent;
-pub use consistent::LegacyConsistentHistoryWrite;
-
 mod errors;
 pub use errors::{HistoryError, HistoryResult};
 

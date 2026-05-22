@@ -8,7 +8,7 @@ use crate::StorageResult;
 use alloy::primitives::BlockNumber;
 use signet_cold::{BlockData, ColdReceipt, ColdStorage, ColdStorageBackend, ColdStorageError};
 use signet_hot::{
-    HotKv, LegacyConsistentHistoryWrite, LegacyHistoryRead,
+    HistoryWrite, HotKv, LegacyHistoryRead,
     model::{HotKvReadError, HotKvWrite, RevmRead},
 };
 use signet_storage_types::{ExecutedBlock, SealedHeader};
@@ -116,7 +116,10 @@ impl<H: HotKv> UnifiedStorage<H, signet_cold::ErasedBackend> {
     }
 }
 
-impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B> {
+impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B>
+where
+    H::RwTx: HistoryWrite,
+{
     /// Get a reference to the hot storage backend.
     pub const fn hot(&self) -> &H {
         &self.hot
