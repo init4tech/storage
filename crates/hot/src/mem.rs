@@ -4,14 +4,18 @@
 //! testing.
 
 use crate::{
+    db::HistoryError,
     model::{
         DualKeyItem, DualKeyTraverse, DualKeyTraverseMut, HotKv, HotKvError, HotKvRead,
         HotKvReadError, HotKvWrite, KvTraverse, KvTraverseMut, RawDualKeyItem, RawDualKeyValue,
         RawKeyValue, RawValue,
     },
     ser::{DeserError, MAX_KEY_SIZE},
+    tables,
 };
+use alloy::primitives::{Address, U256};
 use bytes::Bytes;
+use signet_storage_types::{BlockNumberList, ShardedKey};
 use std::{
     borrow::Cow,
     collections::BTreeMap,
@@ -1439,6 +1443,83 @@ impl HotKvWrite for MemKvRwTx {
     }
 }
 
+impl crate::db::history::HistoryWrite for MemKvRwTx {
+    fn append_account_history(
+        &self,
+        addr: &Address,
+        new_blocks: &BlockNumberList,
+    ) -> Result<(), HistoryError<Self::Error>> {
+        // Load the existing tail (if any), append new blocks, write back at
+        // u64::MAX. MemKv has no size budget, so there's always one shard.
+        let mut merged = self
+            .get_dual::<tables::AccountsHistory>(addr, &u64::MAX)
+            .map_err(HistoryError::Db)?
+            .unwrap_or_default();
+        merged.append(new_blocks.iter()).map_err(HistoryError::IntList)?;
+        self.queue_put_dual::<tables::AccountsHistory>(addr, &u64::MAX, &merged)
+            .map_err(HistoryError::Db)
+    }
+
+    fn append_storage_history(
+        &self,
+        addr: &Address,
+        slot: &U256,
+        new_blocks: &BlockNumberList,
+    ) -> Result<(), HistoryError<Self::Error>> {
+        let tail_key = ShardedKey::new(*slot, u64::MAX);
+        let mut merged = self
+            .get_dual::<tables::StorageHistory>(addr, &tail_key)
+            .map_err(HistoryError::Db)?
+            .unwrap_or_default();
+        merged.append(new_blocks.iter()).map_err(HistoryError::IntList)?;
+        self.queue_put_dual::<tables::StorageHistory>(addr, &tail_key, &merged)
+            .map_err(HistoryError::Db)
+    }
+
+    fn truncate_account_history_above(
+        &self,
+        addr: &Address,
+        above: u64,
+    ) -> Result<(), HistoryError<Self::Error>> {
+        // Single shard at u64::MAX. Load, filter, write back or delete.
+        let Some(existing) =
+            self.get_dual::<tables::AccountsHistory>(addr, &u64::MAX).map_err(HistoryError::Db)?
+        else {
+            return Ok(());
+        };
+        let kept = BlockNumberList::new_pre_sorted(existing.iter().take_while(|&b| b <= above));
+        self.queue_delete_dual::<tables::AccountsHistory>(addr, &u64::MAX)
+            .map_err(HistoryError::Db)?;
+        if !kept.is_empty() {
+            self.queue_put_dual::<tables::AccountsHistory>(addr, &u64::MAX, &kept)
+                .map_err(HistoryError::Db)?;
+        }
+        Ok(())
+    }
+
+    fn truncate_storage_history_above(
+        &self,
+        addr: &Address,
+        slot: &U256,
+        above: u64,
+    ) -> Result<(), HistoryError<Self::Error>> {
+        let tail_key = ShardedKey::new(*slot, u64::MAX);
+        let Some(existing) =
+            self.get_dual::<tables::StorageHistory>(addr, &tail_key).map_err(HistoryError::Db)?
+        else {
+            return Ok(());
+        };
+        let kept = BlockNumberList::new_pre_sorted(existing.iter().take_while(|&b| b <= above));
+        self.queue_delete_dual::<tables::StorageHistory>(addr, &tail_key)
+            .map_err(HistoryError::Db)?;
+        if !kept.is_empty() {
+            self.queue_put_dual::<tables::StorageHistory>(addr, &tail_key, &kept)
+                .map_err(HistoryError::Db)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2546,5 +2627,34 @@ mod tests {
             assert!(reader.get_dual::<DualTestTable>(&1u64, &10u32).unwrap().is_some());
             assert!(reader.get_dual::<DualTestTable>(&3u64, &1000u32).unwrap().is_some());
         }
+    }
+
+    #[test]
+    fn memkv_history_write_round_trips() {
+        use crate::db::{HistoryRead, HistoryWrite};
+
+        let mem = MemKv::default();
+        let addr = Address::from_slice(&[0x1; 20]);
+        let slot = U256::from(42u64);
+
+        let writer = mem.writer().unwrap();
+        writer
+            .append_account_history(&addr, &BlockNumberList::new([5u64, 10, 15]).unwrap())
+            .unwrap();
+        writer
+            .append_storage_history(&addr, &slot, &BlockNumberList::new([7u64, 11]).unwrap())
+            .unwrap();
+        writer.raw_commit().unwrap();
+
+        let reader = mem.reader().unwrap();
+        let acct_blocks = reader.blocks_changed_account(&addr).unwrap().unwrap();
+        assert_eq!(acct_blocks.iter().collect::<Vec<_>>(), vec![5, 10, 15]);
+
+        let stor_blocks = reader.blocks_changed_storage(&addr, &slot).unwrap().unwrap();
+        assert_eq!(stor_blocks.iter().collect::<Vec<_>>(), vec![7, 11]);
+
+        // block_account_changed_after
+        assert_eq!(reader.block_account_changed_after(&addr, 6).unwrap(), Some(10));
+        assert_eq!(reader.block_account_changed_after(&addr, 15).unwrap(), None);
     }
 }
