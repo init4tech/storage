@@ -330,4 +330,54 @@ mod tests {
         let second_min = second.min().unwrap();
         assert!(first_max < second_min, "first.max={first_max} second.min={second_min}",);
     }
+
+    /// Dense-pack worst case: many contiguous blocks in a single 16-bit
+    /// container should encode efficiently (run-length or array). Even at
+    /// hundreds of contiguous blocks, we stay comfortably under 1500 B.
+    #[test]
+    fn worst_case_dense_pack_fits_in_dupsort_budget() {
+        let list = IntegerList::new(0u64..650).unwrap();
+        let size = list.serialized_size();
+        assert!(size <= 1500, "dense pack of 650 blocks encoded as {size} B, expected <= 1500");
+    }
+
+    /// Sparse worst case: 100 blocks each in a distinct 16-bit container.
+    /// Each container is array-encoded with a single element plus header.
+    /// This is the realistic worst case for a long-lived hot address touched
+    /// once per ~64k-block window.
+    #[test]
+    fn worst_case_sparse_distinct_containers_fits_in_dupsort_budget() {
+        let blocks: Vec<u64> = (0..100u64).map(|i| i * 0x1_0000).collect();
+        let list = IntegerList::new(blocks).unwrap();
+        let size = list.serialized_size();
+        assert!(size <= 1500, "100 sparse blocks encoded as {size} B, expected <= 1500");
+    }
+
+    /// merge_and_split with the realistic budget produces shards each within
+    /// the budget, even for the worst-case sparse input.
+    #[test]
+    fn merge_and_split_at_realistic_budget_respects_per_shard_size() {
+        // Build 200 sparse blocks (200 distinct containers). Splitter should
+        // split this into ~2 shards each under 1500 B.
+        let blocks: Vec<u64> = (0..200u64).map(|i| i * 0x1_0000).collect();
+        let half = blocks.len() / 2;
+        let existing = IntegerList::new(blocks[..half].iter().copied()).unwrap();
+        let additions = IntegerList::new(blocks[half..].iter().copied()).unwrap();
+
+        assert!(existing.serialized_size() <= 1500);
+        assert!(additions.serialized_size() <= 1500);
+
+        let (first, second) = merge_and_split(existing, additions, 1500);
+        assert!(first.serialized_size() <= 1500);
+        if let Some(second) = &second {
+            assert!(second.serialized_size() <= 1500);
+        }
+
+        // Round-trip: union of (first, second) equals the original input.
+        let mut roundtrip: Vec<u64> = first.iter().collect();
+        if let Some(s) = second {
+            roundtrip.extend(s.iter());
+        }
+        assert_eq!(roundtrip, blocks);
+    }
 }
