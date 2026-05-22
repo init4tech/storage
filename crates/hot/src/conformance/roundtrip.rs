@@ -156,10 +156,7 @@ pub fn test_bytecode_roundtrip<T: HotKv>(hot_kv: &T) {
 }
 
 /// Test account history via HistoryWrite/HistoryRead
-pub fn test_account_history<T: HotKv>(hot_kv: &T)
-where
-    T::RwTx: HistoryWrite,
-{
+pub fn test_account_history<T: HotKv>(hot_kv: &T) {
     let addr = address!("0x1111111111111111111111111111111111111111");
     let touched_blocks = BlockNumberList::new([10, 20, 30]).unwrap();
 
@@ -181,10 +178,7 @@ where
 }
 
 /// Test storage history via HistoryWrite/HistoryRead
-pub fn test_storage_history<T: HotKv>(hot_kv: &T)
-where
-    T::RwTx: HistoryWrite,
-{
+pub fn test_storage_history<T: HotKv>(hot_kv: &T) {
     let addr = address!("0x2222222222222222222222222222222222222222");
     let slot = U256::from(42);
     let touched_blocks = BlockNumberList::new([5, 15, 25]).unwrap();
@@ -207,10 +201,7 @@ where
 }
 
 /// Test account change sets via HotHistoryWrite/HotHistoryRead
-pub fn test_account_changes<T: HotKv>(hot_kv: &T)
-where
-    T::RwTx: HistoryWrite,
-{
+pub fn test_account_changes<T: HotKv>(hot_kv: &T) {
     let addr = address!("0x3333333333333333333333333333333333333333");
     let pre_state = Account { nonce: 10, balance: U256::from(5000), bytecode_hash: None };
     let block_number = 100u64;
@@ -236,10 +227,7 @@ where
 }
 
 /// Test storage change sets via HotHistoryWrite/HotHistoryRead
-pub fn test_storage_changes<T: HotKv>(hot_kv: &T)
-where
-    T::RwTx: HistoryWrite,
-{
+pub fn test_storage_changes<T: HotKv>(hot_kv: &T) {
     let addr = address!("0x4444444444444444444444444444444444444444");
     let slot = U256::from(153);
     let pre_value = U256::from(12345);

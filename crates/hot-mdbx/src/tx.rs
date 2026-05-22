@@ -405,7 +405,6 @@ macro_rules! impl_history_write {
                 new_blocks: &signet_storage_types::BlockNumberList,
             ) -> Result<(), signet_hot::db::HistoryError<Self::Error>> {
                 use signet_hot::{db::HistoryError, model::HotKvWrite, tables};
-                use signet_storage_types::merge_and_split;
 
                 let existing_tail = self
                     .get_dual::<tables::AccountsHistory>(addr, &u64::MAX)
@@ -418,7 +417,7 @@ macro_rules! impl_history_write {
                 }
 
                 let (first, second) =
-                    merge_and_split(existing_tail, new_blocks.clone(), MAX_SHARD_BYTES);
+                    existing_tail.merge_and_split(new_blocks.iter(), MAX_SHARD_BYTES);
 
                 match second {
                     None => self
@@ -441,7 +440,7 @@ macro_rules! impl_history_write {
                 new_blocks: &signet_storage_types::BlockNumberList,
             ) -> Result<(), signet_hot::db::HistoryError<Self::Error>> {
                 use signet_hot::{db::HistoryError, model::HotKvWrite, tables};
-                use signet_storage_types::{ShardedKey, merge_and_split};
+                use signet_storage_types::ShardedKey;
 
                 let tail_key = ShardedKey::new(*slot, u64::MAX);
                 let existing_tail = self
@@ -455,7 +454,7 @@ macro_rules! impl_history_write {
                 }
 
                 let (first, second) =
-                    merge_and_split(existing_tail, new_blocks.clone(), MAX_SHARD_BYTES);
+                    existing_tail.merge_and_split(new_blocks.iter(), MAX_SHARD_BYTES);
 
                 match second {
                     None => self

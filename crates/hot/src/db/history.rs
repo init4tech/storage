@@ -1,11 +1,10 @@
 //! Logical history reads and writes.
 //!
-//! These traits replace the shard-leaking surface in `db::read` and
-//! `db::inconsistent`. [`HistoryRead`] is blanket-impled on [`HotKvRead`] and
-//! cannot be overridden — the KV-table layout is mandated by the abstraction.
-//! [`HistoryWrite`] is required per-backend; each backend chooses its
-//! splitting policy (MDBX uses [`signet_storage_types::merge_and_split`];
-//! MemKv writes a single dup entry per addr).
+//! [`HistoryRead`] is blanket-impled on [`HotKvRead`] and describes
+//! logical history queries. [`HistoryWrite`] is required per-backend; each
+//! backend chooses its splitting policy (MDBX uses
+//! [`signet_storage_types::IntegerList::merge_and_split`] — see below; MemKv
+//! writes a single dup entry per addr).
 
 use crate::{
     db::{HistoryError, HotDbRead, UnsafeDbWrite},
@@ -33,11 +32,6 @@ use trevm::revm::{
 const ADDRESS_MAX: Address = address!("0xffffffffffffffffffffffffffffffffffffffff");
 
 /// Logical reads against history + changeset tables.
-///
-/// Default-impl-only. Backends cannot override — the blanket impl below
-/// occupies the slot, and orphan rules prevent downstream impls. This is
-/// structural enforcement of "the KV-table access pattern is mandated by
-/// the abstraction".
 pub trait HistoryRead: HotDbRead {
     /// All block numbers where `addr` was touched. `None` if no history.
     fn blocks_changed_account(
@@ -287,11 +281,7 @@ pub trait HistoryRead: HotDbRead {
 
 impl<T> HistoryRead for T where T: HotKvRead {}
 
-/// Logical writes against history + changeset tables. Required per backend.
-///
-/// Backends that implement this trait choose their own shard-splitting policy.
-/// The default `update_history_indices` bulk operation is expressed in terms of
-/// the four required primitives and works for any backend.
+/// Logical writes against history + changeset tables.
 pub trait HistoryWrite: UnsafeDbWrite + HistoryRead {
     /// Merge `new_blocks` into `addr`'s account history.
     ///

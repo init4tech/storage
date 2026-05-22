@@ -228,10 +228,7 @@ pub fn make_account_info(nonce: u64, balance: U256, code_hash: Option<B256>) -> 
 /// - Headers and header number mappings
 /// - Account and storage change sets
 /// - Account and storage history indices
-pub fn test_unwind_conformance<Kv: HotKv>(store_a: &Kv, store_b: &Kv)
-where
-    Kv::RwTx: HistoryWrite,
-{
+pub fn test_unwind_conformance<Kv: HotKv>(store_a: &Kv, store_b: &Kv) {
     // Test addresses
     let addr1 = address!("0x1111111111111111111111111111111111111111");
     let addr2 = address!("0x2222222222222222222222222222222222222222");

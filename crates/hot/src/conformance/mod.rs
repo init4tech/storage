@@ -12,17 +12,14 @@ pub use range::*;
 pub use roundtrip::*;
 pub use unwind::*;
 
-use crate::{db::HistoryWrite, model::HotKv};
+use crate::model::HotKv;
 
 /// Run all conformance tests against a [`HotKv`] implementation.
 ///
 /// Tests share the provided store instance. Additional test functions
 /// (cursor, edge-case, history, range) are exported for use in isolation
 /// with a fresh store.
-pub fn conformance<T: HotKv>(hot_kv: &T)
-where
-    T::RwTx: HistoryWrite,
-{
+pub fn conformance<T: HotKv>(hot_kv: &T) {
     test_header_roundtrip(hot_kv);
     test_account_roundtrip(hot_kv);
     test_storage_roundtrip(hot_kv);

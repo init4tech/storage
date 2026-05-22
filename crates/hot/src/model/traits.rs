@@ -30,7 +30,7 @@ pub trait HotKv {
     type RoTx: HotKvRead;
 
     /// The read-write transaction type.
-    type RwTx: HotKvWrite;
+    type RwTx: HotKvWrite + crate::db::HistoryWrite;
 
     /// Create a read-only transaction.
     fn reader(&self) -> Result<Self::RoTx, HotKvError>;

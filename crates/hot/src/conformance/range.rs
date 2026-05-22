@@ -235,10 +235,7 @@ pub fn test_take_range<T: HotKv>(hot_kv: &T) {
 /// 1. All k2 entries for k1 values within the range are deleted
 /// 2. k1 values outside the range remain intact
 /// 3. Edge cases work correctly
-pub fn test_clear_range_dual<T: HotKv>(hot_kv: &T)
-where
-    T::RwTx: HistoryWrite,
-{
+pub fn test_clear_range_dual<T: HotKv>(hot_kv: &T) {
     let addr1 = address!("0x1000000000000000000000000000000000000001");
     let addr2 = address!("0x2000000000000000000000000000000000000002");
     let addr3 = address!("0x3000000000000000000000000000000000000003");
@@ -326,10 +323,7 @@ where
 /// Test take_range_dual on a dual-keyed table.
 ///
 /// Similar to clear_range_dual but also returns the removed (k1, k2) pairs.
-pub fn test_take_range_dual<T: HotKv>(hot_kv: &T)
-where
-    T::RwTx: HistoryWrite,
-{
+pub fn test_take_range_dual<T: HotKv>(hot_kv: &T) {
     let addr1 = address!("0xa000000000000000000000000000000000000001");
     let addr2 = address!("0xb000000000000000000000000000000000000002");
     let addr3 = address!("0xc000000000000000000000000000000000000003");
@@ -417,10 +411,7 @@ where
 /// 1. Multiple storage slots can be written for an address
 /// 2. `write_changed_storage` with `wipe_storage: true` clears all slots
 /// 3. After wipe, all slots return None
-pub fn test_write_changed_storage_wipe<T: HotKv>(hot_kv: &T)
-where
-    T::RwTx: HistoryWrite,
-{
+pub fn test_write_changed_storage_wipe<T: HotKv>(hot_kv: &T) {
     let addr = address!("0x1111111111111111111111111111111111111111");
 
     // Setup: write multiple storage slots for an address

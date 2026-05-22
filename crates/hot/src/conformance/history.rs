@@ -12,10 +12,7 @@ use signet_storage_types::{Account, BlockNumberList};
 /// This test verifies that:
 /// 1. Account change sets are correctly indexed into account history
 /// 2. Appending to existing history works correctly
-pub fn test_update_history_indices_account<T: HotKv>(hot_kv: &T)
-where
-    T::RwTx: HistoryWrite,
-{
+pub fn test_update_history_indices_account<T: HotKv>(hot_kv: &T) {
     let addr1 = address!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     let addr2 = address!("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 
@@ -109,10 +106,7 @@ where
 /// 1. Storage change sets are correctly indexed into storage history
 /// 2. Appending to existing history works correctly
 /// 3. Different slots for the same address are tracked separately
-pub fn test_update_history_indices_storage<T: HotKv>(hot_kv: &T)
-where
-    T::RwTx: HistoryWrite,
-{
+pub fn test_update_history_indices_storage<T: HotKv>(hot_kv: &T) {
     let addr1 = address!("0xcccccccccccccccccccccccccccccccccccccccc");
     let slot1 = U256::from(1);
     let slot2 = U256::from(2);
@@ -216,10 +210,7 @@ where
 /// This test verifies that after appending an initial list and then a new
 /// block via `update_history_indices`, `blocks_changed_account` returns the
 /// expected union of all blocks.
-pub fn test_history_append_removes_old_entries<T: HotKv>(hot_kv: &T)
-where
-    T::RwTx: HistoryWrite,
-{
+pub fn test_history_append_removes_old_entries<T: HotKv>(hot_kv: &T) {
     let addr = address!("0xdddddddddddddddddddddddddddddddddddddddd");
 
     // Phase 1: Append account history for blocks 10, 20, 30
@@ -269,10 +260,7 @@ where
 /// 1. Appending two disjoint sets of blocks for the same address works
 /// 2. `truncate_account_history_above` removes blocks above the cutoff
 /// 3. Other addresses are not affected
-pub fn test_delete_dual_account_history<T: HotKv>(hot_kv: &T)
-where
-    T::RwTx: HistoryWrite,
-{
+pub fn test_delete_dual_account_history<T: HotKv>(hot_kv: &T) {
     let addr1 = address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
     let addr2 = address!("0xffffffffffffffffffffffffffffffffffffffff");
 
@@ -335,10 +323,7 @@ where
 /// 1. Appending storage history for two slots works correctly
 /// 2. `truncate_storage_history_above(addr, slot1, 0)` removes all blocks for slot1
 /// 3. Other slots for the same address are not affected
-pub fn test_delete_dual_storage_history<T: HotKv>(hot_kv: &T)
-where
-    T::RwTx: HistoryWrite,
-{
+pub fn test_delete_dual_storage_history<T: HotKv>(hot_kv: &T) {
     let addr = address!("0x1111111111111111111111111111111111111111");
     let slot1 = U256::from(100);
     let slot2 = U256::from(200);
@@ -400,10 +385,7 @@ where
 ///
 /// This test verifies that after truncating all history for an address, we
 /// can append new blocks and read them back correctly.
-pub fn test_delete_and_rewrite_dual<T: HotKv>(hot_kv: &T)
-where
-    T::RwTx: HistoryWrite,
-{
+pub fn test_delete_and_rewrite_dual<T: HotKv>(hot_kv: &T) {
     let addr = address!("0x2222222222222222222222222222222222222222");
 
     // Phase 1: Append initial history [1, 2, 3]

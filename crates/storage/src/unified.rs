@@ -176,28 +176,7 @@ impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B> {
         let cold_data: Vec<_> = blocks.into_iter().map(BlockData::from).collect();
         self.cold.append_blocks(cold_data).await
     }
-}
 
-impl<H: HotKv> UnifiedStorage<H, signet_cold::ErasedBackend> {
-    /// Spawn a unified storage with a type-erased cold backend.
-    ///
-    /// Erases the concrete cold backend behind
-    /// [`signet_cold::ErasedBackend`], so callers can hold a
-    /// `UnifiedStorage<H>` without propagating a backend generic.
-    pub fn spawn_erased<B: ColdStorageBackend>(
-        hot: H,
-        cold_backend: B,
-        cancel_token: CancellationToken,
-    ) -> Self {
-        let cold = ColdStorage::new_erased(cold_backend, cancel_token);
-        Self::new(hot, cold)
-    }
-}
-
-impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B>
-where
-    H::RwTx: HistoryWrite,
-{
     /// Append executed blocks to both hot and cold storage.
     ///
     /// This method:
@@ -335,6 +314,22 @@ where
         writer.unwind_above(block).map_err(|e| e.map_db(|e| e.into_hot_kv_error()))?;
         writer.raw_commit().map_err(|e| e.into_hot_kv_error())?;
         Ok(())
+    }
+}
+
+impl<H: HotKv> UnifiedStorage<H, signet_cold::ErasedBackend> {
+    /// Spawn a unified storage with a type-erased cold backend.
+    ///
+    /// Erases the concrete cold backend behind
+    /// [`signet_cold::ErasedBackend`], so callers can hold a
+    /// `UnifiedStorage<H>` without propagating a backend generic.
+    pub fn spawn_erased<B: ColdStorageBackend>(
+        hot: H,
+        cold_backend: B,
+        cancel_token: CancellationToken,
+    ) -> Self {
+        let cold = ColdStorage::new_erased(cold_backend, cancel_token);
+        Self::new(hot, cold)
     }
 }
 
