@@ -146,6 +146,13 @@ impl IntegerList {
         self.0.max()
     }
 
+    /// Remove and return the largest value, or `None` if the list is empty.
+    pub fn pop_max(&mut self) -> Option<u64> {
+        let m = self.0.max()?;
+        self.0.remove(m);
+        Some(m)
+    }
+
     /// Returns the number of integers that are `<= value`.
     pub fn rank(&self, value: u64) -> u64 {
         self.0.rank(value)
@@ -164,5 +171,33 @@ impl IntegerList {
     /// Serializes the list into the given writer.
     pub fn serialize_into<W: std::io::Write>(&self, writer: W) -> std::io::Result<()> {
         self.0.serialize_into(writer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IntegerList;
+
+    #[test]
+    fn pop_max_returns_and_removes_largest() {
+        let mut list = IntegerList::new([3u64, 7, 9, 12]).unwrap();
+        assert_eq!(list.pop_max(), Some(12));
+        assert_eq!(list.max(), Some(9));
+        assert_eq!(list.len(), 3);
+    }
+
+    #[test]
+    fn pop_max_on_empty_returns_none() {
+        let mut list = IntegerList::empty();
+        assert_eq!(list.pop_max(), None);
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn pop_max_drains_to_empty() {
+        let mut list = IntegerList::new([42u64]).unwrap();
+        assert_eq!(list.pop_max(), Some(42));
+        assert!(list.is_empty());
+        assert_eq!(list.pop_max(), None);
     }
 }
