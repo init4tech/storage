@@ -1,19 +1,17 @@
 //! History and change set tests for hot storage.
 
 use crate::{
-    db::{HistoryWrite, LegacyHistoryRead, LegacyUnsafeHistoryWrite, UnsafeDbWrite},
-    model::{HotKv, HotKvWrite},
-    tables,
+    db::{HistoryRead, HistoryWrite, UnsafeDbWrite},
+    model::HotKv,
 };
 use alloy::primitives::{U256, address};
-use signet_storage_types::{Account, BlockNumberList, ShardedKey};
+use signet_storage_types::{Account, BlockNumberList};
 
-/// Test update_history_indices_inconsistent for account history.
+/// Test update_history_indices for account history.
 ///
 /// This test verifies that:
 /// 1. Account change sets are correctly indexed into account history
 /// 2. Appending to existing history works correctly
-/// 3. Old shards are deleted when appending
 pub fn test_update_history_indices_account<T: HotKv>(hot_kv: &T)
 where
     T::RwTx: HistoryWrite,
@@ -41,10 +39,10 @@ where
         writer.commit().unwrap();
     }
 
-    // Phase 2: Run update_history_indices_inconsistent for blocks 1-3
+    // Phase 2: Run update_history_indices for blocks 1-3
     {
         let writer = hot_kv.writer().unwrap();
-        writer.update_history_indices_inconsistent(1..=3).unwrap();
+        writer.update_history_indices(1..=3).unwrap();
         writer.commit().unwrap();
     }
 
@@ -53,14 +51,14 @@ where
         let reader = hot_kv.reader().unwrap();
 
         // addr1 should have history at blocks 1, 2
-        let (_, history1) =
-            reader.last_account_history(addr1).unwrap().expect("addr1 should have history");
+        let history1 =
+            reader.blocks_changed_account(&addr1).unwrap().expect("addr1 should have history");
         let blocks1: Vec<u64> = history1.iter().collect();
         assert_eq!(blocks1, vec![1, 2], "addr1 history mismatch");
 
         // addr2 should have history at blocks 2, 3
-        let (_, history2) =
-            reader.last_account_history(addr2).unwrap().expect("addr2 should have history");
+        let history2 =
+            reader.blocks_changed_account(&addr2).unwrap().expect("addr2 should have history");
         let blocks2: Vec<u64> = history2.iter().collect();
         assert_eq!(blocks2, vec![2, 3], "addr2 history mismatch");
     }
@@ -80,10 +78,10 @@ where
         writer.commit().unwrap();
     }
 
-    // Phase 5: Run update_history_indices_inconsistent for blocks 4-5
+    // Phase 5: Run update_history_indices for blocks 4-5
     {
         let writer = hot_kv.writer().unwrap();
-        writer.update_history_indices_inconsistent(4..=5).unwrap();
+        writer.update_history_indices(4..=5).unwrap();
         writer.commit().unwrap();
     }
 
@@ -92,26 +90,25 @@ where
         let reader = hot_kv.reader().unwrap();
 
         // addr1 should now have history at blocks 1, 2, 4, 5
-        let (_, history1) =
-            reader.last_account_history(addr1).unwrap().expect("addr1 should have history");
+        let history1 =
+            reader.blocks_changed_account(&addr1).unwrap().expect("addr1 should have history");
         let blocks1: Vec<u64> = history1.iter().collect();
         assert_eq!(blocks1, vec![1, 2, 4, 5], "addr1 history mismatch after append");
 
         // addr2 should still have history at blocks 2, 3 (unchanged)
-        let (_, history2) =
-            reader.last_account_history(addr2).unwrap().expect("addr2 should have history");
+        let history2 =
+            reader.blocks_changed_account(&addr2).unwrap().expect("addr2 should have history");
         let blocks2: Vec<u64> = history2.iter().collect();
         assert_eq!(blocks2, vec![2, 3], "addr2 history should be unchanged");
     }
 }
 
-/// Test update_history_indices_inconsistent for storage history.
+/// Test update_history_indices for storage history.
 ///
 /// This test verifies that:
 /// 1. Storage change sets are correctly indexed into storage history
 /// 2. Appending to existing history works correctly
-/// 3. Old shards are deleted when appending
-/// 4. Different slots for the same address are tracked separately
+/// 3. Different slots for the same address are tracked separately
 pub fn test_update_history_indices_storage<T: HotKv>(hot_kv: &T)
 where
     T::RwTx: HistoryWrite,
@@ -137,10 +134,10 @@ where
         writer.commit().unwrap();
     }
 
-    // Phase 2: Run update_history_indices_inconsistent for blocks 1-3
+    // Phase 2: Run update_history_indices for blocks 1-3
     {
         let writer = hot_kv.writer().unwrap();
-        writer.update_history_indices_inconsistent(1..=3).unwrap();
+        writer.update_history_indices(1..=3).unwrap();
         writer.commit().unwrap();
     }
 
@@ -149,16 +146,16 @@ where
         let reader = hot_kv.reader().unwrap();
 
         // addr1.slot1 should have history at blocks 1, 2
-        let (_, history1) = reader
-            .last_storage_history(&addr1, &slot1)
+        let history1 = reader
+            .blocks_changed_storage(&addr1, &slot1)
             .unwrap()
             .expect("addr1.slot1 should have history");
         let blocks1: Vec<u64> = history1.iter().collect();
         assert_eq!(blocks1, vec![1, 2], "addr1.slot1 history mismatch");
 
         // addr1.slot2 should have history at blocks 2, 3
-        let (_, history2) = reader
-            .last_storage_history(&addr1, &slot2)
+        let history2 = reader
+            .blocks_changed_storage(&addr1, &slot2)
             .unwrap()
             .expect("addr1.slot2 should have history");
         let blocks2: Vec<u64> = history2.iter().collect();
@@ -178,10 +175,10 @@ where
         writer.commit().unwrap();
     }
 
-    // Phase 5: Run update_history_indices_inconsistent for blocks 4-5
+    // Phase 5: Run update_history_indices for blocks 4-5
     {
         let writer = hot_kv.writer().unwrap();
-        writer.update_history_indices_inconsistent(4..=5).unwrap();
+        writer.update_history_indices(4..=5).unwrap();
         writer.commit().unwrap();
     }
 
@@ -190,16 +187,16 @@ where
         let reader = hot_kv.reader().unwrap();
 
         // addr1.slot1 should now have history at blocks 1, 2, 4, 5
-        let (_, history1) = reader
-            .last_storage_history(&addr1, &slot1)
+        let history1 = reader
+            .blocks_changed_storage(&addr1, &slot1)
             .unwrap()
             .expect("addr1.slot1 should have history");
         let blocks1: Vec<u64> = history1.iter().collect();
         assert_eq!(blocks1, vec![1, 2, 4, 5], "addr1.slot1 history mismatch after append");
 
         // addr1.slot2 should still have history at blocks 2, 3 (unchanged)
-        let (_, history2) = reader
-            .last_storage_history(&addr1, &slot2)
+        let history2 = reader
+            .blocks_changed_storage(&addr1, &slot2)
             .unwrap()
             .expect("addr1.slot2 should have history");
         let blocks2: Vec<u64> = history2.iter().collect();
@@ -207,30 +204,29 @@ where
     }
 }
 
-/// Test that appending to history correctly removes old entries at same k1,k2.
+/// Test that appending to history correctly merges blocks.
 ///
-/// This test specifically verifies that when we append new indices to an existing
-/// shard, the old shard is properly deleted so we don't end up with duplicate data.
+/// This test verifies that after appending an initial list and then a new
+/// block via `update_history_indices`, `blocks_changed_account` returns the
+/// expected union of all blocks.
 pub fn test_history_append_removes_old_entries<T: HotKv>(hot_kv: &T)
 where
     T::RwTx: HistoryWrite,
 {
     let addr = address!("0xdddddddddddddddddddddddddddddddddddddddd");
 
-    // Phase 1: Manually write account history
+    // Phase 1: Append account history for blocks 10, 20, 30
     {
         let writer = hot_kv.writer().unwrap();
         let initial_history = BlockNumberList::new([10, 20, 30]).unwrap();
-        writer.write_account_history(&addr, u64::MAX, &initial_history).unwrap();
+        writer.append_account_history(&addr, &initial_history).unwrap();
         writer.commit().unwrap();
     }
 
     // Verify initial state
     {
         let reader = hot_kv.reader().unwrap();
-        let (key, history) =
-            reader.last_account_history(addr).unwrap().expect("should have history");
-        assert_eq!(key, u64::MAX);
+        let history = reader.blocks_changed_account(&addr).unwrap().expect("should have history");
         let blocks: Vec<u64> = history.iter().collect();
         assert_eq!(blocks, vec![10, 20, 30]);
     }
@@ -243,223 +239,208 @@ where
         writer.commit().unwrap();
     }
 
-    // Phase 3: Run update_history_indices_inconsistent
+    // Phase 3: Run update_history_indices
     {
         let writer = hot_kv.writer().unwrap();
-        writer.update_history_indices_inconsistent(40..=40).unwrap();
+        writer.update_history_indices(40..=40).unwrap();
         writer.commit().unwrap();
     }
 
-    // Phase 4: Verify history was correctly appended
+    // Phase 4: Verify history was correctly appended — union is [10, 20, 30, 40]
     {
         let reader = hot_kv.reader().unwrap();
-        let (key, history) =
-            reader.last_account_history(addr).unwrap().expect("should have history");
-        assert_eq!(key, u64::MAX, "key should still be u64::MAX");
+        let history = reader.blocks_changed_account(&addr).unwrap().expect("should have history");
         let blocks: Vec<u64> = history.iter().collect();
         assert_eq!(blocks, vec![10, 20, 30, 40], "history should include appended block");
     }
 }
 
-/// Test deleting dual-keyed account history entries.
+/// Test that truncating account history removes only blocks above the given
+/// height and leaves other addresses intact.
 ///
 /// This test verifies that:
-/// 1. Writing dual-keyed entries works correctly
-/// 2. Deleting specific dual-keyed entries removes only that entry
-/// 3. Other entries for the same k1 remain intact
-/// 4. Traversal after deletion shows the entry is gone
-pub fn test_delete_dual_account_history<T: HotKv>(hot_kv: &T) {
+/// 1. Appending two disjoint sets of blocks for the same address works
+/// 2. `truncate_account_history_above` removes blocks above the cutoff
+/// 3. Other addresses are not affected
+pub fn test_delete_dual_account_history<T: HotKv>(hot_kv: &T)
+where
+    T::RwTx: HistoryWrite,
+{
     let addr1 = address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
     let addr2 = address!("0xffffffffffffffffffffffffffffffffffffffff");
 
-    // Phase 1: Write account history entries for multiple addresses
+    // Phase 1: Append history for addr1 ([1,2,3] then [4,5,6]) and addr2 ([10,20,30])
     {
         let writer = hot_kv.writer().unwrap();
 
-        // Write history for addr1 at two different shard keys
         let history1_a = BlockNumberList::new([1, 2, 3]).unwrap();
-        let history1_b = BlockNumberList::new([4, 5, 6]).unwrap();
-        writer.write_account_history(&addr1, 100, &history1_a).unwrap();
-        writer.write_account_history(&addr1, u64::MAX, &history1_b).unwrap();
+        writer.append_account_history(&addr1, &history1_a).unwrap();
 
-        // Write history for addr2
+        let history1_b = BlockNumberList::new([4, 5, 6]).unwrap();
+        writer.append_account_history(&addr1, &history1_b).unwrap();
+
         let history2 = BlockNumberList::new([10, 20, 30]).unwrap();
-        writer.write_account_history(&addr2, u64::MAX, &history2).unwrap();
+        writer.append_account_history(&addr2, &history2).unwrap();
 
         writer.commit().unwrap();
     }
 
-    // Phase 2: Verify all entries exist
+    // Phase 2: Verify the full logical union for addr1 is [1,2,3,4,5,6]
     {
         let reader = hot_kv.reader().unwrap();
 
-        // Check addr1 entries
-        let hist1_a = reader.get_account_history(&addr1, 100).unwrap();
-        assert!(hist1_a.is_some(), "addr1 shard 100 should exist");
-        assert_eq!(hist1_a.unwrap().iter().collect::<Vec<_>>(), vec![1, 2, 3]);
+        let hist1 =
+            reader.blocks_changed_account(&addr1).unwrap().expect("addr1 should have history");
+        assert_eq!(hist1.iter().collect::<Vec<_>>(), vec![1, 2, 3, 4, 5, 6]);
 
-        let hist1_b = reader.get_account_history(&addr1, u64::MAX).unwrap();
-        assert!(hist1_b.is_some(), "addr1 shard u64::MAX should exist");
-        assert_eq!(hist1_b.unwrap().iter().collect::<Vec<_>>(), vec![4, 5, 6]);
-
-        // Check addr2 entry
-        let hist2 = reader.get_account_history(&addr2, u64::MAX).unwrap();
-        assert!(hist2.is_some(), "addr2 should exist");
-        assert_eq!(hist2.unwrap().iter().collect::<Vec<_>>(), vec![10, 20, 30]);
+        let hist2 =
+            reader.blocks_changed_account(&addr2).unwrap().expect("addr2 should have history");
+        assert_eq!(hist2.iter().collect::<Vec<_>>(), vec![10, 20, 30]);
     }
 
-    // Phase 3: Delete addr1's u64::MAX entry
+    // Phase 3: Truncate addr1's history above block 3
     {
         let writer = hot_kv.writer().unwrap();
-        writer.queue_delete_dual::<tables::AccountsHistory>(&addr1, &u64::MAX).unwrap();
+        writer.truncate_account_history_above(&addr1, 3).unwrap();
         writer.commit().unwrap();
     }
 
-    // Phase 4: Verify only the deleted entry is gone
+    // Phase 4: Verify only blocks <= 3 remain for addr1; addr2 is unaffected
     {
         let reader = hot_kv.reader().unwrap();
 
-        // addr1 shard 100 should still exist
-        let hist1_a = reader.get_account_history(&addr1, 100).unwrap();
-        assert!(hist1_a.is_some(), "addr1 shard 100 should still exist after delete");
-        assert_eq!(hist1_a.unwrap().iter().collect::<Vec<_>>(), vec![1, 2, 3]);
+        let hist1 = reader
+            .blocks_changed_account(&addr1)
+            .unwrap()
+            .expect("addr1 should still have history after truncation");
+        assert_eq!(hist1.iter().collect::<Vec<_>>(), vec![1, 2, 3]);
 
-        // addr1 shard u64::MAX should be gone
-        let hist1_b = reader.get_account_history(&addr1, u64::MAX).unwrap();
-        assert!(hist1_b.is_none(), "addr1 shard u64::MAX should be deleted");
-
-        // addr2 should be unaffected
-        let hist2 = reader.get_account_history(&addr2, u64::MAX).unwrap();
-        assert!(hist2.is_some(), "addr2 should be unaffected by delete");
-        assert_eq!(hist2.unwrap().iter().collect::<Vec<_>>(), vec![10, 20, 30]);
-
-        // Verify last_account_history now returns shard 100 for addr1
-        let (key, _) =
-            reader.last_account_history(addr1).unwrap().expect("addr1 should still have history");
-        assert_eq!(key, 100, "last shard for addr1 should now be 100");
+        let hist2 =
+            reader.blocks_changed_account(&addr2).unwrap().expect("addr2 should be unaffected");
+        assert_eq!(hist2.iter().collect::<Vec<_>>(), vec![10, 20, 30]);
     }
 }
 
-/// Test deleting dual-keyed storage history entries.
+/// Test that truncating storage history removes only the targeted slot's
+/// blocks and leaves other slots intact.
 ///
 /// This test verifies that:
-/// 1. Writing storage history entries works correctly
-/// 2. Deleting specific (address, slot, shard) entries removes only that entry
-/// 3. Other slots for the same address remain intact
-/// 4. Traversal after deletion shows the entry is gone
-pub fn test_delete_dual_storage_history<T: HotKv>(hot_kv: &T) {
+/// 1. Appending storage history for two slots works correctly
+/// 2. `truncate_storage_history_above(addr, slot1, 0)` removes all blocks for slot1
+/// 3. Other slots for the same address are not affected
+pub fn test_delete_dual_storage_history<T: HotKv>(hot_kv: &T)
+where
+    T::RwTx: HistoryWrite,
+{
     let addr = address!("0x1111111111111111111111111111111111111111");
     let slot1 = U256::from(100);
     let slot2 = U256::from(200);
 
-    // Phase 1: Write storage history entries for multiple slots
+    // Phase 1: Append storage history for both slots
     {
         let writer = hot_kv.writer().unwrap();
 
-        // Write history for slot1
         let history1 = BlockNumberList::new([1, 2, 3]).unwrap();
-        writer.write_storage_history(&addr, slot1, u64::MAX, &history1).unwrap();
+        writer.append_storage_history(&addr, &slot1, &history1).unwrap();
 
-        // Write history for slot2
         let history2 = BlockNumberList::new([10, 20, 30]).unwrap();
-        writer.write_storage_history(&addr, slot2, u64::MAX, &history2).unwrap();
+        writer.append_storage_history(&addr, &slot2, &history2).unwrap();
 
         writer.commit().unwrap();
     }
 
-    // Phase 2: Verify both entries exist
+    // Phase 2: Verify both slots have history
     {
         let reader = hot_kv.reader().unwrap();
 
-        let hist1 = reader.get_storage_history(&addr, slot1, u64::MAX).unwrap();
-        assert!(hist1.is_some(), "slot1 should exist");
-        assert_eq!(hist1.unwrap().iter().collect::<Vec<_>>(), vec![1, 2, 3]);
+        let hist1 = reader
+            .blocks_changed_storage(&addr, &slot1)
+            .unwrap()
+            .expect("slot1 should have history");
+        assert_eq!(hist1.iter().collect::<Vec<_>>(), vec![1, 2, 3]);
 
-        let hist2 = reader.get_storage_history(&addr, slot2, u64::MAX).unwrap();
-        assert!(hist2.is_some(), "slot2 should exist");
-        assert_eq!(hist2.unwrap().iter().collect::<Vec<_>>(), vec![10, 20, 30]);
+        let hist2 = reader
+            .blocks_changed_storage(&addr, &slot2)
+            .unwrap()
+            .expect("slot2 should have history");
+        assert_eq!(hist2.iter().collect::<Vec<_>>(), vec![10, 20, 30]);
     }
 
-    // Phase 3: Delete slot1's entry
+    // Phase 3: Remove all blocks for slot1 by truncating above 0
+    // (all test blocks are > 0, so nothing is kept)
     {
         let writer = hot_kv.writer().unwrap();
-        let key_to_delete = ShardedKey::new(slot1, u64::MAX);
-        writer.queue_delete_dual::<tables::StorageHistory>(&addr, &key_to_delete).unwrap();
+        writer.truncate_storage_history_above(&addr, &slot1, 0).unwrap();
         writer.commit().unwrap();
     }
 
-    // Phase 4: Verify only slot1 is gone
+    // Phase 4: Verify slot1 is gone; slot2 is unaffected
     {
         let reader = hot_kv.reader().unwrap();
 
-        // slot1 should be gone
-        let hist1 = reader.get_storage_history(&addr, slot1, u64::MAX).unwrap();
-        assert!(hist1.is_none(), "slot1 should be deleted");
+        let hist1 = reader.blocks_changed_storage(&addr, &slot1).unwrap();
+        assert!(hist1.is_none(), "slot1 history should be gone after truncation");
 
-        // slot2 should be unaffected
-        let hist2 = reader.get_storage_history(&addr, slot2, u64::MAX).unwrap();
-        assert!(hist2.is_some(), "slot2 should be unaffected");
-        assert_eq!(hist2.unwrap().iter().collect::<Vec<_>>(), vec![10, 20, 30]);
-
-        // last_storage_history for slot1 should return None
-        let last1 = reader.last_storage_history(&addr, &slot1).unwrap();
-        assert!(last1.is_none(), "last_storage_history for slot1 should return None");
-
-        // last_storage_history for slot2 should still work
-        let last2 = reader.last_storage_history(&addr, &slot2).unwrap();
-        assert!(last2.is_some(), "last_storage_history for slot2 should still work");
+        let hist2 = reader
+            .blocks_changed_storage(&addr, &slot2)
+            .unwrap()
+            .expect("slot2 should be unaffected");
+        assert_eq!(hist2.iter().collect::<Vec<_>>(), vec![10, 20, 30]);
     }
 }
 
-/// Test deleting and re-adding dual-keyed entries.
+/// Test deleting and re-adding account history entries.
 ///
-/// This test verifies that after deleting an entry, we can write a new entry
-/// with the same key and it works correctly.
-pub fn test_delete_and_rewrite_dual<T: HotKv>(hot_kv: &T) {
+/// This test verifies that after truncating all history for an address, we
+/// can append new blocks and read them back correctly.
+pub fn test_delete_and_rewrite_dual<T: HotKv>(hot_kv: &T)
+where
+    T::RwTx: HistoryWrite,
+{
     let addr = address!("0x2222222222222222222222222222222222222222");
 
-    // Phase 1: Write initial entry
+    // Phase 1: Append initial history [1, 2, 3]
     {
         let writer = hot_kv.writer().unwrap();
         let history = BlockNumberList::new([1, 2, 3]).unwrap();
-        writer.write_account_history(&addr, u64::MAX, &history).unwrap();
+        writer.append_account_history(&addr, &history).unwrap();
         writer.commit().unwrap();
     }
 
     // Verify initial state
     {
         let reader = hot_kv.reader().unwrap();
-        let hist = reader.get_account_history(&addr, u64::MAX).unwrap();
-        assert_eq!(hist.unwrap().iter().collect::<Vec<_>>(), vec![1, 2, 3]);
+        let hist = reader.blocks_changed_account(&addr).unwrap().expect("should have history");
+        assert_eq!(hist.iter().collect::<Vec<_>>(), vec![1, 2, 3]);
     }
 
-    // Phase 2: Delete the entry
+    // Phase 2: Remove all history by truncating above 0
+    // (all test blocks are > 0, so nothing is kept)
     {
         let writer = hot_kv.writer().unwrap();
-        writer.queue_delete_dual::<tables::AccountsHistory>(&addr, &u64::MAX).unwrap();
+        writer.truncate_account_history_above(&addr, 0).unwrap();
         writer.commit().unwrap();
     }
 
     // Verify deleted
     {
         let reader = hot_kv.reader().unwrap();
-        let hist = reader.get_account_history(&addr, u64::MAX).unwrap();
-        assert!(hist.is_none(), "entry should be deleted");
+        let hist = reader.blocks_changed_account(&addr).unwrap();
+        assert!(hist.is_none(), "history should be empty after truncation");
     }
 
-    // Phase 3: Write new entry with same key but different value
+    // Phase 3: Append new history [100, 200, 300]
     {
         let writer = hot_kv.writer().unwrap();
         let new_history = BlockNumberList::new([100, 200, 300]).unwrap();
-        writer.write_account_history(&addr, u64::MAX, &new_history).unwrap();
+        writer.append_account_history(&addr, &new_history).unwrap();
         writer.commit().unwrap();
     }
 
     // Verify new value
     {
         let reader = hot_kv.reader().unwrap();
-        let hist = reader.get_account_history(&addr, u64::MAX).unwrap();
-        assert!(hist.is_some(), "new entry should exist");
-        assert_eq!(hist.unwrap().iter().collect::<Vec<_>>(), vec![100, 200, 300]);
+        let hist = reader.blocks_changed_account(&addr).unwrap().expect("new history should exist");
+        assert_eq!(hist.iter().collect::<Vec<_>>(), vec![100, 200, 300]);
     }
 }
