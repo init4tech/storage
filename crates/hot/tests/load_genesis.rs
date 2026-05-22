@@ -9,7 +9,7 @@ use alloy::{
 };
 use signet_hot::{
     HotKv,
-    db::{HistoryWrite, HotDbRead, LegacyHistoryRead, UnsafeDbWrite},
+    db::{HistoryRead, HistoryWrite, HotDbRead, LegacyHistoryRead, UnsafeDbWrite},
     mem::MemKv,
 };
 use signet_storage_types::EthereumHardfork;
@@ -181,8 +181,7 @@ fn verify_genesis_loaded(db: &MemKv, genesis: &Genesis, hardforks: &EthereumHard
                 );
 
                 // Verify storage history
-                let storage_history =
-                    reader.get_storage_history(address, slot_u256, u64::MAX).unwrap();
+                let storage_history = reader.blocks_changed_storage(address, &slot_u256).unwrap();
                 assert!(
                     storage_history.is_some(),
                     "Storage history should exist for {address} slot {slot}"
@@ -196,7 +195,7 @@ fn verify_genesis_loaded(db: &MemKv, genesis: &Genesis, hardforks: &EthereumHard
         }
 
         // Verify account history
-        let account_history = reader.get_account_history(address, u64::MAX).unwrap();
+        let account_history = reader.blocks_changed_account(address).unwrap();
         assert!(account_history.is_some(), "Account history should exist for {address}");
         let history_list = account_history.unwrap();
         assert!(
