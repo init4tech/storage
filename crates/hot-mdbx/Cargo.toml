@@ -34,6 +34,10 @@ serial_test = "3.3.1"
 signet-hot = { workspace = true, features = ["test-utils"] }
 tempfile.workspace = true
 
+[[test]]
+name = "history_sharding"
+required-features = ["test-utils"]
+
 [features]
 default = []
 test-utils = ["signet-hot/test-utils", "dep:tempfile"]
