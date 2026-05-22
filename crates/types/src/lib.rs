@@ -23,7 +23,7 @@ pub use events::{DbSignetEvent, DbZenithHeader};
 mod indexed_receipt;
 pub use indexed_receipt::IndexedReceipt;
 mod int_list;
-pub use int_list::{BlockNumberList, IntegerList, IntegerListError};
+pub use int_list::{BlockNumberList, IntegerList, IntegerListError, merge_and_split};
 mod sharded;
 pub use sharded::ShardedKey;
 pub use signet_evm::{Account, EthereumHardfork, genesis_header};

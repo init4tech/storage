@@ -174,9 +174,60 @@ impl IntegerList {
     }
 }
 
+/// Append `additions` to `existing`, splitting off a tail shard iff the
+/// merged list exceeds `max_bytes` after roaring encoding.
+///
+/// Returns `(first, second)`:
+/// - `first`: always returned; contains the lower block numbers. The caller
+///   writes this with subkey = `first.max()` if `second.is_some()`, otherwise
+///   `u64::MAX`.
+/// - `second`: `Some(tail)` iff a split occurred. Caller writes with subkey
+///   `u64::MAX`.
+///
+/// Preconditions (caller's responsibility):
+/// - Every block in `additions` is strictly greater than every block in
+///   `existing`. The function does not sort or deduplicate.
+/// - `existing.serialized_size() <= max_bytes`.
+///
+/// Postconditions:
+/// - `first.serialized_size() <= max_bytes`.
+/// - If `second.is_some()`, `second.serialized_size() <= max_bytes` and
+///   `second.min() > first.max()`.
+/// - `first ∪ second == existing_before ∪ additions`.
+///
+/// Allocation: zero on the no-split fast path beyond what
+/// `IntegerList::push` already does for roaring container growth. One
+/// `IntegerList` allocation when a split occurs.
+pub fn merge_and_split(
+    mut existing: IntegerList,
+    additions: IntegerList,
+    max_bytes: usize,
+) -> (IntegerList, Option<IntegerList>) {
+    let mut tail: Option<IntegerList> = None;
+
+    for block in additions.iter() {
+        if let Some(t) = tail.as_mut() {
+            t.push(block).expect("strictly increasing");
+            continue;
+        }
+        existing.push(block).expect("strictly increasing");
+        if existing.serialized_size() > max_bytes {
+            // Overflow: pop the just-pushed block out of `existing` and
+            // start the tail shard with it as the seed.
+            let popped = existing.pop_max().expect("just pushed");
+            debug_assert_eq!(popped, block);
+            let mut t = IntegerList::empty();
+            t.push(block).expect("first push always succeeds");
+            tail = Some(t);
+        }
+    }
+
+    (existing, tail)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::IntegerList;
+    use super::{IntegerList, merge_and_split};
 
     #[test]
     fn pop_max_returns_and_removes_largest() {
@@ -199,5 +250,73 @@ mod tests {
         assert_eq!(list.pop_max(), Some(42));
         assert!(list.is_empty());
         assert_eq!(list.pop_max(), None);
+    }
+
+    #[test]
+    fn merge_and_split_no_split_when_under_budget() {
+        let existing = IntegerList::new([1u64, 2, 3]).unwrap();
+        let additions = IntegerList::new([4u64, 5]).unwrap();
+        // 1500 B is generous for 5 dense values
+        let (first, second) = merge_and_split(existing, additions, 1500);
+        assert_eq!(first.iter().collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
+        assert!(second.is_none());
+    }
+
+    #[test]
+    fn merge_and_split_no_additions_returns_existing() {
+        let existing = IntegerList::new([10u64, 20]).unwrap();
+        let additions = IntegerList::empty();
+        let (first, second) = merge_and_split(existing, additions, 1500);
+        assert_eq!(first.iter().collect::<Vec<_>>(), vec![10, 20]);
+        assert!(second.is_none());
+    }
+
+    #[test]
+    fn merge_and_split_splits_when_over_budget() {
+        // Provoke a split with a deliberately small budget. Use 100 contiguous
+        // values starting at 0. Roaring-encoded that's a single run container
+        // around 14 B, so we need a tiny budget to force a split. Set budget
+        // small enough that ~50 entries push us over.
+        let existing = IntegerList::new(0u64..50).unwrap();
+        let additions = IntegerList::new(50u64..100).unwrap();
+
+        // Compute the budget so existing alone fits but existing + additions
+        // doesn't.
+        let existing_size = existing.serialized_size();
+        let combined = IntegerList::new(0u64..100).unwrap().serialized_size();
+        assert!(combined > existing_size, "test setup broken: combined didn't grow");
+        let budget = existing_size + (combined - existing_size) / 2;
+
+        let (first, second) = merge_and_split(existing, additions, budget);
+        let second = second.expect("split should have occurred");
+
+        // first ∪ second == 0..100, with second's min > first's max.
+        let mut all: Vec<u64> = first.iter().collect();
+        all.extend(second.iter());
+        assert_eq!(all, (0u64..100).collect::<Vec<_>>());
+        assert!(first.max().unwrap() < second.min().unwrap());
+
+        // Both halves fit in budget.
+        assert!(first.serialized_size() <= budget);
+        assert!(second.serialized_size() <= budget);
+    }
+
+    #[test]
+    fn merge_and_split_split_preserves_strict_ordering() {
+        // Additions are strictly greater than existing; verify post-split second
+        // contains only the newest blocks.
+        let existing = IntegerList::new(0u64..10).unwrap();
+        let additions = IntegerList::new(10u64..30).unwrap();
+
+        let existing_size = existing.serialized_size();
+        let combined = IntegerList::new(0u64..30).unwrap().serialized_size();
+        let budget = existing_size + (combined - existing_size) / 3;
+
+        let (first, second) = merge_and_split(existing, additions, budget);
+        let second = second.expect("split should have occurred");
+
+        let first_max = first.max().unwrap();
+        let second_min = second.min().unwrap();
+        assert!(first_max < second_min, "first.max={first_max} second.min={second_min}",);
     }
 }
