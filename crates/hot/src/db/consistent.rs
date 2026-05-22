@@ -1,5 +1,5 @@
 use crate::{
-    db::{HistoryError, UnsafeDbWrite, UnsafeHistoryWrite},
+    db::{HistoryError, LegacyUnsafeHistoryWrite, UnsafeDbWrite},
     tables,
 };
 use ahash::AHashSet;
@@ -16,7 +16,7 @@ const ADDRESS_MAX: Address = address!("0xfffffffffffffffffffffffffffffffffffffff
 
 /// Trait for database write operations on hot history tables. This trait
 /// maintains a consistent state of the database.
-pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
+pub trait LegacyConsistentHistoryWrite: UnsafeDbWrite + LegacyUnsafeHistoryWrite {
     /// Validate that a range of headers forms a valid chain extension.
     ///
     /// Headers must be in order and each must extend the previous.
@@ -344,4 +344,4 @@ pub trait HistoryWrite: UnsafeDbWrite + UnsafeHistoryWrite {
     }
 }
 
-impl<T> HistoryWrite for T where T: UnsafeDbWrite + UnsafeHistoryWrite {}
+impl<T> LegacyConsistentHistoryWrite for T where T: UnsafeDbWrite + LegacyUnsafeHistoryWrite {}

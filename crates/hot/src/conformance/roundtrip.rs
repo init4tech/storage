@@ -1,7 +1,7 @@
 //! Basic CRUD roundtrip tests for hot storage.
 
 use crate::{
-    db::{HistoryRead, HotDbRead, UnsafeDbWrite, UnsafeHistoryWrite},
+    db::{HotDbRead, LegacyHistoryRead, LegacyUnsafeHistoryWrite, UnsafeDbWrite},
     model::{HotKv, HotKvRead},
     tables,
 };

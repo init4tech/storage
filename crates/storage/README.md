@@ -70,5 +70,5 @@ Cold dispatch errors indicate either:
 Key types are re-exported for convenience:
 
 - `ExecutedBlock`, `ExecutedBlockBuilder` - Block data structures
-- `HotKv`, `HistoryRead`, `HistoryWrite` - Hot storage traits
+- `HotKv`, `LegacyHistoryRead`, `LegacyConsistentHistoryWrite` - Hot storage traits
 - `ColdStorageHandle`, `ColdStorageError` - Cold storage types

@@ -8,7 +8,7 @@ with opinionated serialization and predefined tables for blockchain state.
 ## Usage
 
 ```rust,ignore
-use signet_hot::{HotKv, HistoryRead, HistoryWrite};
+use signet_hot::{HotKv, LegacyHistoryRead, LegacyConsistentHistoryWrite};
 
 fn example<D: HotKv>(db: &D) -> Result<(), signet_hot::db::HotKvError> {
     // Read operations
@@ -32,10 +32,10 @@ For a concrete implementation, see the `signet-hot-mdbx` crate.
 HotKv                        ← Transaction factory
   ├─ reader() → HotKvRead        ← Read-only transactions
   │              └─ HotDbRead         ← Typed accessors (blanket impl)
-  │                   └─ HistoryRead      ← History queries (blanket impl)
+  │                   └─ LegacyHistoryRead      ← History queries (blanket impl)
   └─ writer() → HotKvWrite       ← Read-write transactions
                  └─ UnsafeDbWrite        ← Low-level writes (blanket impl)
-                      └─ HistoryWrite     ← Safe chain operations (blanket impl)
+                      └─ LegacyConsistentHistoryWrite ← Safe chain operations (blanket impl)
 ```
 
 ## Serialization

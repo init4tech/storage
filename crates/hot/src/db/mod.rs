@@ -1,16 +1,16 @@
 //! Primary access traits for hot storage backends.
 
 mod consistent;
-pub use consistent::HistoryWrite;
+pub use consistent::LegacyConsistentHistoryWrite;
 
 mod errors;
 pub use errors::{HistoryError, HistoryResult};
 
 mod inconsistent;
-pub use inconsistent::{BundleInit, UnsafeDbWrite, UnsafeHistoryWrite};
+pub use inconsistent::{BundleInit, LegacyUnsafeHistoryWrite, UnsafeDbWrite};
 
 mod read;
-pub use read::{HistoryRead, HotDbRead};
+pub use read::{HotDbRead, LegacyHistoryRead};
 
 pub(crate) mod sealed {
     use crate::model::HotKvRead;

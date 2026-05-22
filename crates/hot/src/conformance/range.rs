@@ -1,7 +1,7 @@
 //! Clear/take range operations for single and dual-keyed tables.
 
 use crate::{
-    db::{HistoryRead, HotDbRead, UnsafeDbWrite, UnsafeHistoryWrite},
+    db::{HotDbRead, LegacyHistoryRead, LegacyUnsafeHistoryWrite, UnsafeDbWrite},
     model::{HotKv, HotKvWrite},
     tables,
 };

@@ -1,7 +1,7 @@
 //! Unwind conformance test and helpers.
 
 use crate::{
-    db::{HistoryWrite, UnsafeDbWrite},
+    db::{LegacyConsistentHistoryWrite, UnsafeDbWrite},
     model::{DualKeyValue, DualTableTraverse, HotKv, HotKvRead, KeyValue, TableTraverse},
     tables::{self, DualKey, SingleKey},
 };

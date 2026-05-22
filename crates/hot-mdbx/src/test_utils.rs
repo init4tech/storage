@@ -1227,7 +1227,7 @@ mod tests {
         };
         use signet_hot::{
             conformance::make_bundle_state,
-            db::{HistoryWrite, HotDbRead},
+            db::{HotDbRead, LegacyConsistentHistoryWrite},
             model::{DualTableTraverse, HotKvRead},
             tables,
         };

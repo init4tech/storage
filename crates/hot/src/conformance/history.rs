@@ -1,7 +1,7 @@
 //! History and change set tests for hot storage.
 
 use crate::{
-    db::{HistoryRead, UnsafeDbWrite, UnsafeHistoryWrite},
+    db::{LegacyHistoryRead, LegacyUnsafeHistoryWrite, UnsafeDbWrite},
     model::{HotKv, HotKvWrite},
     tables,
 };

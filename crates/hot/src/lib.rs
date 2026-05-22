@@ -7,7 +7,7 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use signet_hot::{HotKv, HistoryRead, HistoryWrite};
+//! use signet_hot::{HotKv, LegacyHistoryRead, LegacyConsistentHistoryWrite};
 //!
 //! fn example<D: HotKv>(db: &D) -> Result<(), signet_hot::db::HotKvError> {
 //!     // Read operations
@@ -31,10 +31,10 @@
 //! HotKv                    ← Transaction factory
 //!   ├─ reader() → HotKvRead    ← Read-only transactions
 //!   │              └─ HotDbRead     ← Typed accessors (blanket impl)
-//!   │                   └─ HistoryRead  ← History queries (blanket impl)
+//!   │                   └─ LegacyHistoryRead  ← History queries (blanket impl)
 //!   └─ writer() → HotKvWrite   ← Read-write transactions
 //!                  └─ UnsafeDbWrite    ← Low-level writes (blanket impl)
-//!                       └─ HistoryWrite ← Safe chain operations (blanket impl)
+//!                       └─ LegacyConsistentHistoryWrite ← Safe chain operations (blanket impl)
 //! ```
 //!
 //! ## Serialization
@@ -56,7 +56,7 @@
 //! These traits provide methods for common operations such as getting,
 //! setting, and deleting key-value pairs in hot storage tables. The raw
 //! key-value operations use byte slices for maximum flexibility. The
-//! [`HistoryRead`] and [`HistoryWrite`] traits provide higher-level
+//! [`LegacyHistoryRead`] and [`LegacyConsistentHistoryWrite`] traits provide higher-level
 //! abstractions that work with the predefined tables and their associated key
 //! and value types.
 //!
@@ -73,8 +73,8 @@
 //! See the [`Table`] trait documentation for more information on defining and
 //! using tables.
 //!
-//! [`HistoryRead`]: db::HistoryRead
-//! [`HistoryWrite`]: db::HistoryWrite
+//! [`LegacyHistoryRead`]: db::LegacyHistoryRead
+//! [`LegacyConsistentHistoryWrite`]: db::LegacyConsistentHistoryWrite
 //! [`HotKvRead`]: model::HotKvRead
 //! [`HotKvWrite`]: model::HotKvWrite
 //! [`HotKv`]: model::HotKv
@@ -109,7 +109,7 @@ pub mod connect;
 pub use connect::HotConnect;
 
 pub mod db;
-pub use db::{HistoryError, HistoryRead, HistoryWrite};
+pub use db::{HistoryError, LegacyConsistentHistoryWrite, LegacyHistoryRead};
 
 pub mod model;
 pub use model::HotKv;

@@ -61,7 +61,7 @@ impl<T> HotDbRead for T where T: HotKvRead {}
 ///
 /// Users should prefer this trait unless customizations are needed to the
 /// table set.
-pub trait HistoryRead: HotDbRead {
+pub trait LegacyHistoryRead: HotDbRead {
     /// Get the list of block numbers where an account was touched.
     /// Get the list of block numbers where an account was touched.
     fn get_account_history(
@@ -368,4 +368,4 @@ pub trait HistoryRead: HotDbRead {
     }
 }
 
-impl<T> HistoryRead for T where T: HotDbRead {}
+impl<T> LegacyHistoryRead for T where T: HotDbRead {}

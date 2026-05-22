@@ -1,5 +1,5 @@
 use crate::{
-    db::HistoryRead,
+    db::LegacyHistoryRead,
     model::{
         DualKeyTraverse, DualKeyTraverseMut, DualTableCursor, HotKvError, HotKvReadError,
         KvTraverse, KvTraverseMut, TableCursor,
@@ -15,14 +15,14 @@ use std::borrow::Cow;
 /// This is the top-level trait for hot storage backends, providing
 /// transactional access through read-only and read-write transactions.
 ///
-/// We recommend using [`HistoryRead`] and [`HistoryWrite`] for most use cases,
+/// We recommend using [`LegacyHistoryRead`] and [`LegacyConsistentHistoryWrite`] for most use cases,
 /// as they provide higher-level abstractions over predefined tables.
 ///
 /// When implementing this trait, consult the [`model`] module documentation for
 /// details on the associated types and their requirements.
 ///
-/// [`HistoryRead`]: crate::db::HistoryRead
-/// [`HistoryWrite`]: crate::db::HistoryWrite
+/// [`LegacyHistoryRead`]: crate::db::LegacyHistoryRead
+/// [`LegacyConsistentHistoryWrite`]: crate::db::LegacyConsistentHistoryWrite
 /// [`model`]: crate::model
 #[auto_impl::auto_impl(&, Arc, Box)]
 pub trait HotKv {

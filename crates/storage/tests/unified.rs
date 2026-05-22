@@ -5,7 +5,9 @@ use alloy::{
     primitives::{Address, B256, Signature, TxKind, U256},
 };
 use signet_cold::{ColdStorage, HeaderSpecifier, mem::MemColdBackend};
-use signet_hot::{HistoryRead, HistoryWrite, HotKv, mem::MemKv, model::HotKvWrite};
+use signet_hot::{
+    HotKv, LegacyConsistentHistoryWrite, LegacyHistoryRead, mem::MemKv, model::HotKvWrite,
+};
 use signet_storage::UnifiedStorage;
 use signet_storage_types::{
     ExecutedBlock, ExecutedBlockBuilder, Receipt, RecoveredTx, SealedHeader, TransactionSigned,

@@ -1,5 +1,5 @@
 use crate::{
-    db::{HistoryError, HistoryRead},
+    db::{HistoryError, LegacyHistoryRead},
     model::HotKvWrite,
     tables,
 };
@@ -29,7 +29,7 @@ pub type BundleInit =
 /// inconsistent state if not used carefully. Users should prefer
 /// [`HotHistoryWrite`] or higher-level abstractions when possible.
 ///
-/// [`HotHistoryWrite`]: crate::db::HistoryWrite
+/// [`HotHistoryWrite`]: crate::db::LegacyConsistentHistoryWrite
 pub trait UnsafeDbWrite: HotKvWrite + super::sealed::Sealed {
     /// Write a block header. This will leave the DB in an inconsistent state
     /// until the corresponding header number is also written. Users should
@@ -118,7 +118,7 @@ impl<T> UnsafeDbWrite for T where T: HotKvWrite {}
 /// These tables maintain historical information about accounts and storage
 /// changes, and their contents can be used to reconstruct past states or
 /// roll back changes.
-pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
+pub trait LegacyUnsafeHistoryWrite: UnsafeDbWrite + LegacyHistoryRead {
     /// Maintain a list of block numbers where an account was touched.
     ///
     /// Accounts are keyed
@@ -514,7 +514,7 @@ pub trait UnsafeHistoryWrite: UnsafeDbWrite + HistoryRead {
     }
 }
 
-impl<T> UnsafeHistoryWrite for T where T: UnsafeDbWrite + HotKvWrite {}
+impl<T> LegacyUnsafeHistoryWrite for T where T: UnsafeDbWrite + HotKvWrite {}
 
 /// Append indices to a sharded history entry, handling shard splitting.
 ///
