@@ -8,7 +8,7 @@
 //! MemKv writes a single dup entry per addr).
 
 use crate::{
-    db::{HistoryError, HotDbRead, LegacyHistoryRead, UnsafeDbWrite},
+    db::{HistoryError, HotDbRead, UnsafeDbWrite},
     model::HotKvRead,
     tables,
 };
@@ -180,6 +180,108 @@ pub trait HistoryRead: HotDbRead {
             None => self.get_storage(addr, slot),
             Some(first) => self.get_storage_change(first, addr, slot),
         }
+    }
+
+    /// Get the last (highest) header in the database.
+    /// Returns None if the database is empty.
+    fn last_header(&self) -> Result<Option<SealedHeader>, Self::Error> {
+        let mut cursor = self.traverse::<tables::Headers>()?;
+        Ok(cursor.last()?.map(|(_, header)| header))
+    }
+
+    /// Get the last (highest) block number in the database.
+    /// Returns None if the database is empty.
+    fn last_block_number(&self) -> Result<Option<u64>, Self::Error> {
+        let mut cursor = self.traverse::<tables::Headers>()?;
+        Ok(cursor.last()?.map(|(number, _)| number))
+    }
+
+    /// Get the first (lowest) header in the database.
+    /// Returns None if the database is empty.
+    fn first_header(&self) -> Result<Option<SealedHeader>, Self::Error> {
+        let mut cursor = self.traverse::<tables::Headers>()?;
+        Ok(cursor.first()?.map(|(_, header)| header))
+    }
+
+    /// Get the current chain tip (highest block number and hash).
+    /// Returns None if the database is empty.
+    fn get_chain_tip(&self) -> Result<Option<(u64, B256)>, Self::Error> {
+        let mut cursor = self.traverse::<tables::Headers>()?;
+        let Some((number, header)) = cursor.last()? else {
+            return Ok(None);
+        };
+        let hash = header.hash();
+        Ok(Some((number, hash)))
+    }
+
+    /// Get the execution range (first and last block numbers with headers).
+    /// Returns None if the database is empty.
+    fn get_execution_range(&self) -> Result<Option<(u64, u64)>, Self::Error> {
+        let mut cursor = self.traverse::<tables::Headers>()?;
+        let Some((first, _)) = cursor.first()? else {
+            return Ok(None);
+        };
+        let Some((last, _)) = cursor.last()? else {
+            return Ok(None);
+        };
+        Ok(Some((first, last)))
+    }
+
+    /// Check if a specific block number exists in history.
+    fn has_block(&self, number: u64) -> Result<bool, Self::Error> {
+        self.get_header(number).map(|opt| opt.is_some())
+    }
+
+    /// Get headers in a range (inclusive).
+    fn get_headers_range(&self, start: u64, end: u64) -> Result<Vec<SealedHeader>, Self::Error> {
+        self.traverse::<tables::Headers>()?
+            .iter_from(&start)?
+            .take_while(|r| r.as_ref().is_ok_and(|(num, _)| *num <= end))
+            .map(|r| r.map(|(_, header)| header))
+            .collect()
+    }
+
+    /// Validate that `height` is within the stored block range.
+    ///
+    /// Returns `Ok(())` if `height` is `None` (current state) or within the
+    /// range of stored blocks. Returns an error if the database has no
+    /// blocks or if the height is out of range.
+    fn check_height(&self, height: Option<u64>) -> Result<(), HistoryError<Self::Error>> {
+        let Some(height) = height else { return Ok(()) };
+        let Some((first, last)) = self.get_execution_range().map_err(HistoryError::Db)? else {
+            return Err(HistoryError::NoBlocks);
+        };
+        if height < first || height > last {
+            return Err(HistoryError::HeightOutOfRange { height, first, last });
+        }
+        Ok(())
+    }
+
+    /// Get account state at a height, with range validation.
+    ///
+    /// Validates that `height` is within the stored block range before
+    /// delegating to [`Self::get_account_at_height`].
+    fn get_account_at_height_checked(
+        &self,
+        addr: &Address,
+        height: Option<u64>,
+    ) -> Result<Option<Account>, HistoryError<Self::Error>> {
+        self.check_height(height)?;
+        self.get_account_at_height(addr, height).map_err(HistoryError::Db)
+    }
+
+    /// Get storage slot value at a height, with range validation.
+    ///
+    /// Validates that `height` is within the stored block range before
+    /// delegating to [`Self::get_storage_at_height`].
+    fn get_storage_at_height_checked(
+        &self,
+        addr: &Address,
+        slot: &U256,
+        height: Option<u64>,
+    ) -> Result<Option<U256>, HistoryError<Self::Error>> {
+        self.check_height(height)?;
+        self.get_storage_at_height(addr, slot, height).map_err(HistoryError::Db)
     }
 }
 

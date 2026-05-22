@@ -87,7 +87,7 @@ pub use signet_cold::{
 };
 pub use signet_cold_mdbx::MdbxColdBackend;
 pub use signet_hot::{
-    HistoryError, HistoryWrite, HotKv, LegacyHistoryRead,
+    HistoryError, HistoryRead, HistoryWrite, HotKv,
     model::{HotKvRead, RevmRead, RevmWrite},
 };
 pub use signet_hot_mdbx::{DatabaseArguments, DatabaseEnv};

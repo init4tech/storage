@@ -9,7 +9,7 @@ use alloy::{
 };
 use signet_hot::{
     HotKv,
-    db::{HistoryRead, HistoryWrite, HotDbRead, LegacyHistoryRead, UnsafeDbWrite},
+    db::{HistoryRead, HistoryWrite, HotDbRead, UnsafeDbWrite},
     mem::MemKv,
 };
 use signet_storage_types::EthereumHardfork;

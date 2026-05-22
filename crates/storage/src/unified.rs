@@ -8,7 +8,7 @@ use crate::StorageResult;
 use alloy::primitives::BlockNumber;
 use signet_cold::{BlockData, ColdReceipt, ColdStorage, ColdStorageBackend, ColdStorageError};
 use signet_hot::{
-    HistoryWrite, HotKv, LegacyHistoryRead,
+    HistoryRead, HistoryWrite, HotKv,
     model::{HotKvReadError, HotKvWrite, RevmRead},
 };
 use signet_storage_types::{ExecutedBlock, SealedHeader};

@@ -7,7 +7,7 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use signet_hot::{HotKv, LegacyHistoryRead, HistoryWrite};
+//! use signet_hot::{HotKv, HistoryRead, HistoryWrite};
 //!
 //! fn example<D: HotKv>(db: &D) -> Result<(), signet_hot::db::HotKvError> {
 //!     // Read operations
@@ -31,7 +31,7 @@
 //! HotKv                    ← Transaction factory
 //!   ├─ reader() → HotKvRead    ← Read-only transactions
 //!   │              └─ HotDbRead     ← Typed accessors (blanket impl)
-//!   │                   └─ LegacyHistoryRead  ← History queries (blanket impl)
+//!   │                   └─ HistoryRead    ← History queries (blanket impl)
 //!   └─ writer() → HotKvWrite   ← Read-write transactions
 //!                  └─ UnsafeDbWrite    ← Low-level writes (blanket impl)
 //!                       └─ HistoryWrite ← Safe chain operations (per-backend impl)
@@ -56,7 +56,7 @@
 //! These traits provide methods for common operations such as getting,
 //! setting, and deleting key-value pairs in hot storage tables. The raw
 //! key-value operations use byte slices for maximum flexibility. The
-//! [`LegacyHistoryRead`] and [`HistoryWrite`] traits provide higher-level
+//! [`HistoryRead`] and [`HistoryWrite`] traits provide higher-level
 //! abstractions that work with the predefined tables and their associated key
 //! and value types.
 //!
@@ -73,7 +73,7 @@
 //! See the [`Table`] trait documentation for more information on defining and
 //! using tables.
 //!
-//! [`LegacyHistoryRead`]: db::LegacyHistoryRead
+//! [`HistoryRead`]: db::HistoryRead
 //! [`HistoryWrite`]: db::HistoryWrite
 //! [`HotKvRead`]: model::HotKvRead
 //! [`HotKvWrite`]: model::HotKvWrite
@@ -109,7 +109,7 @@ pub mod connect;
 pub use connect::HotConnect;
 
 pub mod db;
-pub use db::{HistoryError, HistoryWrite, LegacyHistoryRead};
+pub use db::{HistoryError, HistoryRead, HistoryWrite};
 
 pub mod model;
 pub use model::HotKv;

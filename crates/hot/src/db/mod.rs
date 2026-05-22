@@ -7,10 +7,10 @@ pub mod history;
 pub use history::{HistoryRead, HistoryWrite};
 
 mod inconsistent;
-pub use inconsistent::{BundleInit, LegacyUnsafeHistoryWrite, UnsafeDbWrite};
+pub use inconsistent::{BundleInit, UnsafeDbWrite};
 
 mod read;
-pub use read::{HotDbRead, LegacyHistoryRead};
+pub use read::HotDbRead;
 
 pub(crate) mod sealed {
     use crate::model::HotKvRead;

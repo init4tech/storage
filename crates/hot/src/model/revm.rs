@@ -1,5 +1,5 @@
 use crate::{
-    db::LegacyHistoryRead,
+    db::HistoryRead,
     model::{HotKvError, HotKvRead, HotKvWrite},
     tables::{self, Bytecodes, DualKey, PlainAccountState, SingleKey, Table},
 };
@@ -39,10 +39,10 @@ impl<T: HotKvRead> RevmRead<T> {
     /// current state, and heights before the first block return the
     /// pre-state of the earliest change. Use
     /// [`HotKv::revm_reader_at_height`] which validates, or call
-    /// [`LegacyHistoryRead::check_height`] manually.
+    /// [`HistoryRead::check_height`] manually.
     ///
     /// [`HotKv::revm_reader_at_height`]: crate::model::HotKv::revm_reader_at_height
-    /// [`LegacyHistoryRead::check_height`]: crate::db::LegacyHistoryRead::check_height
+    /// [`HistoryRead::check_height`]: crate::db::HistoryRead::check_height
     pub const fn at_height(reader: T, height: u64) -> Self {
         Self { reader, height: Some(height) }
     }
