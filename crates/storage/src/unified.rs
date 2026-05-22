@@ -98,28 +98,7 @@ impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B> {
         let cold = ColdStorage::new(cold_backend, cancel_token);
         Self::new(hot, cold)
     }
-}
 
-impl<H: HotKv> UnifiedStorage<H, signet_cold::ErasedBackend> {
-    /// Spawn a unified storage with a type-erased cold backend.
-    ///
-    /// Erases the concrete cold backend behind
-    /// [`signet_cold::ErasedBackend`], so callers can hold a
-    /// `UnifiedStorage<H>` without propagating a backend generic.
-    pub fn spawn_erased<B: ColdStorageBackend>(
-        hot: H,
-        cold_backend: B,
-        cancel_token: CancellationToken,
-    ) -> Self {
-        let cold = ColdStorage::new_erased(cold_backend, cancel_token);
-        Self::new(hot, cold)
-    }
-}
-
-impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B>
-where
-    H::RwTx: HistoryWrite,
-{
     /// Get a reference to the hot storage backend.
     pub const fn hot(&self) -> &H {
         &self.hot
@@ -163,6 +142,62 @@ where
         self.hot.revm_reader_at_height(height).map_err(Into::into)
     }
 
+    /// Check how far behind cold storage is compared to hot storage.
+    ///
+    /// Returns `Some(first_missing_block)` if cold is behind, `None` if synced.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either storage cannot be queried.
+    pub async fn cold_lag(&self) -> StorageResult<Option<BlockNumber>> {
+        let reader = self.reader()?;
+        let hot_tip = reader.get_chain_tip().map_err(|e| e.into_hot_kv_error())?;
+
+        let cold_tip = self.cold.get_latest_block().await?;
+
+        match (hot_tip, cold_tip) {
+            (Some((hot_num, _)), Some(cold_num)) if cold_num < hot_num => Ok(Some(cold_num + 1)),
+            (Some((_, _)), None) => Ok(Some(0)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Replay blocks to cold storage from an external source.
+    ///
+    /// Use this to recover cold storage after failures. The caller is
+    /// responsible for fetching the missing block data.
+    ///
+    /// Consumes the blocks to avoid cloning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if cold storage write fails.
+    pub async fn replay_to_cold(&self, blocks: Vec<ExecutedBlock>) -> Result<(), ColdStorageError> {
+        let cold_data: Vec<_> = blocks.into_iter().map(BlockData::from).collect();
+        self.cold.append_blocks(cold_data).await
+    }
+}
+
+impl<H: HotKv> UnifiedStorage<H, signet_cold::ErasedBackend> {
+    /// Spawn a unified storage with a type-erased cold backend.
+    ///
+    /// Erases the concrete cold backend behind
+    /// [`signet_cold::ErasedBackend`], so callers can hold a
+    /// `UnifiedStorage<H>` without propagating a backend generic.
+    pub fn spawn_erased<B: ColdStorageBackend>(
+        hot: H,
+        cold_backend: B,
+        cancel_token: CancellationToken,
+    ) -> Self {
+        let cold = ColdStorage::new_erased(cold_backend, cancel_token);
+        Self::new(hot, cold)
+    }
+}
+
+impl<H: HotKv, B: ColdStorageBackend> UnifiedStorage<H, B>
+where
+    H::RwTx: HistoryWrite,
+{
     /// Append executed blocks to both hot and cold storage.
     ///
     /// This method:
@@ -300,41 +335,6 @@ where
         writer.unwind_above(block).map_err(|e| e.map_db(|e| e.into_hot_kv_error()))?;
         writer.raw_commit().map_err(|e| e.into_hot_kv_error())?;
         Ok(())
-    }
-
-    /// Check how far behind cold storage is compared to hot storage.
-    ///
-    /// Returns `Some(first_missing_block)` if cold is behind, `None` if synced.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if either storage cannot be queried.
-    pub async fn cold_lag(&self) -> StorageResult<Option<BlockNumber>> {
-        let reader = self.reader()?;
-        let hot_tip = reader.get_chain_tip().map_err(|e| e.into_hot_kv_error())?;
-
-        let cold_tip = self.cold.get_latest_block().await?;
-
-        match (hot_tip, cold_tip) {
-            (Some((hot_num, _)), Some(cold_num)) if cold_num < hot_num => Ok(Some(cold_num + 1)),
-            (Some((_, _)), None) => Ok(Some(0)),
-            _ => Ok(None),
-        }
-    }
-
-    /// Replay blocks to cold storage from an external source.
-    ///
-    /// Use this to recover cold storage after failures. The caller is
-    /// responsible for fetching the missing block data.
-    ///
-    /// Consumes the blocks to avoid cloning.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if cold storage write fails.
-    pub async fn replay_to_cold(&self, blocks: Vec<ExecutedBlock>) -> Result<(), ColdStorageError> {
-        let cold_data: Vec<_> = blocks.into_iter().map(BlockData::from).collect();
-        self.cold.append_blocks(cold_data).await
     }
 }
 
