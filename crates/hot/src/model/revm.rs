@@ -805,13 +805,13 @@ mod tests {
     ///   - Block 5 changed account: pre-state was nonce=1, balance=100
     ///   - Block 10 changed account: pre-state was nonce=5, balance=500
     ///   - Current (PlainAccountState): nonce=10, balance=1000
-    ///   - History shard: (A, 10) → [5, 10]
+    ///   - Account history: blocks [5, 10] for address A
     ///
     /// Storage slot 0x42 for address A:
     ///   - Block 5 changed slot: pre-state was 0
     ///   - Block 10 changed slot: pre-state was 100
     ///   - Current (PlainStorageState): 200
-    ///   - History shard: (A, ShardedKey(0x42, 10)) → [5, 10]
+    ///   - Storage history: blocks [5, 10] for (address A, slot 0x42)
     fn setup_history_kv() -> (MemKv, Address) {
         let mem_kv = MemKv::default();
         let address = Address::from_slice(&[0x1; 20]);

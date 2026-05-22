@@ -49,7 +49,7 @@ pub trait HistoryRead: HotDbRead {
         let Some(first) = iter.next().transpose()? else {
             return Ok(None);
         };
-        // first is (u64, BlockNumberList) — the shard key and its list
+        // first is (k2, list) — k2 is the opaque dup subkey, internal to the backend
         let (_, mut merged) = first;
         for entry in iter {
             let (_, list) = entry?;

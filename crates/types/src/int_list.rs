@@ -336,6 +336,7 @@ mod tests {
     /// hundreds of contiguous blocks, we stay comfortably under 1500 B.
     #[test]
     fn worst_case_dense_pack_fits_in_dupsort_budget() {
+        // 650 contiguous values empirically encode to ~1300 B; 750 was over budget.
         let list = IntegerList::new(0u64..650).unwrap();
         let size = list.serialized_size();
         assert!(size <= 1500, "dense pack of 650 blocks encoded as {size} B, expected <= 1500");

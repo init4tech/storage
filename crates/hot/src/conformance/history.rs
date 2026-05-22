@@ -117,27 +117,30 @@ where
     let slot1 = U256::from(1);
     let slot2 = U256::from(2);
 
-    // Phase 1: Write storage change sets for blocks 1-3
+    // Phase 1: Write storage change sets for blocks 1001-1003
+    // (distinct from blocks 1-5 used by test_update_history_indices_account;
+    //  update_history_indices scans the shared change-set table, so each test
+    //  that calls it must operate in a non-overlapping block window)
     {
         let writer = hot_kv.writer().unwrap();
 
-        // Block 1: addr1.slot1 changed
-        writer.write_storage_prestate(1, addr1, &slot1, &U256::ZERO).unwrap();
+        // Block 1001: addr1.slot1 changed
+        writer.write_storage_prestate(1001, addr1, &slot1, &U256::ZERO).unwrap();
 
-        // Block 2: addr1.slot1 and addr1.slot2 changed
-        writer.write_storage_prestate(2, addr1, &slot1, &U256::from(100)).unwrap();
-        writer.write_storage_prestate(2, addr1, &slot2, &U256::ZERO).unwrap();
+        // Block 1002: addr1.slot1 and addr1.slot2 changed
+        writer.write_storage_prestate(1002, addr1, &slot1, &U256::from(100)).unwrap();
+        writer.write_storage_prestate(1002, addr1, &slot2, &U256::ZERO).unwrap();
 
-        // Block 3: addr1.slot2 changed
-        writer.write_storage_prestate(3, addr1, &slot2, &U256::from(200)).unwrap();
+        // Block 1003: addr1.slot2 changed
+        writer.write_storage_prestate(1003, addr1, &slot2, &U256::from(200)).unwrap();
 
         writer.commit().unwrap();
     }
 
-    // Phase 2: Run update_history_indices for blocks 1-3
+    // Phase 2: Run update_history_indices for blocks 1001-1003
     {
         let writer = hot_kv.writer().unwrap();
-        writer.update_history_indices(1..=3).unwrap();
+        writer.update_history_indices(1001..=1003).unwrap();
         writer.commit().unwrap();
     }
 
@@ -145,40 +148,40 @@ where
     {
         let reader = hot_kv.reader().unwrap();
 
-        // addr1.slot1 should have history at blocks 1, 2
+        // addr1.slot1 should have history at blocks 1001, 1002
         let history1 = reader
             .blocks_changed_storage(&addr1, &slot1)
             .unwrap()
             .expect("addr1.slot1 should have history");
         let blocks1: Vec<u64> = history1.iter().collect();
-        assert_eq!(blocks1, vec![1, 2], "addr1.slot1 history mismatch");
+        assert_eq!(blocks1, vec![1001, 1002], "addr1.slot1 history mismatch");
 
-        // addr1.slot2 should have history at blocks 2, 3
+        // addr1.slot2 should have history at blocks 1002, 1003
         let history2 = reader
             .blocks_changed_storage(&addr1, &slot2)
             .unwrap()
             .expect("addr1.slot2 should have history");
         let blocks2: Vec<u64> = history2.iter().collect();
-        assert_eq!(blocks2, vec![2, 3], "addr1.slot2 history mismatch");
+        assert_eq!(blocks2, vec![1002, 1003], "addr1.slot2 history mismatch");
     }
 
-    // Phase 4: Write more change sets for blocks 4-5
+    // Phase 4: Write more change sets for blocks 1004-1005
     {
         let writer = hot_kv.writer().unwrap();
 
-        // Block 4: addr1.slot1 changed
-        writer.write_storage_prestate(4, addr1, &slot1, &U256::from(300)).unwrap();
+        // Block 1004: addr1.slot1 changed
+        writer.write_storage_prestate(1004, addr1, &slot1, &U256::from(300)).unwrap();
 
-        // Block 5: addr1.slot1 changed again
-        writer.write_storage_prestate(5, addr1, &slot1, &U256::from(400)).unwrap();
+        // Block 1005: addr1.slot1 changed again
+        writer.write_storage_prestate(1005, addr1, &slot1, &U256::from(400)).unwrap();
 
         writer.commit().unwrap();
     }
 
-    // Phase 5: Run update_history_indices for blocks 4-5
+    // Phase 5: Run update_history_indices for blocks 1004-1005
     {
         let writer = hot_kv.writer().unwrap();
-        writer.update_history_indices(4..=5).unwrap();
+        writer.update_history_indices(1004..=1005).unwrap();
         writer.commit().unwrap();
     }
 
@@ -186,21 +189,25 @@ where
     {
         let reader = hot_kv.reader().unwrap();
 
-        // addr1.slot1 should now have history at blocks 1, 2, 4, 5
+        // addr1.slot1 should now have history at blocks 1001, 1002, 1004, 1005
         let history1 = reader
             .blocks_changed_storage(&addr1, &slot1)
             .unwrap()
             .expect("addr1.slot1 should have history");
         let blocks1: Vec<u64> = history1.iter().collect();
-        assert_eq!(blocks1, vec![1, 2, 4, 5], "addr1.slot1 history mismatch after append");
+        assert_eq!(
+            blocks1,
+            vec![1001, 1002, 1004, 1005],
+            "addr1.slot1 history mismatch after append"
+        );
 
-        // addr1.slot2 should still have history at blocks 2, 3 (unchanged)
+        // addr1.slot2 should still have history at blocks 1002, 1003 (unchanged)
         let history2 = reader
             .blocks_changed_storage(&addr1, &slot2)
             .unwrap()
             .expect("addr1.slot2 should have history");
         let blocks2: Vec<u64> = history2.iter().collect();
-        assert_eq!(blocks2, vec![2, 3], "addr1.slot2 history should be unchanged");
+        assert_eq!(blocks2, vec![1002, 1003], "addr1.slot2 history should be unchanged");
     }
 }
 

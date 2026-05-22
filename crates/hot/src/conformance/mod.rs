@@ -40,4 +40,10 @@ where
     test_cursor_iter_from(hot_kv);
     test_cursor_dual_iter(hot_kv);
     test_cursor_dual_iter_from(hot_kv);
+    test_update_history_indices_account(hot_kv);
+    test_update_history_indices_storage(hot_kv);
+    test_history_append_removes_old_entries(hot_kv);
+    test_delete_dual_account_history(hot_kv);
+    test_delete_dual_storage_history(hot_kv);
+    test_delete_and_rewrite_dual(hot_kv);
 }
