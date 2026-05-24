@@ -187,7 +187,7 @@ impl IntegerList {
     ///
     /// Allocation: zero on the no-split fast path beyond roaring container
     /// growth. One `IntegerList` allocation when a split occurs.
-    pub fn merge_and_split(
+    pub fn overflowing_extend(
         mut self,
         additions: impl IntoIterator<Item = u64>,
         max_bytes: usize,
@@ -241,24 +241,24 @@ mod tests {
     }
 
     #[test]
-    fn merge_and_split_no_split_when_under_budget() {
+    fn overflowing_extend_no_split_when_under_budget() {
         let existing = IntegerList::new([1u64, 2, 3]).unwrap();
         // 1500 B is generous for 5 dense values
-        let (first, second) = existing.merge_and_split([4u64, 5], 1500);
+        let (first, second) = existing.overflowing_extend([4u64, 5], 1500);
         assert_eq!(first.iter().collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
         assert!(second.is_none());
     }
 
     #[test]
-    fn merge_and_split_no_additions_returns_existing() {
+    fn overflowing_extend_no_additions_returns_existing() {
         let existing = IntegerList::new([10u64, 20]).unwrap();
-        let (first, second) = existing.merge_and_split(std::iter::empty(), 1500);
+        let (first, second) = existing.overflowing_extend(std::iter::empty(), 1500);
         assert_eq!(first.iter().collect::<Vec<_>>(), vec![10, 20]);
         assert!(second.is_none());
     }
 
     #[test]
-    fn merge_and_split_splits_when_over_budget() {
+    fn overflowing_extend_splits_when_over_budget() {
         // Provoke a split with a deliberately small budget. Use 100 contiguous
         // values starting at 0. Roaring-encoded that's a single run container
         // around 14 B, so we need a tiny budget to force a split. Set budget
@@ -272,7 +272,7 @@ mod tests {
         assert!(combined > existing_size, "test setup broken: combined didn't grow");
         let budget = existing_size + (combined - existing_size) / 2;
 
-        let (first, second) = existing.merge_and_split(50u64..100, budget);
+        let (first, second) = existing.overflowing_extend(50u64..100, budget);
         let second = second.expect("split should have occurred");
 
         // first ∪ second == 0..100, with second's min > first's max.
@@ -287,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_and_split_split_preserves_strict_ordering() {
+    fn overflowing_extend_split_preserves_strict_ordering() {
         // Sparse blocks (one per distinct 16-bit container) make serialized
         // size grow proportionally to count, so we can budget-tune to force
         // a split while keeping additions within budget.
@@ -304,7 +304,7 @@ mod tests {
         let budget = existing_size.max(additions_size) + 16;
         assert!(combined_size > budget, "test setup broken: combined fits in budget");
 
-        let (first, second) = existing.merge_and_split(addition_blocks, budget);
+        let (first, second) = existing.overflowing_extend(addition_blocks, budget);
         let second = second.expect("split should have occurred");
 
         let first_max = first.max().unwrap();
@@ -335,10 +335,10 @@ mod tests {
         assert!(size <= 1500, "100 sparse blocks encoded as {size} B, expected <= 1500");
     }
 
-    /// merge_and_split with the realistic budget produces shards each within
+    /// overflowing_extend with the realistic budget produces shards each within
     /// the budget, even for the worst-case sparse input.
     #[test]
-    fn merge_and_split_at_realistic_budget_respects_per_shard_size() {
+    fn overflowing_extend_at_realistic_budget_respects_per_shard_size() {
         // Build 200 sparse blocks (200 distinct containers). Splitter should
         // split this into ~2 shards each under 1500 B.
         let blocks: Vec<u64> = (0..200u64).map(|i| i * 0x1_0000).collect();
@@ -349,7 +349,7 @@ mod tests {
         assert!(existing.serialized_size() <= 1500);
         assert!(IntegerList::new(additions.iter().copied()).unwrap().serialized_size() <= 1500);
 
-        let (first, second) = existing.merge_and_split(additions, 1500);
+        let (first, second) = existing.overflowing_extend(additions, 1500);
         assert!(first.serialized_size() <= 1500);
         if let Some(second) = &second {
             assert!(second.serialized_size() <= 1500);

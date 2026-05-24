@@ -21,7 +21,7 @@ use signet_storage_types::{BlockNumberList, ShardedKey};
 /// the second 100 blocks encode to another ~1400 B. Appending all 200 in
 /// two writes of 100 triggers the split: merged size ~2800 B > 1500 B.
 ///
-/// The two writes mirror the `merge_and_split_at_realistic_budget_respects_per_shard_size`
+/// The two writes mirror the `overflowing_extend_at_realistic_budget_respects_per_shard_size`
 /// unit test in `signet-storage-types`.
 fn sparse_blocks() -> Vec<u64> {
     (0..200u64).map(|i| i * 0x1_0000).collect()

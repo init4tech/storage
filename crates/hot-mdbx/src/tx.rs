@@ -417,7 +417,7 @@ macro_rules! impl_history_write {
                 }
 
                 let (first, second) =
-                    existing_tail.merge_and_split(new_blocks.iter(), MAX_SHARD_BYTES);
+                    existing_tail.overflowing_extend(new_blocks.iter(), MAX_SHARD_BYTES);
 
                 match second {
                     None => self
@@ -454,7 +454,7 @@ macro_rules! impl_history_write {
                 }
 
                 let (first, second) =
-                    existing_tail.merge_and_split(new_blocks.iter(), MAX_SHARD_BYTES);
+                    existing_tail.overflowing_extend(new_blocks.iter(), MAX_SHARD_BYTES);
 
                 match second {
                     None => self

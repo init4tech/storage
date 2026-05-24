@@ -3,7 +3,7 @@
 //! [`HistoryRead`] is blanket-impled on [`HotKvRead`] and describes
 //! logical history queries. [`HistoryWrite`] is required per-backend; each
 //! backend chooses its splitting policy (MDBX uses
-//! [`signet_storage_types::IntegerList::merge_and_split`] — see below; MemKv
+//! [`signet_storage_types::IntegerList::overflowing_extend`] — see below; MemKv
 //! writes a single dup entry per addr).
 
 use crate::{
