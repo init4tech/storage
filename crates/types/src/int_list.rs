@@ -177,13 +177,12 @@ impl IntegerList {
     /// list exceeds `max_bytes` after roaring encoding.
     ///
     /// Returns `(first, second)`:
-    /// - `first`: the lower-block-number portion (always returned).
+    /// - `first`: the lower-value portion (always returned).
     /// - `second`: `Some(tail)` iff a split occurred; contains the higher
-    ///   block numbers. The caller is responsible for choosing subkeys
-    ///   for the two shards (e.g., `first.max()` and `u64::MAX`).
+    ///   values.
     ///
-    /// Every block yielded by `additions` must be strictly greater than
-    /// every block already in `self`. If not, the underlying
+    /// Every value yielded by `additions` must be strictly greater than
+    /// every value already in `self`. If not, the underlying
     /// [`IntegerList::push`] will panic.
     ///
     /// Allocation: zero on the no-split fast path beyond roaring container
