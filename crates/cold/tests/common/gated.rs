@@ -3,6 +3,7 @@
 //! Use for tests that need to saturate the read pool deterministically.
 
 use alloy::primitives::BlockNumber;
+use parking_lot::Mutex;
 use signet_cold::{
     BlockData, ColdReceipt, ColdResult, ColdStorageBackend, ColdStorageRead, ColdStorageWrite,
     Confirmed, Filter, HeaderSpecifier, ReceiptSpecifier, RpcLog, SignetEventsSpecifier,
@@ -12,16 +13,40 @@ use signet_storage_types::{DbSignetEvent, DbZenithHeader, RecoveredTx, SealedHea
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 
+/// Identifies a backend method that has been observed via
+/// [`GatedBackend::events`].
+///
+/// Each variant corresponds to one method on the underlying backend
+/// traits. New variants can be added freely as more tests start
+/// inspecting the event log; existing tests pattern-match on the
+/// variants they care about so unrelated additions stay non-breaking.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub enum BackendOp {
+    GetLatestBlock,
+    TruncateAbove,
+}
+
 /// Backend that parks all reads on a semaphore gate.
 ///
 /// Writes and stream production are ungated so tests can distinguish
 /// read-pool saturation from write/drain blocking.
+///
+/// Records each instrumented method into an internal collection.
+/// Reads are logged after passing the read gate (before the inner
+/// call); writes are logged after the inner call returns. Tests use
+/// this log to verify ordering guarantees that cannot be observed
+/// reliably from caller-side wrappers - in particular, the
+/// drain-barrier fairness test in `concurrency.rs`. Only methods that
+/// a current test relies on are instrumented; extend [`BackendOp`] and
+/// the relevant impl when adding tests that need more.
 #[derive(Clone)]
 pub struct GatedBackend {
     inner: MemColdBackend,
     gate: Arc<Semaphore>,
     stream_gate: Arc<Semaphore>,
     read_timeout: Option<Duration>,
+    events: Arc<Mutex<Vec<BackendOp>>>,
 }
 
 impl GatedBackend {
@@ -33,6 +58,7 @@ impl GatedBackend {
             // Streams are ungated by default: effectively unbounded permits.
             stream_gate: Arc::new(Semaphore::new(usize::MAX >> 4)),
             read_timeout: None,
+            events: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -71,6 +97,13 @@ impl GatedBackend {
     #[allow(dead_code)]
     pub fn release_streams(&self, n: usize) {
         self.stream_gate.add_permits(n);
+    }
+
+    /// Snapshot of operations recorded against the inner backend, in
+    /// the order they entered the backend.
+    #[allow(dead_code)]
+    pub fn events(&self) -> Vec<BackendOp> {
+        self.events.lock().clone()
     }
 }
 
@@ -148,6 +181,7 @@ impl ColdStorageRead for GatedBackend {
 
     async fn get_latest_block(&self) -> ColdResult<Option<BlockNumber>> {
         let _p = self.gate.clone().acquire_owned().await.ok();
+        self.events.lock().push(BackendOp::GetLatestBlock);
         self.inner.get_latest_block().await
     }
 
@@ -174,7 +208,9 @@ impl ColdStorageWrite for GatedBackend {
     }
 
     async fn truncate_above(&self, block: BlockNumber) -> ColdResult<()> {
-        self.inner.truncate_above(block).await
+        let result = self.inner.truncate_above(block).await;
+        self.events.lock().push(BackendOp::TruncateAbove);
+        result
     }
 }
 

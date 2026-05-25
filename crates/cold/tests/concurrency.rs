@@ -7,13 +7,12 @@
 mod common;
 
 use alloy::rpc::types::Filter;
-use common::gated::GatedBackend;
+use common::gated::{BackendOp, GatedBackend};
 use signet_cold::{
     ColdStorage, ColdStorageError, HeaderSpecifier, conformance::make_test_block,
     mem::MemColdBackend,
 };
-use std::{sync::Arc, time::Duration};
-use tokio::sync::Notify;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// 1. 256 concurrent reads against an ungated backend must all complete
@@ -74,62 +73,88 @@ async fn write_after_saturating_reads_makes_progress() {
 
 /// 3. Fairness: a writer acquired after saturating readers must complete
 ///    before readers queued *after* the writer.
+///
+/// The invariant is observed inside the backend, not via caller-side
+/// completion signals. `GetLatestBlock` is recorded after passing the
+/// read gate; `TruncateAbove` is recorded after the inner write returns,
+/// while the writer still holds the drain barrier. So when `TruncateAbove`
+/// appears in the log, the write has completed and no later reader can
+/// yet be running. The recording is therefore strictly ordered by the
+/// semaphore, without racing the post-drain wake-up window where reader
+/// and writer wrappers would otherwise compete to signal downstream.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fairness_write_serves_before_later_readers() {
     let backend = GatedBackend::closed();
     let cs = ColdStorage::new(backend.clone(), CancellationToken::new());
 
     // Saturate all 64 read permits behind the backend gate.
+    let mut saturating = Vec::with_capacity(64);
     for _ in 0..64 {
         let cs2 = cs.clone();
-        tokio::spawn(async move {
-            let _ = cs2.get_latest_block().await;
-        });
+        saturating.push(tokio::spawn(async move { cs2.get_latest_block().await }));
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Queue a writer. It holds `write_sem`, then blocks on the drain
     // barrier waiting for the 64 in-flight readers.
-    let writer_done = Arc::new(Notify::new());
-    let wd = writer_done.clone();
     let cs_w = cs.clone();
-    tokio::spawn(async move {
-        let _ = cs_w.truncate_above(0).await;
-        wd.notify_one();
-    });
+    let writer = tokio::spawn(async move { cs_w.truncate_above(0).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Queue 64 "later" readers. They park on `read_sem::acquire_owned`
     // because the writer's drain has claimed every permit.
-    let later_done = Arc::new(Notify::new());
-    let mut later_count = 0usize;
+    let mut later = Vec::with_capacity(64);
     for _ in 0..64 {
         let cs2 = cs.clone();
-        let ld = later_done.clone();
-        tokio::spawn(async move {
-            let _ = cs2.get_latest_block().await;
-            ld.notify_one();
-        });
-        later_count += 1;
+        later.push(tokio::spawn(async move { cs2.get_latest_block().await }));
     }
-    assert_eq!(later_count, 64);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Release the backend gate so the 64 saturating readers complete,
     // which lets the drain barrier acquire and the writer run.
     backend.release(usize::MAX >> 4);
 
-    // The writer MUST resolve before any later reader.
-    tokio::select! {
-        biased;
-        () = writer_done.notified() => {}
-        () = later_done.notified() => panic!("later reader resolved before writer"),
+    // Drive everything to completion before inspecting the log.
+    for h in saturating {
+        tokio::time::timeout(Duration::from_secs(5), h)
+            .await
+            .expect("saturating reader hung")
+            .expect("saturating reader panicked")
+            .expect("saturating reader failed");
+    }
+    tokio::time::timeout(Duration::from_secs(5), writer)
+        .await
+        .expect("writer hung")
+        .expect("writer panicked")
+        .expect("writer failed");
+    for h in later {
+        tokio::time::timeout(Duration::from_secs(5), h)
+            .await
+            .expect("later reader hung")
+            .expect("later reader panicked")
+            .expect("later reader failed");
     }
 
-    // And the later readers still complete shortly after.
-    tokio::time::timeout(Duration::from_secs(5), later_done.notified())
-        .await
-        .expect("later readers should complete after writer");
+    // Expect 64 saturating reads, then the write, then 64 later reads.
+    let events = backend.events();
+    assert_eq!(
+        events.len(),
+        129,
+        "expected 64 saturating reads + 1 write + 64 later reads, got {events:?}",
+    );
+    assert!(
+        events[..64].iter().all(|op| *op == BackendOp::GetLatestBlock),
+        "first 64 events must be saturating reads: {events:?}",
+    );
+    assert_eq!(
+        events[64],
+        BackendOp::TruncateAbove,
+        "write must follow the saturating reads: {events:?}",
+    );
+    assert!(
+        events[65..].iter().all(|op| *op == BackendOp::GetLatestBlock),
+        "last 64 events must be later reads: {events:?}",
+    );
 }
 
 /// 4. Cancel during reader backpressure: queued acquisitions fail fast.
