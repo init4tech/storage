@@ -181,12 +181,21 @@ impl IntegerList {
     /// - `second`: `Some(tail)` iff a split occurred; contains the higher
     ///   values.
     ///
-    /// Every value yielded by `additions` must be strictly greater than
-    /// every value already in `self`. If not, the underlying
-    /// [`IntegerList::push`] will panic.
+    /// # Preconditions
     ///
-    /// Allocation: zero on the no-split fast path beyond roaring container
-    /// growth. One `IntegerList` allocation when a split occurs.
+    /// - Every value yielded by `additions` is strictly greater than every
+    ///   value already in `self`. Violating this panics inside
+    ///   [`IntegerList::push`].
+    /// - The encoded size of `additions` (treated as an `IntegerList`) is
+    ///   `<= max_bytes`. The implementation produces at most one tail, so
+    ///   a single oversized `additions` cannot be split further. Violation
+    ///   panics after the merge with an explicit message; callers must
+    ///   bound `additions` themselves.
+    ///
+    /// # Allocation
+    ///
+    /// Zero on the no-split fast path beyond roaring container growth. One
+    /// `IntegerList` allocation when a split occurs.
     pub fn overflowing_extend(
         mut self,
         additions: impl IntoIterator<Item = u64>,
@@ -207,6 +216,15 @@ impl IntegerList {
                 t.push(block).expect("first push always succeeds");
                 tail = Some(t);
             }
+        }
+
+        if let Some(t) = tail.as_ref() {
+            let tail_size = t.serialized_size();
+            assert!(
+                tail_size <= max_bytes,
+                "overflowing_extend: tail ({tail_size} B) exceeds max_bytes ({max_bytes} B); \
+                 additions must encode to <= max_bytes — callers must chunk before calling",
+            );
         }
 
         (self, tail)
@@ -361,5 +379,17 @@ mod tests {
             roundtrip.extend(s.iter());
         }
         assert_eq!(roundtrip, blocks);
+    }
+
+    /// Oversized `additions` cannot be split further (the function produces at
+    /// most one tail), so the precondition violation must panic loudly.
+    #[test]
+    #[should_panic(expected = "tail")]
+    fn overflowing_extend_panics_when_additions_alone_exceed_budget() {
+        // 400 sparse blocks (400 distinct 16-bit containers) encode to well
+        // over 1500 B and cannot fit in a single tail.
+        let additions: Vec<u64> = (0..400u64).map(|i| i * 0x1_0000).collect();
+        assert!(IntegerList::new(additions.iter().copied()).unwrap().serialized_size() > 1500);
+        let _ = IntegerList::empty().overflowing_extend(additions, 1500);
     }
 }
