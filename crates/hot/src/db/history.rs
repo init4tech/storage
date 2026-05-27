@@ -3,8 +3,8 @@
 //! [`HistoryRead`] is blanket-impled on [`HotKvRead`] and describes
 //! logical history queries. [`HistoryWrite`] is required per-backend; each
 //! backend chooses its splitting policy (MDBX uses
-//! [`signet_storage_types::IntegerList::overflowing_extend`] — see below; MemKv
-//! writes a single dup entry per addr).
+//! [`signet_storage_types::IntegerList::overflowing_extend`] with a per-shard
+//! byte budget; MemKv stores a single dup entry per addr).
 
 use crate::{
     db::{HistoryError, HotDbRead, UnsafeDbWrite},
@@ -285,8 +285,15 @@ impl<T> HistoryRead for T where T: HotKvRead {}
 pub trait HistoryWrite: UnsafeDbWrite + HistoryRead {
     /// Merge `new_blocks` into `addr`'s account history.
     ///
-    /// Preconditions: `new_blocks` is sorted ascending and every entry is
-    /// strictly greater than any block already stored for `addr`.
+    /// # Preconditions
+    ///
+    /// - `new_blocks` is sorted ascending and every entry is strictly
+    ///   greater than any block already stored for `addr`.
+    /// - `new_blocks` fits within the backend's per-shard encoded-size
+    ///   budget. Backends with a budget (MDBX, bounded by DUPSORT) panic
+    ///   if violated. Callers driving large index updates must bound the
+    ///   range passed to [`Self::update_history_indices`] so per-address
+    ///   footprint stays under the budget.
     fn append_account_history(
         &self,
         addr: &Address,
@@ -294,6 +301,9 @@ pub trait HistoryWrite: UnsafeDbWrite + HistoryRead {
     ) -> Result<(), HistoryError<Self::Error>>;
 
     /// Merge `new_blocks` into `(addr, slot)`'s storage history.
+    ///
+    /// Shares the same preconditions as [`Self::append_account_history`],
+    /// scoped per `(addr, slot)`.
     fn append_storage_history(
         &self,
         addr: &Address,
@@ -322,6 +332,16 @@ pub trait HistoryWrite: UnsafeDbWrite + HistoryRead {
     /// Build per-address block lists from changesets in `range` and call
     /// [`Self::append_account_history`] / [`Self::append_storage_history`] per
     /// entry.
+    ///
+    /// # Preconditions
+    ///
+    /// `range` is small enough that no single address (or `(addr, slot)`)
+    /// produces a [`BlockNumberList`] exceeding the backend's per-shard
+    /// budget. The threshold is backend-defined; for MDBX, the worst-case
+    /// safe range depends on touch density (~650 dense values or ~100
+    /// distinct 16-bit roaring containers per address). Steady-state
+    /// streaming sync is well inside the budget; bulk backfills must
+    /// chunk into bounded ranges.
     fn update_history_indices(
         &self,
         range: RangeInclusive<BlockNumber>,

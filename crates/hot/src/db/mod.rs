@@ -3,7 +3,7 @@
 mod errors;
 pub use errors::{HistoryError, HistoryResult};
 
-pub mod history;
+pub(crate) mod history;
 pub use history::{HistoryRead, HistoryWrite};
 
 mod inconsistent;

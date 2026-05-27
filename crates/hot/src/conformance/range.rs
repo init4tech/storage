@@ -248,7 +248,7 @@ pub fn test_clear_range_dual<T: HotKv>(hot_kv: &T) {
     {
         let writer = hot_kv.writer().unwrap();
 
-        // addr1: touched in blocks 1-6 (historically split across two shards)
+        // addr1: touched in blocks 1-6
         let history1 = BlockNumberList::new([1, 2, 3, 4, 5, 6]).unwrap();
         writer.append_account_history(&addr1, &history1).unwrap();
 
@@ -260,7 +260,7 @@ pub fn test_clear_range_dual<T: HotKv>(hot_kv: &T) {
         let history3 = BlockNumberList::new([30, 40]).unwrap();
         writer.append_account_history(&addr3, &history3).unwrap();
 
-        // addr4: touched in blocks 50-80 (historically split across two shards)
+        // addr4: touched in blocks 50-80
         let history4 = BlockNumberList::new([50, 60, 70, 80]).unwrap();
         writer.append_account_history(&addr4, &history4).unwrap();
 
@@ -329,11 +329,10 @@ pub fn test_take_range_dual<T: HotKv>(hot_kv: &T) {
     let addr3 = address!("0xc000000000000000000000000000000000000003");
 
     // Phase 1: Write account history entries.
-    // addr1 was historically two shards; collapse into the logical union.
     {
         let writer = hot_kv.writer().unwrap();
 
-        // addr1: touched in blocks 1-4 (historically split across two shards)
+        // addr1: touched in blocks 1-4
         let history1 = BlockNumberList::new([1, 2, 3, 4]).unwrap();
         writer.append_account_history(&addr1, &history1).unwrap();
 

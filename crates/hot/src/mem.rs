@@ -1443,7 +1443,7 @@ impl HotKvWrite for MemKvRwTx {
     }
 }
 
-impl crate::db::history::HistoryWrite for MemKvRwTx {
+impl crate::db::HistoryWrite for MemKvRwTx {
     fn append_account_history(
         &self,
         addr: &Address,

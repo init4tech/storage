@@ -2005,7 +2005,7 @@ mod tests {
         }
     }
 
-    /// Smoke test: append + truncate via the new `HistoryWrite` trait.
+    /// Smoke test: append + truncate via the `HistoryWrite` trait.
     #[test]
     #[serial]
     fn mdbx_history_write_round_trips() {
