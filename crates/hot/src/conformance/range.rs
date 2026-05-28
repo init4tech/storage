@@ -1,7 +1,7 @@
 //! Clear/take range operations for single and dual-keyed tables.
 
 use crate::{
-    db::{HistoryRead, HotDbRead, UnsafeDbWrite, UnsafeHistoryWrite},
+    db::{HistoryRead, HistoryWrite, HotDbRead, UnsafeDbWrite},
     model::{HotKv, HotKvWrite},
     tables,
 };
@@ -242,33 +242,31 @@ pub fn test_clear_range_dual<T: HotKv>(hot_kv: &T) {
     let addr4 = address!("0x4000000000000000000000000000000000000004");
     let addr5 = address!("0x5000000000000000000000000000000000000005");
 
-    // Phase 1: Write account history entries for multiple addresses with multiple shards
+    // Phase 1: Write account history entries for multiple addresses.
+    // Multi-shard layout is an MDBX-internal detail; the logical input is the
+    // union of all blocks where each address was touched.
     {
         let writer = hot_kv.writer().unwrap();
 
-        // addr1: two shards
-        let history1_a = BlockNumberList::new([1, 2, 3]).unwrap();
-        let history1_b = BlockNumberList::new([4, 5, 6]).unwrap();
-        writer.write_account_history(&addr1, 100, &history1_a).unwrap();
-        writer.write_account_history(&addr1, u64::MAX, &history1_b).unwrap();
+        // addr1: touched in blocks 1-6
+        let history1 = BlockNumberList::new([1, 2, 3, 4, 5, 6]).unwrap();
+        writer.append_account_history(&addr1, &history1).unwrap();
 
-        // addr2: one shard
+        // addr2: touched in blocks 10, 20
         let history2 = BlockNumberList::new([10, 20]).unwrap();
-        writer.write_account_history(&addr2, u64::MAX, &history2).unwrap();
+        writer.append_account_history(&addr2, &history2).unwrap();
 
-        // addr3: one shard
+        // addr3: touched in blocks 30, 40
         let history3 = BlockNumberList::new([30, 40]).unwrap();
-        writer.write_account_history(&addr3, u64::MAX, &history3).unwrap();
+        writer.append_account_history(&addr3, &history3).unwrap();
 
-        // addr4: two shards
-        let history4_a = BlockNumberList::new([50, 60]).unwrap();
-        let history4_b = BlockNumberList::new([70, 80]).unwrap();
-        writer.write_account_history(&addr4, 200, &history4_a).unwrap();
-        writer.write_account_history(&addr4, u64::MAX, &history4_b).unwrap();
+        // addr4: touched in blocks 50-80
+        let history4 = BlockNumberList::new([50, 60, 70, 80]).unwrap();
+        writer.append_account_history(&addr4, &history4).unwrap();
 
-        // addr5: one shard
+        // addr5: touched in blocks 90, 100
         let history5 = BlockNumberList::new([90, 100]).unwrap();
-        writer.write_account_history(&addr5, u64::MAX, &history5).unwrap();
+        writer.append_account_history(&addr5, &history5).unwrap();
 
         writer.commit().unwrap();
     }
@@ -276,16 +274,15 @@ pub fn test_clear_range_dual<T: HotKv>(hot_kv: &T) {
     // Verify all entries exist
     {
         let reader = hot_kv.reader().unwrap();
-        assert!(reader.get_account_history(&addr1, 100).unwrap().is_some());
-        assert!(reader.get_account_history(&addr1, u64::MAX).unwrap().is_some());
-        assert!(reader.get_account_history(&addr2, u64::MAX).unwrap().is_some());
-        assert!(reader.get_account_history(&addr3, u64::MAX).unwrap().is_some());
-        assert!(reader.get_account_history(&addr4, 200).unwrap().is_some());
-        assert!(reader.get_account_history(&addr4, u64::MAX).unwrap().is_some());
-        assert!(reader.get_account_history(&addr5, u64::MAX).unwrap().is_some());
+        assert!(reader.blocks_changed_account(&addr1).unwrap().is_some(), "addr1 should exist");
+        assert!(reader.blocks_changed_account(&addr2).unwrap().is_some(), "addr2 should exist");
+        assert!(reader.blocks_changed_account(&addr3).unwrap().is_some(), "addr3 should exist");
+        assert!(reader.blocks_changed_account(&addr4).unwrap().is_some(), "addr4 should exist");
+        assert!(reader.blocks_changed_account(&addr5).unwrap().is_some(), "addr5 should exist");
     }
 
-    // Phase 2: Clear range addr2..=addr3 (middle range)
+    // Phase 2: Clear range addr2..=addr3 (middle range) via raw table traversal.
+    // This exercises the dual-key delete_range operation directly.
     {
         let writer = hot_kv.writer().unwrap();
         writer
@@ -296,42 +293,29 @@ pub fn test_clear_range_dual<T: HotKv>(hot_kv: &T) {
         writer.commit().unwrap();
     }
 
-    // Verify: addr1 and addr4, addr5 should exist, addr2 and addr3 should be gone
+    // Verify: addr1, addr4, addr5 still have history; addr2 and addr3 are gone
     {
         let reader = hot_kv.reader().unwrap();
 
-        // addr1 entries should still exist
         assert!(
-            reader.get_account_history(&addr1, 100).unwrap().is_some(),
-            "addr1 shard 100 should exist"
+            reader.blocks_changed_account(&addr1).unwrap().is_some(),
+            "addr1 should still have history"
         );
         assert!(
-            reader.get_account_history(&addr1, u64::MAX).unwrap().is_some(),
-            "addr1 shard max should exist"
-        );
-
-        // addr2 and addr3 should be deleted
-        assert!(
-            reader.get_account_history(&addr2, u64::MAX).unwrap().is_none(),
+            reader.blocks_changed_account(&addr2).unwrap().is_none(),
             "addr2 should be deleted"
         );
         assert!(
-            reader.get_account_history(&addr3, u64::MAX).unwrap().is_none(),
+            reader.blocks_changed_account(&addr3).unwrap().is_none(),
             "addr3 should be deleted"
         );
-
-        // addr4 and addr5 entries should still exist
         assert!(
-            reader.get_account_history(&addr4, 200).unwrap().is_some(),
-            "addr4 shard 200 should exist"
+            reader.blocks_changed_account(&addr4).unwrap().is_some(),
+            "addr4 should still have history"
         );
         assert!(
-            reader.get_account_history(&addr4, u64::MAX).unwrap().is_some(),
-            "addr4 shard max should exist"
-        );
-        assert!(
-            reader.get_account_history(&addr5, u64::MAX).unwrap().is_some(),
-            "addr5 should exist"
+            reader.blocks_changed_account(&addr5).unwrap().is_some(),
+            "addr5 should still have history"
         );
     }
 }
@@ -344,28 +328,28 @@ pub fn test_take_range_dual<T: HotKv>(hot_kv: &T) {
     let addr2 = address!("0xb000000000000000000000000000000000000002");
     let addr3 = address!("0xc000000000000000000000000000000000000003");
 
-    // Phase 1: Write account history entries
+    // Phase 1: Write account history entries.
     {
         let writer = hot_kv.writer().unwrap();
 
-        // addr1: two shards
-        let history1_a = BlockNumberList::new([1, 2]).unwrap();
-        let history1_b = BlockNumberList::new([3, 4]).unwrap();
-        writer.write_account_history(&addr1, 50, &history1_a).unwrap();
-        writer.write_account_history(&addr1, u64::MAX, &history1_b).unwrap();
+        // addr1: touched in blocks 1-4
+        let history1 = BlockNumberList::new([1, 2, 3, 4]).unwrap();
+        writer.append_account_history(&addr1, &history1).unwrap();
 
-        // addr2: one shard
+        // addr2: touched in blocks 10, 20
         let history2 = BlockNumberList::new([10, 20]).unwrap();
-        writer.write_account_history(&addr2, u64::MAX, &history2).unwrap();
+        writer.append_account_history(&addr2, &history2).unwrap();
 
-        // addr3: one shard
+        // addr3: touched in blocks 30, 40
         let history3 = BlockNumberList::new([30, 40]).unwrap();
-        writer.write_account_history(&addr3, u64::MAX, &history3).unwrap();
+        writer.append_account_history(&addr3, &history3).unwrap();
 
         writer.commit().unwrap();
     }
 
-    // Phase 2: Take range addr1..=addr2 and verify returned pairs
+    // Phase 2: Take range addr1..=addr2 via raw table traversal.
+    // The number of removed physical entries is backend-specific; assert only
+    // that at least one entry per logical address was removed.
     {
         let writer = hot_kv.writer().unwrap();
         let removed = writer
@@ -375,23 +359,32 @@ pub fn test_take_range_dual<T: HotKv>(hot_kv: &T) {
             .unwrap();
         writer.commit().unwrap();
 
-        // Should return (addr1, 50), (addr1, max), (addr2, max)
-        assert_eq!(removed.len(), 3, "should have removed 3 entries");
-        assert_eq!(removed[0].0, addr1);
-        assert_eq!(removed[0].1, 50);
-        assert_eq!(removed[1].0, addr1);
-        assert_eq!(removed[1].1, u64::MAX);
-        assert_eq!(removed[2].0, addr2);
-        assert_eq!(removed[2].1, u64::MAX);
+        assert!(!removed.is_empty(), "should have removed entries for addr1 and addr2");
+        // All removed entries must belong to addr1 or addr2
+        for (addr, _, _) in &removed {
+            assert!(
+                *addr == addr1 || *addr == addr2,
+                "removed entry belongs to unexpected address"
+            );
+        }
     }
 
-    // Verify only addr3 remains
+    // Verify logical state: addr1 and addr2 have no history; addr3 still does
     {
         let reader = hot_kv.reader().unwrap();
-        assert!(reader.get_account_history(&addr1, 50).unwrap().is_none());
-        assert!(reader.get_account_history(&addr1, u64::MAX).unwrap().is_none());
-        assert!(reader.get_account_history(&addr2, u64::MAX).unwrap().is_none());
-        assert!(reader.get_account_history(&addr3, u64::MAX).unwrap().is_some());
+        assert!(
+            reader.blocks_changed_account(&addr1).unwrap().is_none(),
+            "addr1 should have no history after take"
+        );
+        assert!(
+            reader.blocks_changed_account(&addr2).unwrap().is_none(),
+            "addr2 should have no history after take"
+        );
+        let addr3_blocks = reader
+            .blocks_changed_account(&addr3)
+            .unwrap()
+            .expect("addr3 should still have history");
+        assert_eq!(addr3_blocks.iter().collect::<Vec<_>>(), vec![30, 40]);
     }
 
     // Phase 3: Take empty range

@@ -1,7 +1,7 @@
 //! Basic CRUD roundtrip tests for hot storage.
 
 use crate::{
-    db::{HistoryRead, HotDbRead, UnsafeDbWrite, UnsafeHistoryWrite},
+    db::{HistoryRead, HistoryWrite, HotDbRead, UnsafeDbWrite},
     model::{HotKv, HotKvRead},
     tables,
 };
@@ -155,47 +155,45 @@ pub fn test_bytecode_roundtrip<T: HotKv>(hot_kv: &T) {
     }
 }
 
-/// Test account history via HotHistoryWrite/HotHistoryRead
+/// Test account history via HistoryWrite/HistoryRead
 pub fn test_account_history<T: HotKv>(hot_kv: &T) {
     let addr = address!("0x1111111111111111111111111111111111111111");
     let touched_blocks = BlockNumberList::new([10, 20, 30]).unwrap();
-    let latest_height = 100u64;
 
     // Write account history
     {
         let writer = hot_kv.writer().unwrap();
-        writer.write_account_history(&addr, latest_height, &touched_blocks).unwrap();
+        writer.append_account_history(&addr, &touched_blocks).unwrap();
         writer.commit().unwrap();
     }
 
     // Read account history
     {
         let reader = hot_kv.reader().unwrap();
-        let read_history = reader.get_account_history(&addr, latest_height).unwrap();
+        let read_history = reader.blocks_changed_account(&addr).unwrap();
         assert!(read_history.is_some());
         let history = read_history.unwrap();
         assert_eq!(history.iter().collect::<Vec<_>>(), vec![10, 20, 30]);
     }
 }
 
-/// Test storage history via HotHistoryWrite/HotHistoryRead
+/// Test storage history via HistoryWrite/HistoryRead
 pub fn test_storage_history<T: HotKv>(hot_kv: &T) {
     let addr = address!("0x2222222222222222222222222222222222222222");
     let slot = U256::from(42);
     let touched_blocks = BlockNumberList::new([5, 15, 25]).unwrap();
-    let highest_block = 50u64;
 
     // Write storage history
     {
         let writer = hot_kv.writer().unwrap();
-        writer.write_storage_history(&addr, slot, highest_block, &touched_blocks).unwrap();
+        writer.append_storage_history(&addr, &slot, &touched_blocks).unwrap();
         writer.commit().unwrap();
     }
 
     // Read storage history
     {
         let reader = hot_kv.reader().unwrap();
-        let read_history = reader.get_storage_history(&addr, slot, highest_block).unwrap();
+        let read_history = reader.blocks_changed_storage(&addr, &slot).unwrap();
         assert!(read_history.is_some());
         let history = read_history.unwrap();
         assert_eq!(history.iter().collect::<Vec<_>>(), vec![5, 15, 25]);
@@ -278,10 +276,10 @@ pub fn test_missing_reads<T: HotKv>(hot_kv: &T) {
     assert!(reader.header_by_hash(&missing_hash).unwrap().is_none());
 
     // Missing account history
-    assert!(reader.get_account_history(&missing_addr, 1000).unwrap().is_none());
+    assert!(reader.blocks_changed_account(&missing_addr).unwrap().is_none());
 
     // Missing storage history
-    assert!(reader.get_storage_history(&missing_addr, missing_slot, 1000).unwrap().is_none());
+    assert!(reader.blocks_changed_storage(&missing_addr, &missing_slot).unwrap().is_none());
 
     // Missing account change
     assert!(reader.get_account_change(999999, &missing_addr).unwrap().is_none());

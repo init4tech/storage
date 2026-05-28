@@ -146,6 +146,13 @@ impl IntegerList {
         self.0.max()
     }
 
+    /// Remove and return the largest value, or `None` if the list is empty.
+    pub fn pop_max(&mut self) -> Option<u64> {
+        let m = self.0.max()?;
+        self.0.remove(m);
+        Some(m)
+    }
+
     /// Returns the number of integers that are `<= value`.
     pub fn rank(&self, value: u64) -> u64 {
         self.0.rank(value)
@@ -164,5 +171,386 @@ impl IntegerList {
     /// Serializes the list into the given writer.
     pub fn serialize_into<W: std::io::Write>(&self, writer: W) -> std::io::Result<()> {
         self.0.serialize_into(writer)
+    }
+
+    /// Append `additions` to `self`, splitting off a tail iff the merged
+    /// list exceeds `max_bytes` after roaring encoding.
+    ///
+    /// Returns `(first, second)`:
+    /// - `first`: the lower-value portion (always returned).
+    /// - `second`: `Some(tail)` iff a split occurred; contains the higher
+    ///   values.
+    ///
+    /// # Preconditions
+    ///
+    /// - Every value yielded by `additions` is strictly greater than every
+    ///   value already in `self`. Violating this panics inside
+    ///   [`IntegerList::push`].
+    /// - The encoded size of `additions` (treated as an `IntegerList`) is
+    ///   `<= max_bytes`. The implementation produces at most one tail, so
+    ///   a single oversized `additions` cannot be split further. Violation
+    ///   panics after the merge with an explicit message; callers must
+    ///   bound `additions` themselves.
+    ///
+    /// # Allocation
+    ///
+    /// Zero on the no-split fast path beyond roaring container growth. One
+    /// `IntegerList` allocation when a split occurs.
+    pub fn overflowing_extend(
+        mut self,
+        additions: impl IntoIterator<Item = u64>,
+        max_bytes: usize,
+    ) -> (Self, Option<Self>) {
+        let mut tail: Option<Self> = None;
+
+        for block in additions {
+            if let Some(t) = tail.as_mut() {
+                t.push(block).expect("strictly increasing");
+                continue;
+            }
+            self.push(block).expect("strictly increasing");
+            if self.serialized_size() > max_bytes {
+                let popped = self.pop_max().expect("just pushed");
+                debug_assert_eq!(popped, block);
+                let mut t = Self::empty();
+                t.push(block).expect("first push always succeeds");
+                tail = Some(t);
+            }
+        }
+
+        if let Some(t) = tail.as_ref() {
+            let tail_size = t.serialized_size();
+            assert!(
+                tail_size <= max_bytes,
+                "overflowing_extend: tail ({tail_size} B) exceeds max_bytes ({max_bytes} B); \
+                 additions must encode to <= max_bytes — callers must chunk before calling",
+            );
+        }
+
+        (self, tail)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IntegerList;
+
+    #[test]
+    fn pop_max_returns_and_removes_largest() {
+        let mut list = IntegerList::new([3u64, 7, 9, 12]).unwrap();
+        assert_eq!(list.pop_max(), Some(12));
+        assert_eq!(list.max(), Some(9));
+        assert_eq!(list.len(), 3);
+    }
+
+    #[test]
+    fn pop_max_on_empty_returns_none() {
+        let mut list = IntegerList::empty();
+        assert_eq!(list.pop_max(), None);
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn pop_max_drains_to_empty() {
+        let mut list = IntegerList::new([42u64]).unwrap();
+        assert_eq!(list.pop_max(), Some(42));
+        assert!(list.is_empty());
+        assert_eq!(list.pop_max(), None);
+    }
+
+    #[test]
+    fn overflowing_extend_no_split_when_under_budget() {
+        let existing = IntegerList::new([1u64, 2, 3]).unwrap();
+        // 1500 B is generous for 5 dense values
+        let (first, second) = existing.overflowing_extend([4u64, 5], 1500);
+        assert_eq!(first.iter().collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
+        assert!(second.is_none());
+    }
+
+    #[test]
+    fn overflowing_extend_no_additions_returns_existing() {
+        let existing = IntegerList::new([10u64, 20]).unwrap();
+        let (first, second) = existing.overflowing_extend(std::iter::empty(), 1500);
+        assert_eq!(first.iter().collect::<Vec<_>>(), vec![10, 20]);
+        assert!(second.is_none());
+    }
+
+    #[test]
+    fn overflowing_extend_splits_when_over_budget() {
+        // Provoke a split with a deliberately small budget. Use 100 contiguous
+        // values starting at 0. Roaring-encoded that's a single run container
+        // around 14 B, so we need a tiny budget to force a split. Set budget
+        // small enough that ~50 entries push us over.
+        let existing = IntegerList::new(0u64..50).unwrap();
+
+        // Compute the budget so existing alone fits but existing + additions
+        // doesn't.
+        let existing_size = existing.serialized_size();
+        let combined = IntegerList::new(0u64..100).unwrap().serialized_size();
+        assert!(combined > existing_size, "test setup broken: combined didn't grow");
+        let budget = existing_size + (combined - existing_size) / 2;
+
+        let (first, second) = existing.overflowing_extend(50u64..100, budget);
+        let second = second.expect("split should have occurred");
+
+        // first ∪ second == 0..100, with second's min > first's max.
+        let mut all: Vec<u64> = first.iter().collect();
+        all.extend(second.iter());
+        assert_eq!(all, (0u64..100).collect::<Vec<_>>());
+        assert!(first.max().unwrap() < second.min().unwrap());
+
+        // Both halves fit in budget.
+        assert!(first.serialized_size() <= budget);
+        assert!(second.serialized_size() <= budget);
+    }
+
+    #[test]
+    fn overflowing_extend_split_preserves_strict_ordering() {
+        // Sparse blocks (one per distinct 16-bit container) make serialized
+        // size grow proportionally to count, so we can budget-tune to force
+        // a split while keeping additions within budget.
+        let existing_blocks: Vec<u64> = (0..50u64).map(|i| i * 0x1_0000).collect();
+        let addition_blocks: Vec<u64> = (50..70u64).map(|i| i * 0x1_0000).collect();
+        let combined_blocks: Vec<u64> = (0..70u64).map(|i| i * 0x1_0000).collect();
+
+        let existing = IntegerList::new(existing_blocks).unwrap();
+        let additions_size =
+            IntegerList::new(addition_blocks.iter().copied()).unwrap().serialized_size();
+        let combined_size = IntegerList::new(combined_blocks).unwrap().serialized_size();
+        let existing_size = existing.serialized_size();
+        // Budget that fits both existing and additions alone, but not combined.
+        let budget = existing_size.max(additions_size) + 16;
+        assert!(combined_size > budget, "test setup broken: combined fits in budget");
+
+        let (first, second) = existing.overflowing_extend(addition_blocks, budget);
+        let second = second.expect("split should have occurred");
+
+        let first_max = first.max().unwrap();
+        let second_min = second.min().unwrap();
+        assert!(first_max < second_min, "first.max={first_max} second.min={second_min}",);
+    }
+
+    /// Dense-pack worst case: many contiguous blocks in a single 16-bit
+    /// container should encode efficiently (run-length or array). Even at
+    /// hundreds of contiguous blocks, we stay comfortably under 1500 B.
+    #[test]
+    fn worst_case_dense_pack_fits_in_dupsort_budget() {
+        // 650 contiguous values empirically encode to ~1300 B; 750 was over budget.
+        let list = IntegerList::new(0u64..650).unwrap();
+        let size = list.serialized_size();
+        assert!(size <= 1500, "dense pack of 650 blocks encoded as {size} B, expected <= 1500");
+    }
+
+    /// Sparse worst case: 100 blocks each in a distinct 16-bit container.
+    /// Each container is array-encoded with a single element plus header.
+    /// This is the realistic worst case for a long-lived hot address touched
+    /// once per ~64k-block window.
+    #[test]
+    fn worst_case_sparse_distinct_containers_fits_in_dupsort_budget() {
+        let blocks: Vec<u64> = (0..100u64).map(|i| i * 0x1_0000).collect();
+        let list = IntegerList::new(blocks).unwrap();
+        let size = list.serialized_size();
+        assert!(size <= 1500, "100 sparse blocks encoded as {size} B, expected <= 1500");
+    }
+
+    /// overflowing_extend with the realistic budget produces shards each within
+    /// the budget, even for the worst-case sparse input.
+    #[test]
+    fn overflowing_extend_at_realistic_budget_respects_per_shard_size() {
+        // Build 200 sparse blocks (200 distinct containers). Splitter should
+        // split this into ~2 shards each under 1500 B.
+        let blocks: Vec<u64> = (0..200u64).map(|i| i * 0x1_0000).collect();
+        let half = blocks.len() / 2;
+        let existing = IntegerList::new(blocks[..half].iter().copied()).unwrap();
+        let additions: Vec<u64> = blocks[half..].to_vec();
+
+        assert!(existing.serialized_size() <= 1500);
+        assert!(IntegerList::new(additions.iter().copied()).unwrap().serialized_size() <= 1500);
+
+        let (first, second) = existing.overflowing_extend(additions, 1500);
+        assert!(first.serialized_size() <= 1500);
+        if let Some(second) = &second {
+            assert!(second.serialized_size() <= 1500);
+        }
+
+        // Round-trip: union of (first, second) equals the original input.
+        let mut roundtrip: Vec<u64> = first.iter().collect();
+        if let Some(s) = second {
+            roundtrip.extend(s.iter());
+        }
+        assert_eq!(roundtrip, blocks);
+    }
+
+    /// Oversized `additions` cannot be split further (the function produces at
+    /// most one tail), so the precondition violation must panic loudly.
+    #[test]
+    #[should_panic(expected = "tail")]
+    fn overflowing_extend_panics_when_additions_alone_exceed_budget() {
+        // 400 sparse blocks (400 distinct 16-bit containers) encode to well
+        // over 1500 B and cannot fit in a single tail.
+        let additions: Vec<u64> = (0..400u64).map(|i| i * 0x1_0000).collect();
+        assert!(IntegerList::new(additions.iter().copied()).unwrap().serialized_size() > 1500);
+        let _ = IntegerList::empty().overflowing_extend(additions, 1500);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::IntegerList;
+    use proptest::prelude::*;
+
+    /// Generates `(existing, additions, max_bytes)` triples that satisfy the
+    /// strict-ordering precondition of `overflowing_extend`. The two lists
+    /// are carved out of a single sorted unique set so `min(additions) >
+    /// max(existing)` holds whenever both are non-empty.
+    ///
+    /// Values are spread over `0..=1_000_000` to mix dense and sparse roaring
+    /// containers, exercising both run-length and array encodings.
+    ///
+    /// `max_bytes` is centered on the merged list's serialized size so that
+    /// split and no-split cases are both well represented — picking from a
+    /// fixed wide range produces mostly no-split cases and leaves the split
+    /// path under-exercised.
+    fn split_inputs() -> impl Strategy<Value = (Vec<u64>, Vec<u64>, usize)> {
+        proptest::collection::btree_set(0u64..=1_000_000u64, 0..=200usize).prop_flat_map(
+            |combined| {
+                let v: Vec<u64> = combined.into_iter().collect();
+                let merged_size = list_size(&v);
+                let half = merged_size.max(50) / 2;
+                let mb_lo = merged_size.saturating_sub(half).max(50);
+                let mb_hi = merged_size.saturating_add(half + 50);
+                let len = v.len();
+                (Just(v), 0usize..=len, mb_lo..=mb_hi).prop_map(|(mut v, split_at, max_bytes)| {
+                    let additions = v.split_off(split_at);
+                    (v, additions, max_bytes)
+                })
+            },
+        )
+    }
+
+    /// Encoded size of `values` treated as an `IntegerList`.
+    fn list_size(values: &[u64]) -> usize {
+        IntegerList::new(values.iter().copied()).unwrap().serialized_size()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// Concatenating `first.iter()` with `second.iter()` recovers the
+        /// sorted union of `existing` and `additions` exactly.
+        #[test]
+        fn overflowing_extend_roundtrip(
+            (existing_vec, additions_vec, max_bytes) in split_inputs(),
+        ) {
+            prop_assume!(list_size(&additions_vec) <= max_bytes);
+
+            let existing = IntegerList::new(existing_vec.iter().copied()).unwrap();
+            let (first, second) =
+                existing.overflowing_extend(additions_vec.iter().copied(), max_bytes);
+
+            let mut got: Vec<u64> = first.iter().collect();
+            if let Some(s) = second.as_ref() {
+                got.extend(s.iter());
+            }
+
+            let mut expected = existing_vec;
+            expected.extend(additions_vec);
+
+            prop_assert_eq!(got, expected);
+        }
+
+        /// When a split occurs, every value in `first` is strictly less
+        /// than every value in `second`. This is the invariant that lets
+        /// the caller seal `first` at `first.max()` and keep `second` as
+        /// the open tail shard.
+        #[test]
+        fn overflowing_extend_split_preserves_ordering(
+            (existing_vec, additions_vec, max_bytes) in split_inputs(),
+        ) {
+            prop_assume!(list_size(&additions_vec) <= max_bytes);
+
+            let existing = IntegerList::new(existing_vec.iter().copied()).unwrap();
+            let (first, second) =
+                existing.overflowing_extend(additions_vec.iter().copied(), max_bytes);
+
+            if let Some(s) = second.as_ref() {
+                let first_max = first.max().expect("split implies non-empty first");
+                let second_min = s.min().expect("split implies non-empty second");
+                prop_assert!(
+                    first_max < second_min,
+                    "first.max={first_max} not strictly less than second.min={second_min}",
+                );
+            }
+        }
+
+        /// If `existing` already fits the budget, the returned `first`
+        /// shard also fits. The algorithm pops the value that crossed the
+        /// boundary before sealing `first`, so `first` never exceeds the
+        /// last under-budget size it observed.
+        #[test]
+        fn overflowing_extend_first_fits_when_existing_fits(
+            (existing_vec, additions_vec, max_bytes) in split_inputs(),
+        ) {
+            prop_assume!(list_size(&additions_vec) <= max_bytes);
+
+            let existing = IntegerList::new(existing_vec.iter().copied()).unwrap();
+            prop_assume!(existing.serialized_size() <= max_bytes);
+
+            let (first, _second) =
+                existing.overflowing_extend(additions_vec.iter().copied(), max_bytes);
+
+            let first_size = first.serialized_size();
+            prop_assert!(
+                first_size <= max_bytes,
+                "first.size={first_size} exceeds max_bytes={max_bytes}",
+            );
+        }
+
+        /// No split occurs when the fully-merged list still fits the
+        /// budget. This rules out spurious splits that would fragment a
+        /// shard unnecessarily.
+        #[test]
+        fn overflowing_extend_no_split_when_merged_fits(
+            (existing_vec, additions_vec, max_bytes) in split_inputs(),
+        ) {
+            prop_assume!(list_size(&additions_vec) <= max_bytes);
+
+            let mut merged_vec = existing_vec.clone();
+            merged_vec.extend(additions_vec.iter().copied());
+            let merged_size = list_size(&merged_vec);
+            prop_assume!(merged_size <= max_bytes);
+
+            let existing = IntegerList::new(existing_vec.iter().copied()).unwrap();
+            let (_first, second) =
+                existing.overflowing_extend(additions_vec.iter().copied(), max_bytes);
+
+            prop_assert!(
+                second.is_none(),
+                "merged size {merged_size} fits in budget {max_bytes} but split occurred",
+            );
+        }
+
+        /// When a split occurs, the tail shard fits the budget. The
+        /// function asserts this internally; we re-verify here so a
+        /// regression that produced an oversized tail would surface as a
+        /// shrunk counter-example rather than a generic panic.
+        #[test]
+        fn overflowing_extend_tail_fits_when_split(
+            (existing_vec, additions_vec, max_bytes) in split_inputs(),
+        ) {
+            prop_assume!(list_size(&additions_vec) <= max_bytes);
+
+            let existing = IntegerList::new(existing_vec.iter().copied()).unwrap();
+            let (_first, second) =
+                existing.overflowing_extend(additions_vec.iter().copied(), max_bytes);
+
+            if let Some(s) = second.as_ref() {
+                let tail_size = s.serialized_size();
+                prop_assert!(
+                    tail_size <= max_bytes,
+                    "tail.size={tail_size} exceeds max_bytes={max_bytes}",
+                );
+            }
+        }
     }
 }

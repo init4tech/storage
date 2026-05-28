@@ -445,7 +445,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        db::{HistoryRead, UnsafeDbWrite, UnsafeHistoryWrite},
+        db::{HistoryWrite, UnsafeDbWrite},
         mem::MemKv,
         model::{HotKv, HotKvRead, HotKvWrite},
         tables::{Bytecodes, PlainAccountState},
@@ -805,13 +805,13 @@ mod tests {
     ///   - Block 5 changed account: pre-state was nonce=1, balance=100
     ///   - Block 10 changed account: pre-state was nonce=5, balance=500
     ///   - Current (PlainAccountState): nonce=10, balance=1000
-    ///   - History shard: (A, 10) → [5, 10]
+    ///   - Account history: blocks [5, 10] for address A
     ///
     /// Storage slot 0x42 for address A:
     ///   - Block 5 changed slot: pre-state was 0
     ///   - Block 10 changed slot: pre-state was 100
     ///   - Current (PlainStorageState): 200
-    ///   - History shard: (A, ShardedKey(0x42, 10)) → [5, 10]
+    ///   - Storage history: blocks [5, 10] for (address A, slot 0x42)
     fn setup_history_kv() -> (MemKv, Address) {
         let mem_kv = MemKv::default();
         let address = Address::from_slice(&[0x1; 20]);
@@ -834,7 +834,7 @@ mod tests {
 
         // Account history shard: blocks 5 and 10 touched address
         let history = BlockNumberList::new([5, 10]).unwrap();
-        writer.write_account_history(&address, 10, &history).unwrap();
+        writer.append_account_history(&address, &history).unwrap();
 
         // Account change sets (pre-states)
         let pre_state_5 = Account { nonce: 1, balance: U256::from(100u64), bytecode_hash: None };
@@ -845,7 +845,7 @@ mod tests {
 
         // Storage history shard: blocks 5 and 10 touched (address, slot)
         let storage_history = BlockNumberList::new([5, 10]).unwrap();
-        writer.write_storage_history(&address, slot, 10, &storage_history).unwrap();
+        writer.append_storage_history(&address, &slot, &storage_history).unwrap();
 
         // Storage change sets (pre-states)
         writer.write_storage_prestate(5, address, &slot, &U256::ZERO).unwrap();

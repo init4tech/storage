@@ -2004,4 +2004,45 @@ mod tests {
             assert_eq!(fsi_headers, FixedSizeInfo::None);
         }
     }
+
+    /// Smoke test: append + truncate via the `HistoryWrite` trait.
+    #[test]
+    #[serial]
+    fn mdbx_history_write_round_trips() {
+        use signet_hot::db::{HistoryRead, HistoryWrite};
+        use signet_storage_types::BlockNumberList;
+
+        run_test(|db| {
+            let addr = Address::from_slice(&[0x1; 20]);
+            let slot = U256::from(42u64);
+
+            let writer: Tx<Rw> = db.writer().unwrap();
+            writer
+                .append_account_history(&addr, &BlockNumberList::new([5u64, 10, 15]).unwrap())
+                .unwrap();
+            writer
+                .append_storage_history(&addr, &slot, &BlockNumberList::new([7u64, 11]).unwrap())
+                .unwrap();
+            writer.commit().unwrap();
+
+            let reader: Tx<Ro> = db.reader().unwrap();
+            let acct_blocks = reader.blocks_changed_account(&addr).unwrap().unwrap();
+            assert_eq!(acct_blocks.iter().collect::<Vec<_>>(), vec![5, 10, 15]);
+
+            let stor_blocks = reader.blocks_changed_storage(&addr, &slot).unwrap().unwrap();
+            assert_eq!(stor_blocks.iter().collect::<Vec<_>>(), vec![7, 11]);
+
+            assert_eq!(reader.block_account_changed_after(&addr, 7).unwrap(), Some(10));
+            assert_eq!(reader.block_account_changed_after(&addr, 15).unwrap(), None);
+
+            // Truncate above block 10 — should remove block 15 from account history.
+            let writer: Tx<Rw> = db.writer().unwrap();
+            writer.truncate_account_history_above(&addr, 10).unwrap();
+            writer.commit().unwrap();
+
+            let reader: Tx<Ro> = db.reader().unwrap();
+            let acct_blocks = reader.blocks_changed_account(&addr).unwrap().unwrap();
+            assert_eq!(acct_blocks.iter().collect::<Vec<_>>(), vec![5, 10]);
+        });
+    }
 }

@@ -31,10 +31,10 @@
 //! HotKv                    ← Transaction factory
 //!   ├─ reader() → HotKvRead    ← Read-only transactions
 //!   │              └─ HotDbRead     ← Typed accessors (blanket impl)
-//!   │                   └─ HistoryRead  ← History queries (blanket impl)
+//!   │                   └─ HistoryRead    ← History queries (blanket impl)
 //!   └─ writer() → HotKvWrite   ← Read-write transactions
 //!                  └─ UnsafeDbWrite    ← Low-level writes (blanket impl)
-//!                       └─ HistoryWrite ← Safe chain operations (blanket impl)
+//!                       └─ HistoryWrite ← Safe chain operations (per-backend impl)
 //! ```
 //!
 //! ## Serialization

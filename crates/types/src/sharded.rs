@@ -12,11 +12,6 @@ pub struct ShardedKey<T> {
     pub highest_block_number: u64,
 }
 
-impl ShardedKey<()> {
-    /// Number of indices in one shard.
-    pub const SHARD_COUNT: usize = 2000;
-}
-
 impl<T> ShardedKey<T> {
     /// Creates a new `ShardedKey<T>`.
     pub const fn new(key: T, highest_block_number: u64) -> Self {

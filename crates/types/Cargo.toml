@@ -26,3 +26,6 @@ signet-zenith.workspace = true
 thiserror.workspace = true
 trevm.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+
