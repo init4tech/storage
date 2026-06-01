@@ -457,27 +457,29 @@ fn read_known_fsi<K: signet_libmdbx::TransactionKind>(
     tx: &Tx<K>,
 ) -> Result<[(&'static str, FixedSizeInfo); NUM_TABLES], MdbxError> {
     let mut known = [("", FixedSizeInfo::None); NUM_TABLES];
-    for (index, table) in STANDARD_TABLES.iter().enumerate() {
+    STANDARD_TABLES.iter().enumerate().try_for_each(|(index, table)| {
         let fsi = match tx.read_fsi_from_table(table.name) {
             Ok(fsi) => fsi,
             Err(MdbxError::UnknownTable(_)) => {
                 let expected =
                     FixedSizeInfo::from_create_args(table.dual_key_size, table.fixed_val_size);
+                // Fires once per open per missing table until a RW open creates the table and
+                // persists its FSI; RO-only consumers of a pre-upgrade database will see this on
+                // every open.
                 tracing::warn!(
                     target: "storage::db::mdbx",
                     table = table.name,
                     ?expected,
                     "FSI metadata entry missing for known table; falling back to compile-time \
-                     expected value. Fires once per open per missing table until a RW open \
-                     creates the table and persists its FSI; RO-only consumers of a \
-                     pre-upgrade database will see this on every open."
+                     expected value"
                 );
                 expected
             }
             Err(error) => return Err(error),
         };
         known[index] = (table.name, fsi);
-    }
+        Ok(())
+    })?;
     Ok(known)
 }
 
