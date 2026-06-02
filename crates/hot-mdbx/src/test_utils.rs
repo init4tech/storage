@@ -54,7 +54,7 @@ mod tests {
     use signet_hot::{
         KeySer, MAX_KEY_SIZE, ValSer,
         conformance::{conformance, test_unwind_conformance},
-        db::{HotDbRead, UnsafeDbWrite},
+        db::UnsafeDbWrite,
         model::{
             DualKeyTraverse, DualTableTraverse, HotKv, HotKvRead, HotKvWrite, TableTraverse,
             TableTraverseMut,
@@ -1966,52 +1966,6 @@ mod tests {
                     .unwrap()
                     .is_some()
             );
-        }
-    }
-
-    /// Regression test: opening a database written by an older binary that
-    /// pre-dates a known table must succeed in both RO and RW modes, and a
-    /// subsequent RW open must re-create the missing table and persist its
-    /// FSI normally.
-    #[test]
-    #[serial]
-    fn open_tolerates_pre_upgrade_db() {
-        let dir = tempdir().unwrap();
-
-        // Phase 1: open RW (auto-creates all tables and FSIs), then forget
-        // JournalHashes entirely to mimic a pre-upgrade DB.
-        {
-            let args = DatabaseArguments::new();
-            let db = DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, args).unwrap();
-            let writer: Tx<Rw> = db.tx_rw().unwrap();
-            // SAFETY: no Cursor or Database references to JournalHashes
-            // exist in this scope.
-            unsafe {
-                writer.forget_table(tables::JournalHashes::NAME).unwrap();
-            }
-            writer.raw_commit().unwrap();
-        }
-
-        // Phase 2: reopening RO must succeed despite the missing table.
-        {
-            let args = DatabaseArguments::new();
-            DatabaseEnv::open(dir.path(), DatabaseEnvKind::RO, args)
-                .expect("RO open must tolerate a pre-upgrade DB");
-        }
-
-        // Phase 3: the next RW open must re-create the table and FSI, and
-        // subsequent reads and writes against it must work normally.
-        {
-            let args = DatabaseArguments::new();
-            let db = DatabaseEnv::open(dir.path(), DatabaseEnvKind::RW, args)
-                .expect("RW open must tolerate a pre-upgrade DB");
-            let hash = B256::repeat_byte(0x42);
-            let writer: Tx<Rw> = db.tx_rw().unwrap();
-            writer.put_journal_hash(7, &hash).unwrap();
-            writer.raw_commit().unwrap();
-
-            let reader: Tx<Ro> = db.reader().unwrap();
-            assert_eq!(reader.get_journal_hash(7).unwrap(), Some(hash));
         }
     }
 

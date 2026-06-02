@@ -110,10 +110,8 @@ impl FixedSizeInfo {
     }
 
     /// Canonical mapping from the `(dual_key, fixed_val)` size hints accepted
-    /// by [`queue_raw_create`] to the [`FixedSizeInfo`] implied by them.
-    /// Used both when persisting FSI for a newly-created table and when
-    /// pre-populating the open-time cache with a compile-time fallback for
-    /// tables that pre-date their on-disk metadata entry.
+    /// by [`queue_raw_create`] to the [`FixedSizeInfo`] implied by them. Used
+    /// when persisting FSI for a newly-created table.
     ///
     /// [`queue_raw_create`]: signet_hot::model::HotKvWrite::queue_raw_create
     pub(crate) const fn from_create_args(

@@ -444,40 +444,13 @@ fn create_tables_and_populate_cache(env: &Environment) -> Result<FsiCache, MdbxE
 
 /// Read FSI entries for all standard tables from the metadata table.
 ///
-/// Iterates [`STANDARD_TABLES`] and reads each table's on-disk FSI. Missing
-/// entries fall back to the compile-time-expected FSI inferred from the
-/// table's [`StandardTable`] metadata via [`FixedSizeInfo::from_create_args`]
-/// (the same mapping used by [`Tx::queue_raw_create`] when persisting FSI
-/// for a newly-created table), so opening a database written by an older
-/// binary that pre-dates one or more tables succeeds. The next RW open
-/// creates any missing table and persists its FSI normally.
-///
-/// [`StandardTable`]: signet_hot::tables::StandardTable
+/// Iterates [`STANDARD_TABLES`] and reads each table's on-disk FSI.
 fn read_known_fsi<K: signet_libmdbx::TransactionKind>(
     tx: &Tx<K>,
 ) -> Result<[(&'static str, FixedSizeInfo); NUM_TABLES], MdbxError> {
     let mut known = [("", FixedSizeInfo::None); NUM_TABLES];
-    STANDARD_TABLES.iter().enumerate().try_for_each(|(index, table)| {
-        let fsi = match tx.read_fsi_from_table(table.name) {
-            Ok(fsi) => fsi,
-            Err(MdbxError::UnknownTable(_)) => {
-                let expected =
-                    FixedSizeInfo::from_create_args(table.dual_key_size, table.fixed_val_size);
-                // Fires once per open per missing table until a RW open creates the table and
-                // persists its FSI; RO-only consumers of a pre-upgrade database will see this on
-                // every open.
-                tracing::warn!(
-                    target: "storage::db::mdbx",
-                    table = table.name,
-                    ?expected,
-                    "FSI metadata entry missing for known table; falling back to compile-time \
-                     expected value"
-                );
-                expected
-            }
-            Err(error) => return Err(error),
-        };
-        known[index] = (table.name, fsi);
+    STANDARD_TABLES.iter().enumerate().try_for_each(|(index, table)| -> Result<(), MdbxError> {
+        known[index] = (table.name, tx.read_fsi_from_table(table.name)?);
         Ok(())
     })?;
     Ok(known)
