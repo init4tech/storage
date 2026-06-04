@@ -22,8 +22,8 @@ use trevm::revm::database::BundleState;
 /// # use alloy::consensus::Header;
 /// # fn example(header: SealedHeader, bundle: BundleState) {
 /// let block = ExecutedBlockBuilder::new()
-///     .header(header)
-///     .bundle(bundle)
+///     .with_header(header)
+///     .with_bundle(bundle)
 ///     .build()
 ///     .unwrap();
 /// # }
@@ -90,37 +90,37 @@ impl ExecutedBlockBuilder {
     }
 
     /// Set the sealed header (required).
-    pub fn header(mut self, header: SealedHeader) -> Self {
+    pub fn with_header(mut self, header: SealedHeader) -> Self {
         self.header = Some(header);
         self
     }
 
     /// Set the bundle state (required).
-    pub fn bundle(mut self, bundle: BundleState) -> Self {
+    pub fn with_bundle(mut self, bundle: BundleState) -> Self {
         self.bundle = Some(bundle);
         self
     }
 
     /// Set the transactions.
-    pub fn transactions(mut self, transactions: Vec<RecoveredTx>) -> Self {
+    pub fn with_transactions(mut self, transactions: Vec<RecoveredTx>) -> Self {
         self.transactions = transactions;
         self
     }
 
     /// Set the receipts.
-    pub fn receipts(mut self, receipts: Vec<Receipt>) -> Self {
+    pub fn with_receipts(mut self, receipts: Vec<Receipt>) -> Self {
         self.receipts = receipts;
         self
     }
 
     /// Set the signet events.
-    pub fn signet_events(mut self, events: Vec<DbSignetEvent>) -> Self {
+    pub fn with_signet_events(mut self, events: Vec<DbSignetEvent>) -> Self {
         self.signet_events = events;
         self
     }
 
     /// Set the zenith header.
-    pub const fn zenith_header(mut self, header: Option<DbZenithHeader>) -> Self {
+    pub const fn with_zenith_header(mut self, header: Option<DbZenithHeader>) -> Self {
         self.zenith_header = header;
         self
     }
@@ -128,7 +128,7 @@ impl ExecutedBlockBuilder {
     /// Set the journal hash (keccak256 of the wire-encoded `Journal::V1`).
     /// Leave the method uncalled for block-only nodes that do not produce
     /// a journal - the field defaults to `None`.
-    pub const fn journal_hash(mut self, hash: B256) -> Self {
+    pub const fn with_journal_hash(mut self, hash: B256) -> Self {
         self.journal_hash = Some(hash);
         self
     }

@@ -23,8 +23,8 @@ fn make_chain(count: u64) -> Vec<ExecutedBlock> {
         let sealed: SealedHeader = header.seal_slow();
         parent_hash = sealed.hash();
         let block = ExecutedBlockBuilder::new()
-            .header(sealed)
-            .bundle(BundleState::default())
+            .with_header(sealed)
+            .with_bundle(BundleState::default())
             .build()
             .unwrap();
         blocks.push(block);
@@ -64,10 +64,10 @@ fn make_chain_with_txs(count: u64, tx_count: usize) -> Vec<ExecutedBlock> {
             (0..tx_count).map(|i| make_test_tx(number * 100 + i as u64)).collect();
         let receipts: Vec<Receipt> = (0..tx_count).map(|_| make_test_receipt()).collect();
         let block = ExecutedBlockBuilder::new()
-            .header(sealed)
-            .bundle(BundleState::default())
-            .transactions(transactions)
-            .receipts(receipts)
+            .with_header(sealed)
+            .with_bundle(BundleState::default())
+            .with_transactions(transactions)
+            .with_receipts(receipts)
             .build()
             .unwrap();
         blocks.push(block);
@@ -188,9 +188,10 @@ async fn append_blocks_persists_journal_hashes() {
         let header = Header { number: number as u64, parent_hash, ..Default::default() };
         let sealed: SealedHeader = header.seal_slow();
         parent_hash = sealed.hash();
-        let mut builder = ExecutedBlockBuilder::new().header(sealed).bundle(BundleState::default());
+        let mut builder =
+            ExecutedBlockBuilder::new().with_header(sealed).with_bundle(BundleState::default());
         if let Some(hash) = journal_hash {
-            builder = builder.journal_hash(hash);
+            builder = builder.with_journal_hash(hash);
         }
         blocks.push(builder.build().unwrap());
     }
@@ -223,9 +224,9 @@ async fn unwind_above_drops_journal_hashes() {
         let sealed: SealedHeader = header.seal_slow();
         parent_hash = sealed.hash();
         let block = ExecutedBlockBuilder::new()
-            .header(sealed)
-            .bundle(BundleState::default())
-            .journal_hash(*hash)
+            .with_header(sealed)
+            .with_bundle(BundleState::default())
+            .with_journal_hash(*hash)
             .build()
             .unwrap();
         blocks.push(block);
