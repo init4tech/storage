@@ -5,15 +5,60 @@ mod macros;
 mod definitions;
 pub use definitions::*;
 
-/// The number of standard hot storage tables created by
-/// [`queue_db_init`](crate::model::HotKvWrite::queue_db_init). Update this
-/// constant whenever a table is added to or removed from `queue_db_init`.
-pub const NUM_TABLES: usize = 9;
+/// The number of standard hot storage tables. Tied to the length of
+/// [`STANDARD_TABLES`].
+pub const NUM_TABLES: usize = STANDARD_TABLES.len();
 
 use crate::{
     DeserError, KeySer, MAX_FIXED_VAL_SIZE, MAX_KEY_SIZE, ValSer,
     model::{DualKeyValue, KeyValue},
 };
+
+/// Compile-time metadata for a standard hot storage table. The two `Option`
+/// fields mirror the arguments accepted by
+/// [`queue_raw_create`](crate::model::HotKvWrite::queue_raw_create) so the
+/// same record drives both table creation and backend-side FSI inference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StandardTable {
+    /// Table name.
+    pub name: &'static str,
+    /// Size of the second key for DUPSORT tables, `None` for single-keyed
+    /// tables. Mirrors [`Table::DUAL_KEY_SIZE`].
+    pub dual_key_size: Option<usize>,
+    /// Mirrors [`Table::FIXED_VAL_SIZE`]: `Some(size)` when the table's value
+    /// type is a fixed-size primitive of `size <= MAX_FIXED_VAL_SIZE` bytes,
+    /// `None` otherwise. Backends combine this with [`Self::dual_key_size`]:
+    /// `(Some, Some)` implies DUP_FIXED, `(Some, None)` implies plain DUPSORT,
+    /// and `(None, _)` implies neither (today the macro forces this arm to
+    /// `(None, None)` for single-keyed tables).
+    pub fixed_val_size: Option<usize>,
+}
+
+impl StandardTable {
+    /// Derive a [`StandardTable`] from a [`Table`] type's associated
+    /// constants.
+    pub const fn from_table<T: Table>() -> Self {
+        Self { name: T::NAME, dual_key_size: T::DUAL_KEY_SIZE, fixed_val_size: T::FIXED_VAL_SIZE }
+    }
+}
+
+/// The canonical list of standard hot storage tables created by
+/// [`queue_db_init`](crate::model::HotKvWrite::queue_db_init). Backends may
+/// also iterate over this list to pre-populate per-table caches at open
+/// time. Update this constant whenever a standard table is added or
+/// removed.
+pub const STANDARD_TABLES: [StandardTable; 10] = [
+    StandardTable::from_table::<Headers>(),
+    StandardTable::from_table::<HeaderNumbers>(),
+    StandardTable::from_table::<Bytecodes>(),
+    StandardTable::from_table::<PlainAccountState>(),
+    StandardTable::from_table::<PlainStorageState>(),
+    StandardTable::from_table::<AccountsHistory>(),
+    StandardTable::from_table::<AccountChangeSets>(),
+    StandardTable::from_table::<StorageHistory>(),
+    StandardTable::from_table::<StorageChangeSets>(),
+    StandardTable::from_table::<JournalHashes>(),
+];
 
 /// Trait for table definitions.
 ///

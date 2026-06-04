@@ -5,7 +5,7 @@ use alloy::{
     primitives::{Address, B256, Signature, TxKind, U256},
 };
 use signet_cold::{ColdStorage, HeaderSpecifier, mem::MemColdBackend};
-use signet_hot::{HistoryRead, HistoryWrite, HotKv, mem::MemKv, model::HotKvWrite};
+use signet_hot::{HistoryRead, HistoryWrite, HotKv, db::HotDbRead, mem::MemKv, model::HotKvWrite};
 use signet_storage::UnifiedStorage;
 use signet_storage_types::{
     ExecutedBlock, ExecutedBlockBuilder, Receipt, RecoveredTx, SealedHeader, TransactionSigned,
@@ -23,8 +23,8 @@ fn make_chain(count: u64) -> Vec<ExecutedBlock> {
         let sealed: SealedHeader = header.seal_slow();
         parent_hash = sealed.hash();
         let block = ExecutedBlockBuilder::new()
-            .header(sealed)
-            .bundle(BundleState::default())
+            .with_header(sealed)
+            .with_bundle(BundleState::default())
             .build()
             .unwrap();
         blocks.push(block);
@@ -64,10 +64,10 @@ fn make_chain_with_txs(count: u64, tx_count: usize) -> Vec<ExecutedBlock> {
             (0..tx_count).map(|i| make_test_tx(number * 100 + i as u64)).collect();
         let receipts: Vec<Receipt> = (0..tx_count).map(|_| make_test_receipt()).collect();
         let block = ExecutedBlockBuilder::new()
-            .header(sealed)
-            .bundle(BundleState::default())
-            .transactions(transactions)
-            .receipts(receipts)
+            .with_header(sealed)
+            .with_bundle(BundleState::default())
+            .with_transactions(transactions)
+            .with_receipts(receipts)
             .build()
             .unwrap();
         blocks.push(block);
@@ -166,6 +166,79 @@ async fn drain_above_empty_when_at_tip() {
     // Verify hot tip still 1
     assert_eq!(hot.reader().unwrap().get_chain_tip().unwrap().unwrap().0, 1);
     assert_eq!(storage.cold().get_latest_block().await.unwrap().unwrap(), 1);
+
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn append_blocks_persists_journal_hashes() {
+    let hot = MemKv::new();
+    let cancel = CancellationToken::new();
+    let cold_handle = ColdStorage::new(MemColdBackend::new(), cancel.clone());
+    let storage = UnifiedStorage::new(hot.clone(), cold_handle);
+
+    // Three blocks: 0 with a hash, 1 without, 2 with a hash.
+    let hash_0 = B256::with_last_byte(0xa0);
+    let hash_2 = B256::with_last_byte(0xc2);
+    let journal_hashes = [Some(hash_0), None, Some(hash_2)];
+
+    let mut parent_hash = B256::ZERO;
+    let mut blocks = Vec::with_capacity(3);
+    for (number, journal_hash) in journal_hashes.into_iter().enumerate() {
+        let header = Header { number: number as u64, parent_hash, ..Default::default() };
+        let sealed: SealedHeader = header.seal_slow();
+        parent_hash = sealed.hash();
+        let mut builder =
+            ExecutedBlockBuilder::new().with_header(sealed).with_bundle(BundleState::default());
+        if let Some(hash) = journal_hash {
+            builder = builder.with_journal_hash(hash);
+        }
+        blocks.push(builder.build().unwrap());
+    }
+
+    storage.append_blocks(blocks).await.unwrap();
+
+    let reader = hot.reader().unwrap();
+    assert_eq!(reader.get_journal_hash(0).unwrap(), Some(hash_0));
+    assert_eq!(reader.get_journal_hash(1).unwrap(), None);
+    assert_eq!(reader.get_journal_hash(2).unwrap(), Some(hash_2));
+
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn unwind_above_drops_journal_hashes() {
+    let hot = MemKv::new();
+    let cancel = CancellationToken::new();
+    let cold_handle = ColdStorage::new(MemColdBackend::new(), cancel.clone());
+    let storage = UnifiedStorage::new(hot.clone(), cold_handle);
+
+    // Three blocks, each carrying a journal hash.
+    let hashes =
+        [B256::with_last_byte(0xa0), B256::with_last_byte(0xa1), B256::with_last_byte(0xa2)];
+
+    let mut parent_hash = B256::ZERO;
+    let mut blocks = Vec::with_capacity(3);
+    for (number, hash) in hashes.iter().enumerate() {
+        let header = Header { number: number as u64, parent_hash, ..Default::default() };
+        let sealed: SealedHeader = header.seal_slow();
+        parent_hash = sealed.hash();
+        let block = ExecutedBlockBuilder::new()
+            .with_header(sealed)
+            .with_bundle(BundleState::default())
+            .with_journal_hash(*hash)
+            .build()
+            .unwrap();
+        blocks.push(block);
+    }
+
+    storage.append_blocks(blocks).await.unwrap();
+    storage.unwind_above(0).await.unwrap();
+
+    let reader = hot.reader().unwrap();
+    assert_eq!(reader.get_journal_hash(0).unwrap(), Some(hashes[0]));
+    assert_eq!(reader.get_journal_hash(1).unwrap(), None);
+    assert_eq!(reader.get_journal_hash(2).unwrap(), None);
 
     cancel.cancel();
 }

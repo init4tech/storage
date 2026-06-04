@@ -228,6 +228,7 @@ pub fn make_account_info(nonce: u64, balance: U256, code_hash: Option<B256>) -> 
 /// - Headers and header number mappings
 /// - Account and storage change sets
 /// - Account and storage history indices
+/// - Journal hashes
 pub fn test_unwind_conformance<Kv: HotKv>(store_a: &Kv, store_b: &Kv) {
     // Test addresses
     let addr1 = address!("0x1111111111111111111111111111111111111111");
@@ -412,10 +413,21 @@ pub fn test_unwind_conformance<Kv: HotKv>(store_a: &Kv, store_b: &Kv) {
         blocks.push((sealed, bundle));
     }
 
-    // Store A: Append all 5 blocks, then unwind to block 1
+    // Journal hashes, one per block; verifies unwind_above also drops these.
+    let journal_hashes: Vec<B256> = (0..blocks.len())
+        .map(|index| {
+            let byte = u8::try_from(index + 1).expect("test block count fits in u8");
+            B256::from([byte; 32])
+        })
+        .collect();
+
+    // Store A: Append all 5 blocks plus journal hashes, then unwind to block 1
     {
         let writer = store_a.writer().unwrap();
         writer.append_blocks(blocks.iter().map(|(h, b)| (h, b))).unwrap();
+        for ((header, _), hash) in blocks.iter().zip(&journal_hashes) {
+            writer.put_journal_hash(header.number, hash).unwrap();
+        }
         writer.commit().unwrap();
     }
     {
@@ -424,10 +436,13 @@ pub fn test_unwind_conformance<Kv: HotKv>(store_a: &Kv, store_b: &Kv) {
         writer.commit().unwrap();
     }
 
-    // Store B: Append only blocks 0, 1
+    // Store B: Append only blocks 0, 1 plus their journal hashes
     {
         let writer = store_b.writer().unwrap();
         writer.append_blocks(blocks[0..2].iter().map(|(h, b)| (h, b))).unwrap();
+        for ((header, _), hash) in blocks[0..2].iter().zip(&journal_hashes[0..2]) {
+            writer.put_journal_hash(header.number, hash).unwrap();
+        }
         writer.commit().unwrap();
     }
 
@@ -452,6 +467,12 @@ pub fn test_unwind_conformance<Kv: HotKv>(store_a: &Kv, store_b: &Kv) {
         "PlainAccountState",
         collect_single_table::<tables::PlainAccountState, _>(&reader_a),
         collect_single_table::<tables::PlainAccountState, _>(&reader_b),
+    );
+
+    assert_single_tables_equal::<tables::JournalHashes>(
+        "JournalHashes",
+        collect_single_table::<tables::JournalHashes, _>(&reader_a),
+        collect_single_table::<tables::JournalHashes, _>(&reader_b),
     );
 
     // Note: Bytecodes are not removed on unwind (they're content-addressed),

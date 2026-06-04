@@ -54,6 +54,7 @@ mod tests {
     use signet_hot::{
         KeySer, MAX_KEY_SIZE, ValSer,
         conformance::{conformance, test_unwind_conformance},
+        db::UnsafeDbWrite,
         model::{
             DualKeyTraverse, DualTableTraverse, HotKv, HotKvRead, HotKvWrite, TableTraverse,
             TableTraverseMut,

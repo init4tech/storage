@@ -251,6 +251,42 @@ pub fn test_storage_changes<T: HotKv>(hot_kv: &T) {
     }
 }
 
+/// Test writing, reading, and overwriting journal hashes.
+pub fn test_journal_hash_roundtrip<T: HotKv>(hot_kv: &T) {
+    let hash_a = b256!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    let hash_b = b256!("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    let hash_c = b256!("0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+
+    // Write hashes at two block numbers.
+    {
+        let writer = hot_kv.writer().unwrap();
+        writer.put_journal_hash(7, &hash_a).unwrap();
+        writer.put_journal_hash(8, &hash_b).unwrap();
+        writer.commit().unwrap();
+    }
+
+    // Read back.
+    {
+        let reader = hot_kv.reader().unwrap();
+        assert_eq!(reader.get_journal_hash(7).unwrap(), Some(hash_a));
+        assert_eq!(reader.get_journal_hash(8).unwrap(), Some(hash_b));
+        assert_eq!(reader.get_journal_hash(9).unwrap(), None);
+    }
+
+    // Overwrite block 7 - producers retrying a block must be able to replace
+    // the previous entry.
+    {
+        let writer = hot_kv.writer().unwrap();
+        writer.put_journal_hash(7, &hash_c).unwrap();
+        writer.commit().unwrap();
+    }
+    {
+        let reader = hot_kv.reader().unwrap();
+        assert_eq!(reader.get_journal_hash(7).unwrap(), Some(hash_c));
+        assert_eq!(reader.get_journal_hash(8).unwrap(), Some(hash_b));
+    }
+}
+
 /// Test that missing reads return None
 pub fn test_missing_reads<T: HotKv>(hot_kv: &T) {
     let missing_addr = address!("0x9999999999999999999999999999999999999999");
@@ -288,4 +324,7 @@ pub fn test_missing_reads<T: HotKv>(hot_kv: &T) {
 
     // Missing storage change
     assert!(reader.get_storage_change(999999, &missing_addr, &missing_slot).unwrap().is_none());
+
+    // Missing journal hash
+    assert!(reader.get_journal_hash(999999).unwrap().is_none());
 }

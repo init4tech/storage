@@ -80,24 +80,8 @@ mod utils;
 
 use signet_hot::{
     model::{HotKv, HotKvError, HotKvWrite},
-    tables::{
-        AccountChangeSets, AccountsHistory, Bytecodes, HeaderNumbers, Headers, NUM_TABLES,
-        PlainAccountState, PlainStorageState, StorageChangeSets, StorageHistory, Table,
-    },
+    tables::{NUM_TABLES, STANDARD_TABLES},
 };
-
-/// The known table names, used to pre-populate the FSI cache at open time.
-const KNOWN_TABLE_NAMES: [&str; NUM_TABLES] = [
-    Headers::NAME,
-    HeaderNumbers::NAME,
-    Bytecodes::NAME,
-    PlainAccountState::NAME,
-    PlainStorageState::NAME,
-    AccountsHistory::NAME,
-    AccountChangeSets::NAME,
-    StorageHistory::NAME,
-    StorageChangeSets::NAME,
-];
 
 /// 1 KB in bytes
 pub const KILOBYTE: usize = 1024;
@@ -458,14 +442,17 @@ fn create_tables_and_populate_cache(env: &Environment) -> Result<FsiCache, MdbxE
     Ok(FsiCache::new(known))
 }
 
-/// Read FSI entries for all known tables from the metadata table.
+/// Read FSI entries for all standard tables from the metadata table.
+///
+/// Iterates [`STANDARD_TABLES`] and reads each table's on-disk FSI.
 fn read_known_fsi<K: signet_libmdbx::TransactionKind>(
     tx: &Tx<K>,
 ) -> Result<[(&'static str, FixedSizeInfo); NUM_TABLES], MdbxError> {
     let mut known = [("", FixedSizeInfo::None); NUM_TABLES];
-    for (i, &name) in KNOWN_TABLE_NAMES.iter().enumerate() {
-        known[i] = (name, tx.read_fsi_from_table(name)?);
-    }
+    STANDARD_TABLES.iter().enumerate().try_for_each(|(index, table)| -> Result<(), MdbxError> {
+        known[index] = (table.name, tx.read_fsi_from_table(table.name)?);
+        Ok(())
+    })?;
     Ok(known)
 }
 

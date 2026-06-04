@@ -108,6 +108,24 @@ impl FixedSizeInfo {
             _ => None,
         }
     }
+
+    /// Canonical mapping from the `(dual_key, fixed_val)` size hints accepted
+    /// by [`queue_raw_create`] to the [`FixedSizeInfo`] implied by them. Used
+    /// when persisting FSI for a newly-created table.
+    ///
+    /// [`queue_raw_create`]: signet_hot::model::HotKvWrite::queue_raw_create
+    pub(crate) const fn from_create_args(
+        dual_key: Option<usize>,
+        fixed_val: Option<usize>,
+    ) -> Self {
+        match (dual_key, fixed_val) {
+            (Some(key2_size), Some(value_size)) => {
+                Self::DupFixed { key2_size, total_size: key2_size + value_size }
+            }
+            (Some(key2_size), None) => Self::DupSort { key2_size },
+            (None, _) => Self::None,
+        }
+    }
 }
 
 impl ValSer for FixedSizeInfo {
@@ -208,6 +226,7 @@ mod tests {
             ("TableG", FixedSizeInfo::None),
             ("TableH", FixedSizeInfo::None),
             ("TableI", FixedSizeInfo::None),
+            ("TableJ", FixedSizeInfo::None),
         ];
         let cache = FsiCache::new(known);
 
@@ -233,6 +252,7 @@ mod tests {
             ("T7", FixedSizeInfo::None),
             ("T8", FixedSizeInfo::None),
             ("T9", FixedSizeInfo::None),
+            ("T10", FixedSizeInfo::None),
         ];
         let cache = FsiCache::new(known);
 

@@ -4,7 +4,7 @@
 //! needed by both hot and cold storage systems for a single executed block.
 
 use crate::{DbSignetEvent, DbZenithHeader, Receipt, RecoveredTx, SealedHeader};
-use alloy::primitives::BlockNumber;
+use alloy::primitives::{B256, BlockNumber};
 use core::fmt;
 use trevm::revm::database::BundleState;
 
@@ -22,8 +22,8 @@ use trevm::revm::database::BundleState;
 /// # use alloy::consensus::Header;
 /// # fn example(header: SealedHeader, bundle: BundleState) {
 /// let block = ExecutedBlockBuilder::new()
-///     .header(header)
-///     .bundle(bundle)
+///     .with_header(header)
+///     .with_bundle(bundle)
 ///     .build()
 ///     .unwrap();
 /// # }
@@ -42,21 +42,16 @@ pub struct ExecutedBlock {
     pub signet_events: Vec<DbSignetEvent>,
     /// The zenith header, if present.
     pub zenith_header: Option<DbZenithHeader>,
+    /// keccak256 of the wire-encoded `Journal::V1` bytes emitted for this
+    /// block, when produced. Persisted into the `JournalHashes` hot table by
+    /// `append_blocks` so producing and syncing nodes can re-seed the rolling
+    /// previous-journal hash across restarts and reverts. `None` for callers
+    /// that do not produce a journal (e.g. block-only nodes); no entry is
+    /// written in that case.
+    pub journal_hash: Option<B256>,
 }
 
 impl ExecutedBlock {
-    /// Create a new executed block.
-    pub const fn new(
-        header: SealedHeader,
-        bundle: BundleState,
-        transactions: Vec<RecoveredTx>,
-        receipts: Vec<Receipt>,
-        signet_events: Vec<DbSignetEvent>,
-        zenith_header: Option<DbZenithHeader>,
-    ) -> Self {
-        Self { header, bundle, transactions, receipts, signet_events, zenith_header }
-    }
-
     /// Get the block number.
     pub fn block_number(&self) -> BlockNumber {
         self.header.number
@@ -85,6 +80,7 @@ pub struct ExecutedBlockBuilder {
     receipts: Vec<Receipt>,
     signet_events: Vec<DbSignetEvent>,
     zenith_header: Option<DbZenithHeader>,
+    journal_hash: Option<B256>,
 }
 
 impl ExecutedBlockBuilder {
@@ -94,38 +90,46 @@ impl ExecutedBlockBuilder {
     }
 
     /// Set the sealed header (required).
-    pub fn header(mut self, header: SealedHeader) -> Self {
+    pub fn with_header(mut self, header: SealedHeader) -> Self {
         self.header = Some(header);
         self
     }
 
     /// Set the bundle state (required).
-    pub fn bundle(mut self, bundle: BundleState) -> Self {
+    pub fn with_bundle(mut self, bundle: BundleState) -> Self {
         self.bundle = Some(bundle);
         self
     }
 
     /// Set the transactions.
-    pub fn transactions(mut self, transactions: Vec<RecoveredTx>) -> Self {
+    pub fn with_transactions(mut self, transactions: Vec<RecoveredTx>) -> Self {
         self.transactions = transactions;
         self
     }
 
     /// Set the receipts.
-    pub fn receipts(mut self, receipts: Vec<Receipt>) -> Self {
+    pub fn with_receipts(mut self, receipts: Vec<Receipt>) -> Self {
         self.receipts = receipts;
         self
     }
 
     /// Set the signet events.
-    pub fn signet_events(mut self, events: Vec<DbSignetEvent>) -> Self {
+    pub fn with_signet_events(mut self, events: Vec<DbSignetEvent>) -> Self {
         self.signet_events = events;
         self
     }
 
     /// Set the zenith header.
-    pub const fn zenith_header(mut self, header: Option<DbZenithHeader>) -> Self {
+    pub const fn with_zenith_header(mut self, header: Option<DbZenithHeader>) -> Self {
         self.zenith_header = header;
+        self
+    }
+
+    /// Set the journal hash (keccak256 of the wire-encoded `Journal::V1`).
+    /// Leave the method uncalled for block-only nodes that do not produce
+    /// a journal - the field defaults to `None`.
+    pub const fn with_journal_hash(mut self, hash: B256) -> Self {
+        self.journal_hash = Some(hash);
         self
     }
 
@@ -142,6 +146,7 @@ impl ExecutedBlockBuilder {
             receipts: self.receipts,
             signet_events: self.signet_events,
             zenith_header: self.zenith_header,
+            journal_hash: self.journal_hash,
         })
     }
 }
